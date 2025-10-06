@@ -30,8 +30,8 @@ class SpatialPredicate(exp.Binary):
     pass
 
 
-class Overlaps(SpatialPredicate):
-    """column OVERLAPS 'chr1:1000-2000'"""
+class Intersects(SpatialPredicate):
+    """column INTERSECTS 'chr1:1000-2000'"""
 
     pass
 
@@ -53,7 +53,7 @@ class SpatialSetPredicate(exp.Expression):
     Spatial predicates with set quantifiers.
 
     Examples:
-        column OVERLAPS ANY('chr1:1000-2000', 'chr1:5000-6000')
+        column INTERSECTS ANY('chr1:1000-2000', 'chr1:5000-6000')
         column CONTAINS ALL('chr1:1500', 'chr1:1600')
     """
 
