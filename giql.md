@@ -1,4 +1,4 @@
-# Development Plan: Giql (Genomic Interval Query Language)
+# Development Plan: GIQL (Genomic Interval Query Language)
 
 ## Phase 1: Project Setup
 
@@ -527,7 +527,7 @@ class SchemaInfo:
 
 ### 3.2 Extend Base SQL Dialect with Genomic Extensions
 - [ ] Create `src/giql/dialect.py`
-- [ ] Define `GiqlDialect` class as a generic SQL dialect
+- [ ] Define `GIQLDialect` class as a generic SQL dialect
 - [ ] Extend tokenizer with genomic keywords (OVERLAPS, CONTAINS, WITHIN, RANGES)
 - [ ] Register new token types
 
@@ -551,7 +551,7 @@ TokenType.WITHIN = "WITHIN"
 TokenType.RANGES = "RANGES"
 
 
-class GiqlDialect(Dialect):
+class GIQLDialect(Dialect):
     """Generic SQL dialect with genomic spatial operators."""
     
     class Tokenizer(Dialect.Tokenizer):
@@ -575,7 +575,7 @@ class GiqlDialect(Dialect):
 
 **Example `src/giql/dialect.py` (Parser):**
 ```python
-class GiqlDialect(Dialect):
+class GIQLDialect(Dialect):
     # ... Tokenizer from above ...
     
     class Parser(Dialect.Parser):
@@ -640,14 +640,14 @@ class GiqlDialect(Dialect):
 ```python
 import pytest
 from sqlglot import parse_one
-from giql.dialect import GiqlDialect
+from giql.dialect import GIQLDialect
 from giql.expressions import Overlaps, Contains, Within, SpatialSetPredicate
 
 
 class TestParser:
     def test_parse_simple_overlaps(self):
         sql = "SELECT * FROM variants WHERE position OVERLAPS 'chr1:1000-2000'"
-        ast = parse_one(sql, dialect=GiqlDialect)
+        ast = parse_one(sql, dialect=GIQLDialect)
         
         # Find the OVERLAPS node
         overlaps_node = None
@@ -660,7 +660,7 @@ class TestParser:
     
     def test_parse_contains(self):
         sql = "SELECT * FROM variants WHERE position CONTAINS 'chr1:1500'"
-        ast = parse_one(sql, dialect=GiqlDialect)
+        ast = parse_one(sql, dialect=GIQLDialect)
         
         contains_node = None
         for node in ast.walk():
@@ -672,7 +672,7 @@ class TestParser:
     
     def test_parse_overlaps_any(self):
         sql = "SELECT * FROM v WHERE position OVERLAPS ANY('chr1:1000-2000', 'chr1:5000-6000')"
-        ast = parse_one(sql, dialect=GiqlDialect)
+        ast = parse_one(sql, dialect=GIQLDialect)
         
         spatial_set = None
         for node in ast.walk():
@@ -692,7 +692,7 @@ class TestParser:
 ### 4.1 Create Base Generator for Standard SQL
 - [ ] Create `src/giql/generators/__init__.py`
 - [ ] Create `src/giql/generators/base.py`
-- [ ] Implement `BaseGenomicGenerator` class using only standard SQL constructs
+- [ ] Implement `BaseGIQLGenerator` class using only standard SQL constructs
 - [ ] Implement transform methods for all spatial operators (OVERLAPS, CONTAINS, WITHIN)
 - [ ] Implement transform method for SpatialSetPredicate (ANY/ALL)
 - [ ] Add helper methods for column reference extraction and condition generation
@@ -716,7 +716,7 @@ from ..range_parser import RangeParser, ParsedRange
 from ..schema import SchemaInfo
 
 
-class BaseGenomicGenerator(Dialect.Generator):
+class BaseGIQLGenerator(Dialect.Generator):
     """
     Base generator for standard SQL output.
     
@@ -890,10 +890,10 @@ class BaseGenomicGenerator(Dialect.Generator):
 DuckDB-specific generator with optimizations.
 """
 from sqlglot.dialects.duckdb import DuckDB
-from .base import BaseGenomicGenerator
+from .base import BaseGIQLGenerator
 
 
-class GenomicDuckDBGenerator(BaseGenomicGenerator, DuckDB.Generator):
+class GIQLDuckDBGenerator(BaseGIQLGenerator, DuckDB.Generator):
     """
     DuckDB-specific optimizations.
     
@@ -905,13 +905,13 @@ class GenomicDuckDBGenerator(BaseGenomicGenerator, DuckDB.Generator):
     
     def __init__(self, schema_info=None, **kwargs):
         # Initialize both parent classes
-        BaseGenomicGenerator.__init__(self, schema_info=schema_info, **kwargs)
+        BaseGIQLGenerator.__init__(self, schema_info=schema_info, **kwargs)
         DuckDB.Generator.__init__(self, **kwargs)
         
         # Merge transforms
         self.TRANSFORMS = {
             **DuckDB.Generator.TRANSFORMS,
-            **BaseGenomicGenerator(schema_info).TRANSFORMS,
+            **BaseGIQLGenerator(schema_info).TRANSFORMS,
         }
     
     # For now, use base implementation
@@ -924,11 +924,11 @@ class GenomicDuckDBGenerator(BaseGenomicGenerator, DuckDB.Generator):
 PostgreSQL-specific generator with native range type support.
 """
 from sqlglot.dialects.postgres import Postgres
-from .base import BaseGenomicGenerator
+from .base import BaseGIQLGenerator
 from ..range_parser import ParsedRange
 
 
-class GenomicPostgresGenerator(BaseGenomicGenerator, Postgres.Generator):
+class GenomicPostgresGenerator(BaseGIQLGenerator, Postgres.Generator):
     """
     PostgreSQL-specific optimizations.
     
@@ -941,7 +941,7 @@ class GenomicPostgresGenerator(BaseGenomicGenerator, Postgres.Generator):
     """
     
     def __init__(self, schema_info=None, use_range_types=False, **kwargs):
-        BaseGenomicGenerator.__init__(self, schema_info=schema_info, **kwargs)
+        BaseGIQLGenerator.__init__(self, schema_info=schema_info, **kwargs)
         Postgres.Generator.__init__(self, **kwargs)
         
         self.use_range_types = use_range_types
@@ -949,7 +949,7 @@ class GenomicPostgresGenerator(BaseGenomicGenerator, Postgres.Generator):
         # Merge transforms
         self.TRANSFORMS = {
             **Postgres.Generator.TRANSFORMS,
-            **BaseGenomicGenerator(schema_info).TRANSFORMS,
+            **BaseGIQLGenerator(schema_info).TRANSFORMS,
         }
     
     def _generate_overlaps(self, expression):
@@ -982,10 +982,10 @@ class GenomicPostgresGenerator(BaseGenomicGenerator, Postgres.Generator):
 SQLite-specific generator.
 """
 from sqlglot.dialects.sqlite import SQLite
-from .base import BaseGenomicGenerator
+from .base import BaseGIQLGenerator
 
 
-class GiqlDialectiteGenerator(BaseGenomicGenerator, SQLite.Generator):
+class GIQLDialectiteGenerator(BaseGIQLGenerator, SQLite.Generator):
     """
     SQLite-specific generator.
     
@@ -993,13 +993,13 @@ class GiqlDialectiteGenerator(BaseGenomicGenerator, SQLite.Generator):
     """
     
     def __init__(self, schema_info=None, **kwargs):
-        BaseGenomicGenerator.__init__(self, schema_info=schema_info, **kwargs)
+        BaseGIQLGenerator.__init__(self, schema_info=schema_info, **kwargs)
         SQLite.Generator.__init__(self, **kwargs)
         
         # Merge transforms
         self.TRANSFORMS = {
             **SQLite.Generator.TRANSFORMS,
-            **BaseGenomicGenerator(schema_info).TRANSFORMS,
+            **BaseGIQLGenerator(schema_info).TRANSFORMS,
         }
 ```
 
@@ -1008,16 +1008,16 @@ class GiqlDialectiteGenerator(BaseGenomicGenerator, SQLite.Generator):
 """
 SQL generators for different database dialects.
 """
-from .base import BaseGenomicGenerator
-from .duckdb import GenomicDuckDBGenerator
+from .base import BaseGIQLGenerator
+from .duckdb import GIQLDuckDBGenerator
 from .postgres import GenomicPostgresGenerator
-from .sqlite import GiqlDialectiteGenerator
+from .sqlite import GIQLDialectiteGenerator
 
 __all__ = [
-    "BaseGenomicGenerator",
-    "GenomicDuckDBGenerator",
+    "BaseGIQLGenerator",
+    "GIQLDuckDBGenerator",
     "GenomicPostgresGenerator",
-    "GiqlDialectiteGenerator",
+    "GIQLDialectiteGenerator",
 ]
 ```
 
@@ -1033,12 +1033,12 @@ __all__ = [
 ```python
 import pytest
 from sqlglot import parse_one
-from giql.dialect import GiqlDialect
+from giql.dialect import GIQLDialect
 from giql.generators import (
-    BaseGenomicGenerator,
-    GenomicDuckDBGenerator,
+    BaseGIQLGenerator,
+    GIQLDuckDBGenerator,
     GenomicPostgresGenerator,
-    GiqlDialectiteGenerator,
+    GIQLDialectiteGenerator,
 )
 from giql.schema import SchemaInfo
 
@@ -1046,9 +1046,9 @@ from giql.schema import SchemaInfo
 class TestBaseGenerator:
     def test_generate_simple_overlaps(self):
         sql = "SELECT * FROM variants WHERE position OVERLAPS 'chr1:1000-2000'"
-        ast = parse_one(sql, dialect=GiqlDialect)
+        ast = parse_one(sql, dialect=GIQLDialect)
         
-        generator = BaseGenomicGenerator()
+        generator = BaseGIQLGenerator()
         result = generator.generate(ast)
         
         assert "chromosome = 'chr1'" in result
@@ -1057,9 +1057,9 @@ class TestBaseGenerator:
     
     def test_generate_contains_point(self):
         sql = "SELECT * FROM variants WHERE position CONTAINS 'chr1:1500'"
-        ast = parse_one(sql, dialect=GiqlDialect)
+        ast = parse_one(sql, dialect=GIQLDialect)
         
-        generator = BaseGenomicGenerator()
+        generator = BaseGIQLGenerator()
         result = generator.generate(ast)
         
         assert "chromosome = 'chr1'" in result
@@ -1068,9 +1068,9 @@ class TestBaseGenerator:
     
     def test_generate_overlaps_any(self):
         sql = "SELECT * FROM v WHERE position OVERLAPS ANY('chr1:1000-2000', 'chr1:5000-6000')"
-        ast = parse_one(sql, dialect=GiqlDialect)
+        ast = parse_one(sql, dialect=GIQLDialect)
         
-        generator = BaseGenomicGenerator()
+        generator = BaseGIQLGenerator()
         result = generator.generate(ast)
         
         # Should have OR between conditions
@@ -1079,9 +1079,9 @@ class TestBaseGenerator:
     
     def test_generate_overlaps_all(self):
         sql = "SELECT * FROM v WHERE position OVERLAPS ALL('chr1:1000-2000', 'chr1:1500-1800')"
-        ast = parse_one(sql, dialect=GiqlDialect)
+        ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGenomicGenerator()
+        generator = BaseGIQLGenerator()
         result = generator.generate(ast)
 
         # Should have AND between conditions
@@ -1092,12 +1092,12 @@ class TestMultiDialect:
     def test_same_query_multiple_dialects(self):
         """Test that same query works across dialects."""
         sql = "SELECT * FROM v WHERE position OVERLAPS 'chr1:1000-2000'"
-        ast = parse_one(sql, dialect=GiqlDialect)
+        ast = parse_one(sql, dialect=GIQLDialect)
         
         # Generate for different dialects
-        duckdb_sql = GenomicDuckDBGenerator().generate(ast)
+        duckdb_sql = GIQLDuckDBGenerator().generate(ast)
         postgres_sql = GenomicPostgresGenerator().generate(ast)
-        sqlite_sql = GiqlDialectiteGenerator().generate(ast)
+        sqlite_sql = GIQLDialectiteGenerator().generate(ast)
         
         # All should contain the core logic
         for result in [duckdb_sql, postgres_sql, sqlite_sql]:
@@ -1112,7 +1112,7 @@ class TestMultiDialect:
 
 ### 5.1 Implement Multi-Dialect Query Engine
 - [ ] Create `src/giql/engine.py`
-- [ ] Implement `GiqlEngine` class with `target_dialect` parameter
+- [ ] Implement `GIQLEngine` class with `target_dialect` parameter
 - [ ] Add connection factory for different database backends (DuckDB, PostgreSQL, SQLite)
 - [ ] Implement generator selection based on target dialect
 - [ ] Implement `register_table_schema()` method
@@ -1124,39 +1124,39 @@ class TestMultiDialect:
 **Example `src/giql/engine.py`:**
 ```python
 """
-Multi-backend query engine for Giql.
+Multi-backend query engine for GIQL.
 """
 from typing import Optional, Literal, Dict, Any
 import pandas as pd
 from sqlglot import parse_one
 
-from .dialect import GiqlDialect
+from .dialect import GIQLDialect
 from .schema import SchemaInfo, TableSchema, ColumnInfo
 from .generators import (
-    BaseGenomicGenerator,
-    GenomicDuckDBGenerator,
+    BaseGIQLGenerator,
+    GIQLDuckDBGenerator,
     GenomicPostgresGenerator,
-    GiqlDialectiteGenerator,
+    GIQLDialectiteGenerator,
 )
 
 
 DialectType = Literal["duckdb", "postgres", "sqlite", "mysql", "standard"]
 
 
-class GiqlEngine:
+class GIQLEngine:
     """
-    Multi-backend Giql query engine.
+    Multi-backend GIQL query engine.
     
     Supports multiple SQL databases through transpilation.
     
     Examples:
         # DuckDB (default)
-        with GiqlEngine(target_dialect="duckdb") as engine:
+        with GIQLEngine(target_dialect="duckdb") as engine:
             engine.load_csv('variants', 'variants.csv')
             result = engine.query("SELECT * FROM variants WHERE position OVERLAPS 'chr1:1000-2000'")
         
         # PostgreSQL
-        with GiqlEngine(target_dialect="postgres", db_path="postgresql://user:pass@localhost/db") as engine:
+        with GIQLEngine(target_dialect="postgres", db_path="postgresql://user:pass@localhost/db") as engine:
             result = engine.query("SELECT * FROM variants WHERE position OVERLAPS 'chr1:1000-2000'")
     """
     
@@ -1237,14 +1237,14 @@ class GiqlEngine:
     def _get_generator(self):
         """Get generator for target dialect."""
         generators = {
-            "duckdb": GenomicDuckDBGenerator,
+            "duckdb": GIQLDuckDBGenerator,
             "postgres": GenomicPostgresGenerator,
             "postgresql": GenomicPostgresGenerator,
-            "sqlite": GiqlDialectiteGenerator,
-            "standard": BaseGenomicGenerator,
+            "sqlite": GIQLDialectiteGenerator,
+            "standard": BaseGIQLGenerator,
         }
         
-        generator_class = generators.get(self.target_dialect, BaseGenomicGenerator)
+        generator_class = generators.get(self.target_dialect, BaseGIQLGenerator)
         return generator_class(schema_info=self.schema_info, **self.dialect_options)
     
     def register_table_schema(
@@ -1321,7 +1321,7 @@ class GiqlEngine:
     
     def query(self, giql: str) -> pd.DataFrame:
         """
-        Execute a Giql query.
+        Execute a GIQL query.
         
         Args:
             giql: Query with genomic extensions
@@ -1329,9 +1329,9 @@ class GiqlEngine:
         Returns:
             Results as pandas DataFrame
         """
-        # Parse with Giql dialect
+        # Parse with GIQL dialect
         try:
-            ast = parse_one(giql, dialect=GiqlDialect)
+            ast = parse_one(giql, dialect=GIQLDialect)
         except Exception as e:
             raise ValueError(f"Parse error: {e}\nQuery: {giql}")
         
@@ -1344,7 +1344,7 @@ class GiqlEngine:
         if self.verbose:
             print(f"\n{'='*60}")
             print(f"Target Dialect: {self.target_dialect}")
-            print(f"\nOriginal Giql:")
+            print(f"\nOriginal GIQL:")
             print(giql)
             print(f"\nTranspiled SQL:")
             print(target_sql)
@@ -1357,7 +1357,7 @@ class GiqlEngine:
             raise ValueError(f"Execution error: {e}\nSQL: {target_sql}")
     
     def execute_raw(self, sql: str) -> pd.DataFrame:
-        """Execute raw SQL directly (bypass Giql parsing)."""
+        """Execute raw SQL directly (bypass GIQL parsing)."""
         return pd.read_sql(sql, self.conn)
     
     def close(self):
@@ -1390,22 +1390,22 @@ class GiqlEngine:
 **Example `src/giql/__init__.py`:**
 ```python
 """
-Giql - Genomic Interval Query Language
+GIQL - Genomic Interval Query Language
 
 A SQL dialect for genomic range queries with multi-database support.
 """
 
 __version__ = "0.1.0"
 
-from .engine import GiqlEngine, DialectType
-from .dialect import GiqlDialect
+from .engine import GIQLEngine, DialectType
+from .dialect import GIQLDialect
 from .range_parser import RangeParser, ParsedRange, CoordinateSystem, IntervalType
 from .schema import SchemaInfo, TableSchema, ColumnInfo
 
 __all__ = [
-    "GiqlEngine",
+    "GIQLEngine",
     "DialectType",
-    "GiqlDialect",
+    "GIQLDialect",
     "RangeParser",
     "ParsedRange",
     "CoordinateSystem",
@@ -1430,7 +1430,7 @@ __all__ = [
 import pytest
 import tempfile
 from pathlib import Path
-from giql import GiqlEngine
+from giql import GIQLEngine
 
 
 @pytest.fixture
@@ -1453,7 +1453,7 @@ def engine_with_data(request, sample_variants_csv):
     """Create engine with loaded data for different dialects."""
     dialect = request.param
     
-    engine = GiqlEngine(target_dialect=dialect, verbose=True)
+    engine = GIQLEngine(target_dialect=dialect, verbose=True)
     engine.load_csv('variants', sample_variants_csv)
     engine.register_table_schema(
         'variants',
@@ -1476,7 +1476,7 @@ def engine_with_data(request, sample_variants_csv):
 @pytest.fixture
 def duckdb_engine(sample_variants_csv):
     """DuckDB-specific engine."""
-    engine = GiqlEngine(target_dialect="duckdb", verbose=True)
+    engine = GIQLEngine(target_dialect="duckdb", verbose=True)
     engine.load_csv('variants', sample_variants_csv)
     engine.register_table_schema(
         'variants',
@@ -1506,11 +1506,11 @@ def duckdb_engine(sample_variants_csv):
 **Example `tests/test_integration.py`:**
 ```python
 import pytest
-from giql import GiqlEngine
+from giql import GIQLEngine
 
 
 class TestIntegration:
-    """Test Giql queries work correctly across different databases."""
+    """Test GIQL queries work correctly across different databases."""
     
     def test_simple_overlaps(self, engine_with_data):
         result = engine_with_data.query("""
@@ -1626,7 +1626,7 @@ class TestMultiDialect:
         
         results = {}
         for dialect in ["duckdb", "sqlite"]:
-            with GiqlEngine(target_dialect=dialect) as engine:
+            with GIQLEngine(target_dialect=dialect) as engine:
                 engine.load_csv('variants', sample_variants_csv)
                 engine.register_table_schema(
                     'variants',
@@ -1796,9 +1796,9 @@ uv run ruff check src/ tests/
 
 ### How It Works
 
-Giql uses [SQLGlot](https://github.com/tobymao/sqlglot) to parse queries and transpile them to target SQL dialects:
+GIQL uses [SQLGlot](https://github.com/tobymao/sqlglot) to parse queries and transpile them to target SQL dialects:
 
-1. **Parse**: Giql SQL is parsed into an Abstract Syntax Tree (AST)
+1. **Parse**: GIQL SQL is parsed into an Abstract Syntax Tree (AST)
 2. **Transform**: Genomic operators are transformed into standard SQL predicates
 3. **Generate**: Target SQL is generated for the specific database
 4. **Execute**: Query runs on the target database
@@ -1818,11 +1818,11 @@ Contributions welcome! Please see CONTRIBUTING.md for guidelines.
 
 ### Citation
 
-If you use Giql in your research, please cite:
+If you use GIQL in your research, please cite:
 
 ```bibtex
 @software{giql2024,
-  title = {Giql: Genomic Interval Query Language},
+  title = {GIQL: Genomic Interval Query Language},
   author = {Your Name},
   year = {2024},
   url = {https://github.com/yourusername/giql}
@@ -1834,7 +1834,7 @@ If you use Giql in your research, please cite:
 ```markdown
 # Database Dialect Support
 
-Giql supports multiple SQL databases through intelligent transpilation. Each database has its own strengths and Giql can leverage dialect-specific optimizations.
+GIQL supports multiple SQL databases through intelligent transpilation. Each database has its own strengths and GIQL can leverage dialect-specific optimizations.
 
 ### DuckDB (Default)
 
@@ -1849,9 +1849,9 @@ DuckDB is the default target and recommended for most genomic analysis workloads
 - In-process (no server needed)
 - ACID transactions
 
-#### Giql Features
+#### GIQL Features
 ```sql
--- Standard Giql operators work perfectly
+-- Standard GIQL operators work perfectly
 SELECT * FROM variants WHERE position OVERLAPS 'chr1:1000-2000'
 
 -- Complex analytical queries
@@ -1868,9 +1868,9 @@ uv pip install "giql[duckdb]"
 
 #### Usage
 ```python
-from giql import GiqlEngine
+from giql import GIQLEngine
 
-with GiqlEngine(target_dialect="duckdb") as engine:
+with GIQLEngine(target_dialect="duckdb") as engine:
     engine.load_csv('variants', 'variants.csv')
     result = engine.query("SELECT * FROM variants WHERE position OVERLAPS 'chr1:1000-2000'")
 ```
@@ -1888,13 +1888,13 @@ PostgreSQL is excellent for production deployments and multi-user access.
 - ACID transactions
 - Robust and battle-tested
 
-#### Giql Features
+#### GIQL Features
 
 #### Standard Mode (default)
 Uses standard SQL predicates that work on any table structure:
 
 ```python
-with GiqlEngine(target_dialect="postgres", db_path="postgresql://...") as engine:
+with GIQLEngine(target_dialect="postgres", db_path="postgresql://...") as engine:
     result = engine.query("SELECT * FROM variants WHERE position OVERLAPS 'chr1:1000-2000'")
 ```
 
@@ -1910,7 +1910,7 @@ WHERE chromosome = 'chr1'
 If your PostgreSQL table uses `int8range` columns, enable optimizations:
 
 ```python
-with GiqlEngine(
+with GIQLEngine(
     target_dialect="postgres", 
     db_path="postgresql://...",
     use_range_types=True
@@ -1965,11 +1965,11 @@ SQLite is perfect for portable, embedded use cases and smaller datasets.
 - Built into Python
 - Good for datasets < 1GB
 
-#### Giql Features
-All Giql operators work via standard SQL transpilation:
+#### GIQL Features
+All GIQL operators work via standard SQL transpilation:
 
 ```python
-with GiqlEngine(target_dialect="sqlite", db_path="data.db") as engine:
+with GIQLEngine(target_dialect="sqlite", db_path="data.db") as engine:
     engine.load_csv('variants', 'variants.csv')
     result = engine.query("SELECT * FROM variants WHERE position OVERLAPS 'chr1:1000-2000'")
 ```
@@ -2001,9 +2001,9 @@ PRAGMA journal_mode=WAL;
 
 MySQL support uses standard SQL transpilation.
 
-#### Giql Features
+#### GIQL Features
 ```python
-with GiqlEngine(
+with GIQLEngine(
     target_dialect="mysql", 
     db_path="host=localhost,user=root,password=pass,database=genomics"
 ) as engine:
@@ -2023,7 +2023,7 @@ uv pip install "giql[mysql]"
 | Production web application | PostgreSQL | Multi-user, robust |
 | Portable analysis tool | SQLite | Single file, no server |
 | Large-scale (>100GB) | PostgreSQL + range types | Native range support, GiST indexes |
-| Existing infrastructure | Match your stack | Giql adapts to your database |
+| Existing infrastructure | Match your stack | GIQL adapts to your database |
 
 ### Performance Comparison
 
@@ -2040,14 +2040,14 @@ Query: Find variants overlapping 1000 genomic regions in 10M variant dataset
 
 ### Extending to New Dialects
 
-Giql can be extended to support additional databases. See [CONTRIBUTING.md](../CONTRIBUTING.md) for details on adding new dialect generators.
+GIQL can be extended to support additional databases. See [CONTRIBUTING.md](../CONTRIBUTING.md) for details on adding new dialect generators.
 
 Example structure:
 ```python
-from giql.generators.base import BaseGenomicGenerator
+from giql.generators.base import BaseGIQLGenerator
 from sqlglot.dialects.snowflake import Snowflake
 
-class GenomicSnowflakeGenerator(BaseGenomicGenerator, Snowflake.Generator):
+class GenomicSnowflakeGenerator(BaseGIQLGenerator, Snowflake.Generator):
     """Snowflake-specific optimizations."""
     
     def _generate_overlaps(self, expression):
@@ -2065,13 +2065,13 @@ class GenomicSnowflakeGenerator(BaseGenomicGenerator, Snowflake.Generator):
 **Example `examples/basic_usage.py`:**
 ```python
 """
-Basic Giql usage examples.
+Basic GIQL usage examples.
 """
-from giql import GiqlEngine
+from giql import GIQLEngine
 
 def main():
     # Create engine with sample data
-    with GiqlEngine() as engine:
+    with GIQLEngine() as engine:
         # Load sample variants
         engine.load_csv('variants', 'data/sample_variants.csv')
         
@@ -2131,9 +2131,9 @@ if __name__ == '__main__':
 **Example `examples/multi_dialect.py`:**
 ```python
 """
-Demonstrate Giql working across multiple database backends.
+Demonstrate GIQL working across multiple database backends.
 """
-from giql import GiqlEngine
+from giql import GIQLEngine
 import tempfile
 
 def run_query_on_dialect(dialect, query):
@@ -2145,7 +2145,7 @@ def run_query_on_dialect(dialect, query):
     with tempfile.NamedTemporaryFile(suffix='.db') as tmp:
         db_path = ':memory:' if dialect == 'duckdb' else tmp.name
         
-        with GiqlEngine(target_dialect=dialect, db_path=db_path, verbose=True) as engine:
+        with GIQLEngine(target_dialect=dialect, db_path=db_path, verbose=True) as engine:
             # Load sample data
             engine.load_csv('variants', 'data/sample_variants.csv')
             

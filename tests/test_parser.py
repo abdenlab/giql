@@ -1,7 +1,7 @@
 import pytest
 from sqlglot import parse_one
 
-from giql.dialect import GiqlDialect
+from giql.dialect import GIQLDialect
 from giql.expressions import Contains
 from giql.expressions import Intersects
 from giql.expressions import SpatialSetPredicate
@@ -16,7 +16,7 @@ class TestParser:
         THEN should create an Intersects AST node
         """
         sql = "SELECT * FROM variants WHERE position INTERSECTS 'chr1:1000-2000'"
-        ast = parse_one(sql, dialect=GiqlDialect)
+        ast = parse_one(sql, dialect=GIQLDialect)
 
         # Find the INTERSECTS node
         intersects_node = None
@@ -34,7 +34,7 @@ class TestParser:
         THEN should create a Contains AST node
         """
         sql = "SELECT * FROM variants WHERE position CONTAINS 'chr1:1500'"
-        ast = parse_one(sql, dialect=GiqlDialect)
+        ast = parse_one(sql, dialect=GIQLDialect)
 
         contains_node = None
         for node in ast.walk():
@@ -51,7 +51,7 @@ class TestParser:
         THEN should create a Within AST node
         """
         sql = "SELECT * FROM variants WHERE position WITHIN 'chr1:1000-5000'"
-        ast = parse_one(sql, dialect=GiqlDialect)
+        ast = parse_one(sql, dialect=GIQLDialect)
 
         within_node = None
         for node in ast.walk():
@@ -68,7 +68,7 @@ class TestParser:
         THEN should create a SpatialSetPredicate with ANY quantifier
         """
         sql = "SELECT * FROM v WHERE position INTERSECTS ANY('chr1:1000-2000', 'chr1:5000-6000')"
-        ast = parse_one(sql, dialect=GiqlDialect)
+        ast = parse_one(sql, dialect=GIQLDialect)
 
         spatial_set = None
         for node in ast.walk():
@@ -87,7 +87,7 @@ class TestParser:
         THEN should create a SpatialSetPredicate with ALL quantifier
         """
         sql = "SELECT * FROM v WHERE position INTERSECTS ALL('chr1:1000-2000', 'chr1:1500-1800')"
-        ast = parse_one(sql, dialect=GiqlDialect)
+        ast = parse_one(sql, dialect=GIQLDialect)
 
         spatial_set = None
         for node in ast.walk():
@@ -106,7 +106,7 @@ class TestParser:
         THEN should create a SpatialSetPredicate with CONTAINS operator
         """
         sql = "SELECT * FROM v WHERE position CONTAINS ANY('chr1:1500', 'chr1:1600')"
-        ast = parse_one(sql, dialect=GiqlDialect)
+        ast = parse_one(sql, dialect=GIQLDialect)
 
         spatial_set = None
         for node in ast.walk():
