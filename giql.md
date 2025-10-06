@@ -527,7 +527,7 @@ class SchemaInfo:
 
 ### 3.2 Extend Base SQL Dialect with Genomic Extensions
 - [ ] Create `src/giql/dialect.py`
-- [ ] Define `GenomicSQL` class as a generic SQL dialect
+- [ ] Define `GiqlDialect` class as a generic SQL dialect
 - [ ] Extend tokenizer with genomic keywords (OVERLAPS, CONTAINS, WITHIN, RANGES)
 - [ ] Register new token types
 
@@ -551,7 +551,7 @@ TokenType.WITHIN = "WITHIN"
 TokenType.RANGES = "RANGES"
 
 
-class GenomicSQL(Dialect):
+class GiqlDialect(Dialect):
     """Generic SQL dialect with genomic spatial operators."""
     
     class Tokenizer(Dialect.Tokenizer):
@@ -575,7 +575,7 @@ class GenomicSQL(Dialect):
 
 **Example `src/giql/dialect.py` (Parser):**
 ```python
-class GenomicSQL(Dialect):
+class GiqlDialect(Dialect):
     # ... Tokenizer from above ...
     
     class Parser(Dialect.Parser):
@@ -640,14 +640,14 @@ class GenomicSQL(Dialect):
 ```python
 import pytest
 from sqlglot import parse_one
-from giql.dialect import GenomicSQL
+from giql.dialect import GiqlDialect
 from giql.expressions import Overlaps, Contains, Within, SpatialSetPredicate
 
 
 class TestParser:
     def test_parse_simple_overlaps(self):
         sql = "SELECT * FROM variants WHERE position OVERLAPS 'chr1:1000-2000'"
-        ast = parse_one(sql, dialect=GenomicSQL)
+        ast = parse_one(sql, dialect=GiqlDialect)
         
         # Find the OVERLAPS node
         overlaps_node = None
@@ -660,7 +660,7 @@ class TestParser:
     
     def test_parse_contains(self):
         sql = "SELECT * FROM variants WHERE position CONTAINS 'chr1:1500'"
-        ast = parse_one(sql, dialect=GenomicSQL)
+        ast = parse_one(sql, dialect=GiqlDialect)
         
         contains_node = None
         for node in ast.walk():
@@ -672,7 +672,7 @@ class TestParser:
     
     def test_parse_overlaps_any(self):
         sql = "SELECT * FROM v WHERE position OVERLAPS ANY('chr1:1000-2000', 'chr1:5000-6000')"
-        ast = parse_one(sql, dialect=GenomicSQL)
+        ast = parse_one(sql, dialect=GiqlDialect)
         
         spatial_set = None
         for node in ast.walk():
@@ -985,7 +985,7 @@ from sqlglot.dialects.sqlite import SQLite
 from .base import BaseGenomicGenerator
 
 
-class GenomicSQLiteGenerator(BaseGenomicGenerator, SQLite.Generator):
+class GiqlDialectiteGenerator(BaseGenomicGenerator, SQLite.Generator):
     """
     SQLite-specific generator.
     
@@ -1011,13 +1011,13 @@ SQL generators for different database dialects.
 from .base import BaseGenomicGenerator
 from .duckdb import GenomicDuckDBGenerator
 from .postgres import GenomicPostgresGenerator
-from .sqlite import GenomicSQLiteGenerator
+from .sqlite import GiqlDialectiteGenerator
 
 __all__ = [
     "BaseGenomicGenerator",
     "GenomicDuckDBGenerator",
     "GenomicPostgresGenerator",
-    "GenomicSQLiteGenerator",
+    "GiqlDialectiteGenerator",
 ]
 ```
 
@@ -1033,12 +1033,12 @@ __all__ = [
 ```python
 import pytest
 from sqlglot import parse_one
-from giql.dialect import GenomicSQL
+from giql.dialect import GiqlDialect
 from giql.generators import (
     BaseGenomicGenerator,
     GenomicDuckDBGenerator,
     GenomicPostgresGenerator,
-    GenomicSQLiteGenerator,
+    GiqlDialectiteGenerator,
 )
 from giql.schema import SchemaInfo
 
@@ -1046,7 +1046,7 @@ from giql.schema import SchemaInfo
 class TestBaseGenerator:
     def test_generate_simple_overlaps(self):
         sql = "SELECT * FROM variants WHERE position OVERLAPS 'chr1:1000-2000'"
-        ast = parse_one(sql, dialect=GenomicSQL)
+        ast = parse_one(sql, dialect=GiqlDialect)
         
         generator = BaseGenomicGenerator()
         result = generator.generate(ast)
@@ -1057,7 +1057,7 @@ class TestBaseGenerator:
     
     def test_generate_contains_point(self):
         sql = "SELECT * FROM variants WHERE position CONTAINS 'chr1:1500'"
-        ast = parse_one(sql, dialect=GenomicSQL)
+        ast = parse_one(sql, dialect=GiqlDialect)
         
         generator = BaseGenomicGenerator()
         result = generator.generate(ast)
@@ -1068,7 +1068,7 @@ class TestBaseGenerator:
     
     def test_generate_overlaps_any(self):
         sql = "SELECT * FROM v WHERE position OVERLAPS ANY('chr1:1000-2000', 'chr1:5000-6000')"
-        ast = parse_one(sql, dialect=GenomicSQL)
+        ast = parse_one(sql, dialect=GiqlDialect)
         
         generator = BaseGenomicGenerator()
         result = generator.generate(ast)
@@ -1079,7 +1079,7 @@ class TestBaseGenerator:
     
     def test_generate_overlaps_all(self):
         sql = "SELECT * FROM v WHERE position OVERLAPS ALL('chr1:1000-2000', 'chr1:1500-1800')"
-        ast = parse_one(sql, dialect=GenomicSQL)
+        ast = parse_one(sql, dialect=GiqlDialect)
 
         generator = BaseGenomicGenerator()
         result = generator.generate(ast)
@@ -1092,12 +1092,12 @@ class TestMultiDialect:
     def test_same_query_multiple_dialects(self):
         """Test that same query works across dialects."""
         sql = "SELECT * FROM v WHERE position OVERLAPS 'chr1:1000-2000'"
-        ast = parse_one(sql, dialect=GenomicSQL)
+        ast = parse_one(sql, dialect=GiqlDialect)
         
         # Generate for different dialects
         duckdb_sql = GenomicDuckDBGenerator().generate(ast)
         postgres_sql = GenomicPostgresGenerator().generate(ast)
-        sqlite_sql = GenomicSQLiteGenerator().generate(ast)
+        sqlite_sql = GiqlDialectiteGenerator().generate(ast)
         
         # All should contain the core logic
         for result in [duckdb_sql, postgres_sql, sqlite_sql]:
@@ -1130,13 +1130,13 @@ from typing import Optional, Literal, Dict, Any
 import pandas as pd
 from sqlglot import parse_one
 
-from .dialect import GenomicSQL
+from .dialect import GiqlDialect
 from .schema import SchemaInfo, TableSchema, ColumnInfo
 from .generators import (
     BaseGenomicGenerator,
     GenomicDuckDBGenerator,
     GenomicPostgresGenerator,
-    GenomicSQLiteGenerator,
+    GiqlDialectiteGenerator,
 )
 
 
@@ -1240,7 +1240,7 @@ class GiqlEngine:
             "duckdb": GenomicDuckDBGenerator,
             "postgres": GenomicPostgresGenerator,
             "postgresql": GenomicPostgresGenerator,
-            "sqlite": GenomicSQLiteGenerator,
+            "sqlite": GiqlDialectiteGenerator,
             "standard": BaseGenomicGenerator,
         }
         
@@ -1331,7 +1331,7 @@ class GiqlEngine:
         """
         # Parse with Giql dialect
         try:
-            ast = parse_one(giql, dialect=GenomicSQL)
+            ast = parse_one(giql, dialect=GiqlDialect)
         except Exception as e:
             raise ValueError(f"Parse error: {e}\nQuery: {giql}")
         
@@ -1398,14 +1398,14 @@ A SQL dialect for genomic range queries with multi-database support.
 __version__ = "0.1.0"
 
 from .engine import GiqlEngine, DialectType
-from .dialect import GenomicSQL
+from .dialect import GiqlDialect
 from .range_parser import RangeParser, ParsedRange, CoordinateSystem, IntervalType
 from .schema import SchemaInfo, TableSchema, ColumnInfo
 
 __all__ = [
     "GiqlEngine",
     "DialectType",
-    "GenomicSQL",
+    "GiqlDialect",
     "RangeParser",
     "ParsedRange",
     "CoordinateSystem",
