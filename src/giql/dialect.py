@@ -25,7 +25,7 @@ setattr(TokenType, CONTAINS, CONTAINS)
 setattr(TokenType, WITHIN, WITHIN)
 
 
-class GiqlDialect(Dialect):
+class GIQLDialect(Dialect):
     """Generic SQL dialect with genomic spatial operators."""
 
     class Tokenizer(Tokenizer):
