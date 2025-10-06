@@ -197,17 +197,11 @@ class SpatialSetPredicate(exp.Expression):
     }
 
 
-class InRanges(exp.Expression):
-    """
-    Syntactic sugar for OVERLAPS ANY.
-    
-    Example:
-        column IN RANGES('chr1:1000-2000', 'chr1:5000-6000')
-    """
-    arg_types = {
-        "this": True,
-        "ranges": True,
-    }
+
+**Note:** `InRanges` (syntactic sugar for `OVERLAPS ANY`) has been removed from the design.
+Standard SQL `IN` checks for equality, not overlap semantics. Having `IN RANGES` with different
+semantics than `IN` would be confusing. Users should write `OVERLAPS ANY(...)` explicitly instead.
+
 ```
 
 ### 2.2 Implement Range Parser
@@ -546,7 +540,7 @@ from sqlglot import exp
 from sqlglot.dialects import Dialect
 from sqlglot.tokens import TokenType
 from .expressions import (
-    Overlaps, Contains, Within, SpatialSetPredicate, InRanges
+    Overlaps, Contains, Within, SpatialSetPredicate
 )
 
 
@@ -577,7 +571,6 @@ class GenomicSQL(Dialect):
 - [ ] Override `_parse_comparison()` to handle spatial operators
 - [ ] Implement `_parse_spatial()` method for spatial predicates
 - [ ] Implement `_parse_spatial_predicate()` for handling ANY/ALL
-- [ ] Implement `_parse_in_ranges()` for IN RANGES syntax
 - [ ] Handle subqueries in range lists
 
 **Example `src/giql/dialect.py` (Parser):**
@@ -599,19 +592,16 @@ class GenomicSQL(Dialect):
             Handles:
                 - column OVERLAPS 'chr1:1000-2000'
                 - column OVERLAPS ANY('chr1:1000-2000', 'chr1:5000-6000')
-                - column IN RANGES('chr1:1000-2000', 'chr1:5000-6000')
             """
             this = self._parse_concat()
-            
+
             if self._match(TokenType.OVERLAPS):
                 return self._parse_spatial_predicate(this, "OVERLAPS", Overlaps)
             elif self._match(TokenType.CONTAINS):
                 return self._parse_spatial_predicate(this, "CONTAINS", Contains)
             elif self._match(TokenType.WITHIN):
                 return self._parse_spatial_predicate(this, "WITHIN", Within)
-            elif self._match(TokenType.IN) and self._match(TokenType.RANGES):
-                return self._parse_in_ranges(this)
-            
+
             return this
         
         def _parse_spatial_predicate(self, left, operator, expr_class):
@@ -638,21 +628,12 @@ class GenomicSQL(Dialect):
                 # Simple spatial predicate
                 right = self._parse_concat()
                 return self.expression(expr_class, this=left, expression=right)
-        
-        def _parse_in_ranges(self, left):
-            """Parse: column IN RANGES(...)"""
-            self._match_l_paren()
-            ranges = self._parse_csv(self._parse_expression)
-            self._match_r_paren()
-            
-            return self.expression(InRanges, this=left, ranges=ranges)
 ```
 
 ### 3.4 Create Parser Tests
 - [ ] Create `tests/test_parser.py`
 - [ ] Test parsing of simple spatial predicates
 - [ ] Test parsing of ANY/ALL quantifiers
-- [ ] Test parsing of IN RANGES
 - [ ] Test error handling for malformed queries
 
 **Example `tests/test_parser.py`:**
@@ -660,7 +641,7 @@ class GenomicSQL(Dialect):
 import pytest
 from sqlglot import parse_one
 from giql.dialect import GenomicSQL
-from giql.expressions import Overlaps, Contains, Within, SpatialSetPredicate, InRanges
+from giql.expressions import Overlaps, Contains, Within, SpatialSetPredicate
 
 
 class TestParser:
@@ -702,18 +683,6 @@ class TestParser:
         assert spatial_set is not None
         assert spatial_set.args["operator"] == "OVERLAPS"
         assert spatial_set.args["quantifier"] == "ANY"
-    
-    def test_parse_in_ranges(self):
-        sql = "SELECT * FROM variants WHERE position IN RANGES('chr1:1000-2000', 'chr2:100-200')"
-        ast = parse_one(sql, dialect=GenomicSQL)
-        
-        in_ranges = None
-        for node in ast.walk():
-            if isinstance(node, InRanges):
-                in_ranges = node
-                break
-        
-        assert in_ranges is not None
 ```
 
 ---
@@ -726,7 +695,6 @@ class TestParser:
 - [ ] Implement `BaseGenomicGenerator` class using only standard SQL constructs
 - [ ] Implement transform methods for all spatial operators (OVERLAPS, CONTAINS, WITHIN)
 - [ ] Implement transform method for SpatialSetPredicate (ANY/ALL)
-- [ ] Implement transform method for InRanges
 - [ ] Add helper methods for column reference extraction and condition generation
 
 **Example `src/giql/generators/base.py`:**
@@ -743,7 +711,7 @@ from sqlglot import exp
 from sqlglot.dialects import Dialect
 from typing import Optional
 
-from ..expressions import Overlaps, Contains, Within, SpatialSetPredicate, InRanges
+from ..expressions import Overlaps, Contains, Within, SpatialSetPredicate
 from ..range_parser import RangeParser, ParsedRange
 from ..schema import SchemaInfo
 
@@ -767,7 +735,6 @@ class BaseGenomicGenerator(Dialect.Generator):
             Contains: self._generate_contains,
             Within: self._generate_within,
             SpatialSetPredicate: self._generate_spatial_set,
-            InRanges: self._generate_in_ranges,
         }
     
     def _generate_overlaps(self, expression: Overlaps) -> str:
@@ -887,21 +854,6 @@ class BaseGenomicGenerator(Dialect.Generator):
         # Combine with AND (for ALL) or OR (for ANY)
         combinator = " OR " if quantifier.upper() == "ANY" else " AND "
         return "(" + combinator.join(conditions) + ")"
-    
-    def _generate_in_ranges(self, expression: InRanges) -> str:
-        """
-        Generate SQL for IN RANGES.
-        
-        This is syntactic sugar for OVERLAPS ANY.
-        """
-        # Convert to SpatialSetPredicate
-        spatial_set = SpatialSetPredicate(
-            this=expression.args["this"],
-            operator="OVERLAPS",
-            quantifier="ANY",
-            ranges=expression.args["ranges"],
-        )
-        return self._generate_spatial_set(spatial_set)
     
     def _get_column_refs(self, column_ref: str) -> tuple[str, str, str]:
         """
@@ -1073,7 +1025,6 @@ __all__ = [
 - [ ] Create `tests/test_generator.py`
 - [ ] Test SQL generation for each operator type
 - [ ] Test ANY/ALL generation
-- [ ] Test IN RANGES generation
 - [ ] Verify correct SQL output with proper boolean logic
 - [ ] Test edge cases (points, cross-chromosome queries)
 - [ ] Test multiple dialect outputs for same query
@@ -1129,24 +1080,12 @@ class TestBaseGenerator:
     def test_generate_overlaps_all(self):
         sql = "SELECT * FROM v WHERE position OVERLAPS ALL('chr1:1000-2000', 'chr1:1500-1800')"
         ast = parse_one(sql, dialect=GenomicSQL)
-        
+
         generator = BaseGenomicGenerator()
         result = generator.generate(ast)
-        
+
         # Should have AND between conditions
         assert " AND " in result
-    
-    def test_generate_in_ranges(self):
-        sql = "SELECT * FROM v WHERE position IN RANGES('chr1:1000-2000', 'chr2:100-200')"
-        ast = parse_one(sql, dialect=GenomicSQL)
-        
-        generator = BaseGenomicGenerator()
-        result = generator.generate(ast)
-        
-        # Should be equivalent to OVERLAPS ANY
-        assert "chromosome = 'chr1'" in result
-        assert "chromosome = 'chr2'" in result
-        assert " OR " in result
 
 
 class TestMultiDialect:
@@ -1560,7 +1499,6 @@ def duckdb_engine(sample_variants_csv):
 - [ ] Create `tests/test_integration.py`
 - [ ] Test all spatial operators with real data
 - [ ] Test ANY/ALL quantifiers
-- [ ] Test IN RANGES
 - [ ] Test complex queries (joins, aggregations, CTEs)
 - [ ] Test edge cases (empty results, cross-chromosome, etc.)
 - [ ] Test multiple database backends
@@ -1600,15 +1538,6 @@ class TestIntegration:
         
         assert len(result) == 2
         assert set(result['id']) == {1, 4}
-    
-    def test_in_ranges(self, engine_with_data):
-        result = engine_with_data.query("""
-            SELECT * FROM variants
-            WHERE position IN RANGES('chr1:1000-2000', 'chr2:5000-6000')
-        """)
-        
-        assert len(result) == 2
-        assert set(result['id']) == {1, 5}
     
     def test_contains_point(self, engine_with_data):
         result = engine_with_data.query("""
@@ -1749,10 +1678,6 @@ WHERE position CONTAINS ANY('chr1:1500', 'chr1:5500')
 WHERE position OVERLAPS ALL('chr1:1000-2000', 'chr1:1500-1800')
 ```
 
-**IN RANGES** - Syntactic sugar for `OVERLAPS ANY`
-```sql
-WHERE position IN RANGES('chr1:1000-2000', 'chr1:5000-6000')
-```
 
 #### Range Formats
 
@@ -1795,7 +1720,7 @@ WHERE position OVERLAPS ANY('chr1:1000-2000', 'chr1:5000-6000')
 ```sql
 SELECT chromosome, COUNT(*) as variant_count
 FROM variants
-WHERE position IN RANGES('chr1:0-100000', 'chr2:0-100000')
+WHERE position OVERLAPS ANY('chr1:0-100000', 'chr2:0-100000')
 GROUP BY chromosome;
 ```
 
@@ -2194,7 +2119,7 @@ def main():
         result = engine.query("""
             SELECT chromosome, COUNT(*) as variant_count
             FROM variants
-            WHERE position IN RANGES('chr1:0-100000', 'chr2:0-100000')
+            WHERE position OVERLAPS ANY('chr1:0-100000', 'chr2:0-100000')
             GROUP BY chromosome
         """)
         print(result)
@@ -2265,7 +2190,7 @@ if __name__ == '__main__':
 
 ## Success Criteria
 
-- [ ] All operators (OVERLAPS, CONTAINS, WITHIN, ANY, ALL, IN RANGES) implemented and working
+- [ ] All operators (OVERLAPS, CONTAINS, WITHIN, ANY, ALL) implemented and working
 - [ ] Multi-dialect support (DuckDB, PostgreSQL, SQLite) functional
 - [ ] Same query produces same results across all supported dialects
 - [ ] Test coverage > 90%
