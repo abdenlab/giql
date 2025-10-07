@@ -33,7 +33,6 @@ class BaseGIQLGenerator(Generator):
         super().__init__(**kwargs)
         self.schema_info = schema_info or SchemaInfo()
 
-
     def intersects_sql(self, expression: Intersects) -> str:
         """Generate standard SQL for INTERSECTS."""
         return self._generate_spatial_op(expression, "intersects")

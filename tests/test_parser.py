@@ -1,4 +1,3 @@
-import pytest
 from sqlglot import parse_one
 
 from giql.dialect import GIQLDialect
@@ -67,7 +66,10 @@ class TestParser:
         WHEN parsing the query
         THEN should create a SpatialSetPredicate with ANY quantifier
         """
-        sql = "SELECT * FROM v WHERE position INTERSECTS ANY('chr1:1000-2000', 'chr1:5000-6000')"
+        sql = (
+            "SELECT * FROM v "
+            "WHERE position INTERSECTS ANY('chr1:1000-2000', 'chr1:5000-6000')"
+        )
         ast = parse_one(sql, dialect=GIQLDialect)
 
         spatial_set = None
@@ -86,7 +88,10 @@ class TestParser:
         WHEN parsing the query
         THEN should create a SpatialSetPredicate with ALL quantifier
         """
-        sql = "SELECT * FROM v WHERE position INTERSECTS ALL('chr1:1000-2000', 'chr1:1500-1800')"
+        sql = (
+            "SELECT * FROM v "
+            "WHERE position INTERSECTS ALL('chr1:1000-2000', 'chr1:1500-1800')"
+        )
         ast = parse_one(sql, dialect=GIQLDialect)
 
         spatial_set = None
