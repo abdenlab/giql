@@ -17,6 +17,9 @@ def sample_variants_csv(tmp_path):
     3,chr1,15000,15100,T,A,25.0
     4,chr2,500,600,C,G,35.0
     5,chr2,5500,5600,A,T,20.0
+    6,chr1,25000,25100,G,A,35.0
+    7,chr2,15000,15100,T,C,28.0
+    8,chr3,1000,1100,A,G,32.0
     """
     csv_path = tmp_path / "variants.csv"
     csv_path.write_text(csv_content.strip())
