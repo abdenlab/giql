@@ -53,6 +53,7 @@ class GIQLDialect(Dialect):
                 - column INTERSECTS 'chr1:1000-2000'
                 - column INTERSECTS ANY('chr1:1000-2000', 'chr1:5000-6000')
             """
+            start_index = self._index
             this = self._parse_term()
 
             if self._match(getattr(TokenType, INTERSECTS)):
@@ -62,7 +63,9 @@ class GIQLDialect(Dialect):
             elif self._match(getattr(TokenType, WITHIN)):
                 return self._parse_spatial_predicate(this, WITHIN, Within)
 
-            return this
+            # No spatial operator found - retreat and return None to allow fallback
+            self._retreat(start_index)
+            return None
 
         def _parse_spatial_predicate(self, left, operator, expr_class):
             """Parse right side of spatial predicate."""

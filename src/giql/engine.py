@@ -54,7 +54,7 @@ class GIQLEngine:
 
     def __init__(
         self,
-        target_dialect: DialectType = "duckdb",
+        target_dialect: DialectType | str = "duckdb",
         connection=None,
         db_path: str = ":memory:",
         verbose: bool = False,
