@@ -12,13 +12,13 @@ from typing import Optional
 from sqlglot import exp
 from sqlglot.generator import Generator
 
-from ..expressions import Contains
-from ..expressions import Intersects
-from ..expressions import SpatialSetPredicate
-from ..expressions import Within
-from ..range_parser import ParsedRange
-from ..range_parser import RangeParser
-from ..schema import SchemaInfo
+from giql.expressions import Contains
+from giql.expressions import Intersects
+from giql.expressions import SpatialSetPredicate
+from giql.expressions import Within
+from giql.range_parser import ParsedRange
+from giql.range_parser import RangeParser
+from giql.schema import SchemaInfo
 
 
 class BaseGIQLGenerator(Generator):
