@@ -1,5 +1,7 @@
-"""
-Multi-backend query engine for GIQL.
+"""Multi-backend query engine for GIQL.
+
+This module provides the main query engine that supports multiple SQL databases
+through transpilation of GIQL syntax to standard SQL.
 """
 
 from typing import Literal
@@ -18,34 +20,41 @@ DialectType = Literal["duckdb", "sqlite"]
 
 
 class GIQLEngine:
-    """
-    Multi-backend GIQL query engine.
+    """Multi-backend GIQL query engine.
 
-    Supports multiple SQL databases through transpilation.
+    Supports multiple SQL databases through transpilation of GIQL syntax
+    to standard SQL. Can work with DuckDB, SQLite, and other backends.
 
-    Examples:
-        # Query a pandas DataFrame with DuckDB
+    Examples
+    --------
+    Query a pandas DataFrame with DuckDB::
+
         import pandas as pd
-        df = pd.DataFrame({
-            'id': [1, 2, 3],
-            'chromosome': ['chr1', 'chr1', 'chr2'],
-            'start_pos': [1500, 10500, 500],
-            'end_pos': [1600, 10600, 600]
-        })
+
+        df = pd.DataFrame(
+            {
+                "id": [1, 2, 3],
+                "chromosome": ["chr1", "chr1", "chr2"],
+                "start_pos": [1500, 10500, 500],
+                "end_pos": [1600, 10600, 600],
+            }
+        )
         with GIQLEngine(target_dialect="duckdb") as engine:
-            engine.conn.register('variants', df)
+            engine.conn.register("variants", df)
             result = engine.query(
                 "SELECT * FROM variants WHERE position INTERSECTS 'chr1:1000-2000'"
             )
 
-        # Load from CSV
+    Load from CSV::
+
         with GIQLEngine(target_dialect="duckdb") as engine:
-            engine.load_csv('variants', 'variants.csv')
+            engine.load_csv("variants", "variants.csv")
             result = engine.query(
                 "SELECT * FROM variants WHERE position INTERSECTS 'chr1:1000-2000'"
             )
 
-        # SQLite
+    Using SQLite backend::
+
         with GIQLEngine(target_dialect="sqlite", db_path="data.db") as engine:
             result = engine.query(
                 "SELECT * FROM variants WHERE position INTERSECTS 'chr1:1000-2000'"
@@ -60,15 +69,13 @@ class GIQLEngine:
         verbose: bool = False,
         **dialect_options,
     ):
-        """
-        Initialize engine.
+        """Initialize engine.
 
-        Args:
-            target_dialect: Target SQL dialect ('duckdb', 'sqlite', 'standard')
-            connection: Existing database connection (optional)
-            db_path: Database path or connection string
-            verbose: Print transpiled SQL
-            **dialect_options: Additional options for specific dialects
+        :param target_dialect: Target SQL dialect ('duckdb', 'sqlite', 'standard')
+        :param connection: Existing database connection (optional)
+        :param db_path: Database path or connection string
+        :param verbose: Print transpiled SQL
+        :param dialect_options: Additional options for specific dialects
         """
         self.target_dialect = target_dialect
         self.verbose = verbose
@@ -87,7 +94,13 @@ class GIQLEngine:
         self.generator = self._get_generator()
 
     def _create_connection(self, db_path: str):
-        """Create database connection based on target dialect."""
+        """Create database connection based on target dialect.
+
+        :param db_path: Path to database file or connection string
+        :return: Connection object for the specified database backend
+        :raises ImportError: If the required database driver is not installed
+        :raises ValueError: If the dialect is not supported
+        """
         if self.target_dialect == "duckdb":
             try:
                 import duckdb
@@ -107,7 +120,10 @@ class GIQLEngine:
             )
 
     def _get_generator(self):
-        """Get generator for target dialect."""
+        """Get generator for target dialect.
+
+        :return: SQL generator instance configured for the target dialect
+        """
         generators = {
             "duckdb": GIQLDuckDBGenerator,
             "sqlite": BaseGIQLGenerator,
@@ -127,17 +143,18 @@ class GIQLEngine:
         end_col: str = "end_pos",
         strand_col: str | None = None,
     ):
-        """
-        Register schema for a table.
+        """Register schema for a table.
 
-        Args:
-            table_name: Table name
-            columns: Dict of column_name -> type
-            genomic_column: Logical name for genomic position
-            chrom_col: Physical chromosome column
-            start_col: Physical start position column
-            end_col: Physical end position column
-            strand_col: Physical strand column (optional)
+        This method tells the engine how genomic ranges are stored in the table,
+        mapping logical genomic column names to physical column names.
+
+        :param table_name: Table name
+        :param columns: Dict of column_name -> type
+        :param genomic_column: Logical name for genomic position
+        :param chrom_col: Physical chromosome column
+        :param start_col: Physical start position column
+        :param end_col: Physical end position column
+        :param strand_col: Physical strand column (optional)
         """
         column_infos = {}
 
@@ -161,7 +178,11 @@ class GIQLEngine:
         self.schema_info.register_table(table_name, table_schema)
 
     def load_csv(self, table_name: str, file_path: str):
-        """Load CSV into database."""
+        """Load CSV file into database.
+
+        :param table_name: Name to assign to the table
+        :param file_path: Path to the CSV file
+        """
         if self.target_dialect == "duckdb":
             self.conn.execute(
                 f"CREATE TABLE {table_name} "
@@ -176,7 +197,11 @@ class GIQLEngine:
             print(f"Loaded {table_name} from {file_path}")
 
     def load_parquet(self, table_name: str, file_path: str):
-        """Load Parquet file into database."""
+        """Load Parquet file into database.
+
+        :param table_name: Name to assign to the table
+        :param file_path: Path to the Parquet file
+        """
         if self.target_dialect == "duckdb":
             self.conn.execute(
                 f"CREATE TABLE {table_name} AS SELECT * FROM read_parquet('{file_path}')"
@@ -189,14 +214,14 @@ class GIQLEngine:
             print(f"Loaded {table_name} from {file_path}")
 
     def query(self, giql: str) -> pd.DataFrame:
-        """
-        Execute a GIQL query.
+        """Execute a GIQL query.
 
-        Args:
-            giql: Query with genomic extensions
+        Parses the GIQL syntax, transpiles to target SQL dialect,
+        and executes the query.
 
-        Returns:
-            Results as pandas DataFrame
+        :param giql: Query string with GIQL genomic extensions
+        :return: Query results as a pandas DataFrame
+        :raises ValueError: If the query cannot be parsed, transpiled, or executed
         """
         # Parse with GIQL dialect
         try:
@@ -226,11 +251,19 @@ class GIQLEngine:
             raise ValueError(f"Execution error: {e}\nSQL: {target_sql}")
 
     def execute_raw(self, sql: str) -> pd.DataFrame:
-        """Execute raw SQL directly (bypass GIQL parsing)."""
+        """Execute raw SQL directly, bypassing GIQL parsing.
+
+        :param sql: Raw SQL query string
+        :return: Query results as a pandas DataFrame
+        """
         return pd.read_sql(sql, self.conn)
 
     def close(self):
-        """Close database connection."""
+        """Close database connection.
+
+        Only closes connections created by the engine. If an external
+        connection was provided during initialization, it is not closed.
+        """
         if self.owns_connection and self.conn:
             self.conn.close()
 
