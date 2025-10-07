@@ -7,12 +7,12 @@ from typing import Literal
 import pandas as pd
 from sqlglot import parse_one
 
-from .dialect import GIQLDialect
-from .generators import BaseGIQLGenerator
-from .generators import GIQLDuckDBGenerator
-from .schema import ColumnInfo
-from .schema import SchemaInfo
-from .schema import TableSchema
+from giql.dialect import GIQLDialect
+from giql.generators import BaseGIQLGenerator
+from giql.generators import GIQLDuckDBGenerator
+from giql.schema import ColumnInfo
+from giql.schema import SchemaInfo
+from giql.schema import TableSchema
 
 DialectType = Literal["duckdb", "sqlite"]
 

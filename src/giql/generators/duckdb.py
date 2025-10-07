@@ -4,7 +4,7 @@ DuckDB-specific generator with optimizations.
 
 from sqlglot.dialects.duckdb import DuckDB
 
-from .base import BaseGIQLGenerator
+from giql.generators.base import BaseGIQLGenerator
 
 
 class GIQLDuckDBGenerator(BaseGIQLGenerator, DuckDB.Generator):

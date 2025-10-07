@@ -9,10 +9,10 @@ from sqlglot.parser import Parser
 from sqlglot.tokens import Tokenizer
 from sqlglot.tokens import TokenType
 
-from .expressions import Contains
-from .expressions import Intersects
-from .expressions import SpatialSetPredicate
-from .expressions import Within
+from giql.expressions import Contains
+from giql.expressions import Intersects
+from giql.expressions import SpatialSetPredicate
+from giql.expressions import Within
 
 # Token type constants
 INTERSECTS: Final = "INTERSECTS"
