@@ -31,7 +31,11 @@ class GIQLDialect(Dialect):
     """Generic SQL dialect with genomic spatial operators."""
 
     class Tokenizer(Tokenizer):
-        """Tokenizer with genomic keywords."""
+        """Tokenizer with genomic keywords.
+
+        Extends the base tokenizer to recognize GIQL spatial operators
+        (INTERSECTS, CONTAINS, WITHIN).
+        """
 
         KEYWORDS = {
             **Tokenizer.KEYWORDS,
