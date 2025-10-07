@@ -1,5 +1,4 @@
-"""
-Parse genomic range strings into structured data.
+"""Parse genomic range strings into structured data.
 
 Supported formats:
     - Simple: 'chr1:1000-2000'
@@ -43,11 +42,12 @@ class ParsedRange:
     strand: Optional[Literal["+", "-"]] = None
 
     def to_zero_based_half_open(self) -> ParsedRange:
-        """
-        Convert to canonical 0-based half-open representation.
+        """Convert to canonical 0-based half-open representation.
 
         Conversions:
             - Closed [1000, 1999] -> Half-open [1000, 2000)
+
+        :return: ParsedRange in 0-based half-open format
         """
         if self.interval_type == IntervalType.HALF_OPEN:
             return self
@@ -62,7 +62,10 @@ class ParsedRange:
         )
 
     def length(self) -> int:
-        """Calculate range length."""
+        """Calculate range length.
+
+        :return: Length of the genomic range in base pairs
+        """
         if self.interval_type == IntervalType.HALF_OPEN:
             return self.end - self.start
         else:
@@ -87,17 +90,11 @@ class RangeParser:
 
     @classmethod
     def parse(cls, range_str: str) -> ParsedRange:
-        """
-        Parse a genomic range string.
+        """Parse a genomic range string.
 
-        Args:
-            range_str: String like 'chr1:1000-2000'
-
-        Returns:
-            ParsedRange object
-
-        Raises:
-            ValueError: If the string cannot be parsed
+        :param range_str: String like 'chr1:1000-2000'
+        :return: ParsedRange object
+        :raises ValueError: If the string cannot be parsed
         """
         range_str = range_str.strip().strip("'\"")
 
@@ -120,7 +117,11 @@ class RangeParser:
 
     @classmethod
     def _parse_point(cls, match) -> ParsedRange:
-        """Parse point format: chr1:1500 -> [1500, 1501)"""
+        """Parse point format: chr1:1500 -> [1500, 1501).
+
+        :param match: Regex match object
+        :return: ParsedRange representing a single base position
+        """
         chromosome = match.group("chr")
         position = int(match.group("pos"))
 
@@ -134,7 +135,12 @@ class RangeParser:
 
     @classmethod
     def _parse_explicit(cls, match) -> ParsedRange:
-        """Parse explicit format: chr1:[1000,2000)"""
+        """Parse explicit format: chr1:[1000,2000).
+
+        :param match: Regex match object
+        :return: ParsedRange with explicit interval type
+        :raises ValueError: If start >= end
+        """
         chromosome = match.group("chr")
         start = int(match.group("start"))
         end = int(match.group("end"))
@@ -156,7 +162,12 @@ class RangeParser:
 
     @classmethod
     def _parse_simple(cls, match) -> ParsedRange:
-        """Parse simple format: chr1:1000-2000"""
+        """Parse simple format: chr1:1000-2000.
+
+        :param match: Regex match object
+        :return: ParsedRange in half-open format
+        :raises ValueError: If start >= end
+        """
         chromosome = match.group("chr")
         start = int(match.group("start"))
         end = int(match.group("end"))

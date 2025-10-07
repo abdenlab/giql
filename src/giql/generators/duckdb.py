@@ -1,5 +1,6 @@
-"""
-DuckDB-specific generator with optimizations.
+"""DuckDB-specific generator with optimizations.
+
+This module provides DuckDB-specific optimizations for GIQL query generation.
 """
 
 from sqlglot.dialects.duckdb import DuckDB
@@ -8,8 +9,7 @@ from giql.generators.base import BaseGIQLGenerator
 
 
 class GIQLDuckDBGenerator(BaseGIQLGenerator, DuckDB.Generator):
-    """
-    DuckDB-specific optimizations.
+    """DuckDB-specific optimizations.
 
     Can leverage:
     - Efficient list operations

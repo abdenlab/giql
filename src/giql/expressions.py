@@ -1,13 +1,13 @@
-"""
-Custom AST expression nodes for genomic operations.
+"""Custom AST expression nodes for genomic operations.
+
+This module defines custom SQLGlot expression nodes for GIQL spatial operators.
 """
 
 from sqlglot import exp
 
 
 class GenomicRange(exp.Expression):
-    """
-    Represents a parsed genomic range.
+    """Represents a parsed genomic range.
 
     Examples:
         'chr1:1000-2000'
@@ -31,26 +31,34 @@ class SpatialPredicate(exp.Binary):
 
 
 class Intersects(SpatialPredicate):
-    """column INTERSECTS 'chr1:1000-2000'"""
+    """INTERSECTS spatial predicate.
+
+    Example: column INTERSECTS 'chr1:1000-2000'
+    """
 
     pass
 
 
 class Contains(SpatialPredicate):
-    """column CONTAINS 'chr1:1500'"""
+    """CONTAINS spatial predicate.
+
+    Example: column CONTAINS 'chr1:1500'
+    """
 
     pass
 
 
 class Within(SpatialPredicate):
-    """column WITHIN 'chr1:1000-5000'"""
+    """WITHIN spatial predicate.
+
+    Example: column WITHIN 'chr1:1000-5000'
+    """
 
     pass
 
 
 class SpatialSetPredicate(exp.Expression):
-    """
-    Spatial predicates with set quantifiers.
+    """Spatial predicates with set quantifiers.
 
     Examples:
         column INTERSECTS ANY('chr1:1000-2000', 'chr1:5000-6000')
