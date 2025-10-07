@@ -60,13 +60,20 @@ class BaseGIQLGenerator(Generator):
         left = self.sql(expression, "this")
         right_raw = self.sql(expression, "expression")
 
-        # Parse the genomic range
-        try:
-            range_str = right_raw.strip("'\"")
-            parsed_range = RangeParser.parse(range_str).to_zero_based_half_open()
-            return self._generate_range_predicate(left, parsed_range, op_type)
-        except Exception as e:
-            raise ValueError(f"Could not parse genomic range: {right_raw}. Error: {e}")
+        # Check if right side is a column reference or a literal range string
+        if "." in right_raw and not right_raw.startswith("'"):
+            # Column-to-column join (e.g., a.position INTERSECTS b.position)
+            return self._generate_column_join(left, right_raw, op_type)
+        else:
+            # Literal range string (e.g., position INTERSECTS 'chr1:1000-2000')
+            try:
+                range_str = right_raw.strip("'\"")
+                parsed_range = RangeParser.parse(range_str).to_zero_based_half_open()
+                return self._generate_range_predicate(left, parsed_range, op_type)
+            except Exception as e:
+                raise ValueError(
+                    f"Could not parse genomic range: {right_raw}. Error: {e}"
+                )
 
     def _generate_range_predicate(
         self,
@@ -119,6 +126,45 @@ class BaseGIQLGenerator(Generator):
                 f"({chrom_col} = '{chrom}' "
                 f"AND {start_col} >= {start} "
                 f"AND {end_col} <= {end})"
+            )
+
+        raise ValueError(f"Unknown operation: {op_type}")
+
+    def _generate_column_join(self, left_col: str, right_col: str, op_type: str) -> str:
+        """
+        Generate SQL for column-to-column spatial joins.
+
+        Args:
+            left_col: Left column reference (e.g., 'a.position')
+            right_col: Right column reference (e.g., 'b.position')
+            op_type: 'intersects', 'contains', or 'within'
+        """
+        # Get column references for both sides
+        l_chrom, l_start, l_end = self._get_column_refs(left_col)
+        r_chrom, r_start, r_end = self._get_column_refs(right_col)
+
+        if op_type == "intersects":
+            # Ranges overlap if: chrom1 = chrom2 AND start1 < end2 AND end1 > start2
+            return (
+                f"({l_chrom} = {r_chrom} "
+                f"AND {l_start} < {r_end} "
+                f"AND {l_end} > {r_start})"
+            )
+
+        elif op_type == "contains":
+            # Left contains right: chrom1 = chrom2 AND start1 <= start2 AND end1 >= end2
+            return (
+                f"({l_chrom} = {r_chrom} "
+                f"AND {l_start} <= {r_start} "
+                f"AND {l_end} >= {r_end})"
+            )
+
+        elif op_type == "within":
+            # Left within right: chrom1 = chrom2 AND start1 >= start2 AND end1 <= end2
+            return (
+                f"({l_chrom} = {r_chrom} "
+                f"AND {l_start} >= {r_start} "
+                f"AND {l_end} <= {r_end})"
             )
 
         raise ValueError(f"Unknown operation: {op_type}")

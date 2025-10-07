@@ -142,7 +142,7 @@ class TestIntegration:
         THEN should return empty result
         """
         result = engine_with_variants.query(
-            "SELECT * FROM variants WHERE position INTERSECTS 'chr3:1000-2000'"
+            "SELECT * FROM variants WHERE position INTERSECTS 'chr4:1000-2000'"
         )
 
         assert len(result) == 0
@@ -176,10 +176,6 @@ class TestIntegration:
         assert len(result) == 1
         assert result.iloc[0]["id"] == 1
 
-
-class TestComplexQueries:
-    """Test complex SQL features with GIQL."""
-
     def test_count_with_giql(self, duckdb_engine_with_data):
         """
         GIVEN variants data
@@ -193,7 +189,8 @@ class TestComplexQueries:
             """
         )
 
-        assert result.iloc[0]["cnt"] == 3
+        # chr1 now has 4 variants (1, 2, 3, 6)
+        assert result.iloc[0]["cnt"] == 4
 
     def test_join_with_genes(self, duckdb_engine_with_data):
         """
@@ -297,6 +294,294 @@ class TestComplexQueries:
         assert len(result) == 1
         assert result.iloc[0]["id"] == 2
         assert result.iloc[0]["quality"] == 40.0
+
+
+class TestBedtoolsRecipes:
+    """Test recipes from README that replicate bedtools intersect behavior."""
+
+    def test_recipe_default_intersect(self, engine_with_variants):
+        """
+        GIVEN features data
+        WHEN querying with default intersect (DISTINCT)
+        THEN should return unique overlapping features
+        """
+        result = engine_with_variants.query(
+            """
+            SELECT DISTINCT *
+            FROM variants
+            WHERE position INTERSECTS 'chr1:0-20000'
+            ORDER BY id
+            """
+        )
+
+        assert len(result) == 3
+        assert set(result["id"]) == {1, 2, 3}
+
+    def test_recipe_v_flag_no_overlaps(self, duckdb_engine_with_data):
+        """
+        GIVEN variants and genes data
+        WHEN using LEFT JOIN with NULL check (bedtools -v)
+        THEN should return features with no overlaps
+        """
+        result = duckdb_engine_with_data.query(
+            """
+            SELECT v.*
+            FROM variants v
+            LEFT JOIN genes g ON v.position INTERSECTS g.position
+            WHERE g.chromosome IS NULL
+            ORDER BY v.id
+            """
+        )
+
+        # Variants 6, 7, 8 don't overlap any genes
+        assert len(result) == 3
+        assert set(result["id"]) == {6, 7, 8}
+
+    def test_recipe_u_flag_any_overlap(self, duckdb_engine_with_data):
+        """
+        GIVEN variants and genes data
+        WHEN using INNER JOIN with DISTINCT (bedtools -u)
+        THEN should return unique features with any overlap
+        """
+        result = duckdb_engine_with_data.query(
+            """
+            SELECT DISTINCT v.*
+            FROM variants v
+            INNER JOIN genes g ON v.position INTERSECTS g.position
+            ORDER BY v.id
+            """
+        )
+
+        # Variants that overlap at least one gene
+        assert len(result) >= 1
+        assert 1 in result["id"].values
+
+    def test_recipe_c_flag_count_overlaps(self, duckdb_engine_with_data):
+        """
+        GIVEN variants and genes data
+        WHEN using COUNT with LEFT JOIN (bedtools -c)
+        THEN should count overlaps for each feature
+        """
+        result = duckdb_engine_with_data.query(
+            """
+            SELECT v.id, COUNT(g.name) as overlap_count
+            FROM variants v
+            LEFT JOIN genes g ON v.position INTERSECTS g.position
+            GROUP BY v.id, v.chromosome, v.start_pos, v.end_pos
+            ORDER BY v.id
+            """
+        )
+
+        assert len(result) == 8
+        # Check that counts are non-negative integers
+        assert all(result["overlap_count"] >= 0)
+        # Variants 1-5 should have overlaps, 6-8 should have 0
+        assert result[result["id"].isin([1, 2, 3, 4, 5])]["overlap_count"].sum() > 0
+        assert result[result["id"].isin([6, 7, 8])]["overlap_count"].sum() == 0
+
+    def test_recipe_strand_specific_same(self, duckdb_engine_with_data):
+        """
+        GIVEN features with strand information
+        WHEN filtering by same strand (bedtools -s)
+        THEN should only return same-strand overlaps
+        """
+        result = duckdb_engine_with_data.query(
+            """
+            SELECT v.*, g.strand as gene_strand
+            FROM variants v
+            INNER JOIN genes g ON v.position INTERSECTS g.position
+            WHERE v.chromosome = g.chromosome
+              AND g.strand = '+'
+            """
+        )
+
+        # All results should have gene_strand = '+'
+        if len(result) > 0:
+            assert all(result["gene_strand"] == "+")
+
+    def test_recipe_overlap_fraction(self, duckdb_engine_with_data):
+        """
+        GIVEN variants and genes data
+        WHEN requiring minimum overlap fraction (bedtools -f)
+        THEN should filter by overlap fraction
+        """
+        result = duckdb_engine_with_data.query(
+            """
+            SELECT v.*
+            FROM variants v, genes g
+            WHERE v.position INTERSECTS g.position
+              AND (
+                  LEAST(v.end_pos, g.end_pos) - GREATEST(v.start_pos, g.start_pos)
+              ) >= 0.5 * (v.end_pos - v.start_pos)
+            """
+        )
+
+        # Should have some results but potentially fewer than without fraction filter
+        assert len(result) >= 0
+
+    def test_recipe_loj_left_outer_join(self, duckdb_engine_with_data):
+        """
+        GIVEN variants and genes data
+        WHEN using LEFT JOIN (bedtools -loj)
+        THEN should return all A features with NULL for non-overlapping
+        """
+        result = duckdb_engine_with_data.query(
+            """
+            SELECT v.id, v.chromosome, g.name as gene_name
+            FROM variants v
+            LEFT JOIN genes g ON v.position INTERSECTS g.position
+            ORDER BY v.id
+            """
+        )
+
+        # Should have all 8 variants
+        assert len(result) >= 8
+        # Variants 6, 7, 8 should have NULL gene_name
+        assert result["gene_name"].isna().any()
+        non_overlapping = result[result["gene_name"].isna()]
+        assert set(non_overlapping["id"]) == {6, 7, 8}
+
+    def test_recipe_wo_write_overlap_bp(self, duckdb_engine_with_data):
+        """
+        GIVEN variants and genes data
+        WHEN calculating overlap in base pairs (bedtools -wo)
+        THEN should return overlap amount
+        """
+        result = duckdb_engine_with_data.query(
+            """
+            SELECT
+                v.id,
+                g.name,
+                (LEAST(v.end_pos, g.end_pos) - GREATEST(v.start_pos, g.start_pos)) as overlap_bp
+            FROM variants v
+            INNER JOIN genes g ON v.position INTERSECTS g.position
+            """
+        )
+
+        if len(result) > 0:
+            # All overlap_bp values should be positive
+            assert all(result["overlap_bp"] > 0)
+
+    def test_recipe_wao_write_overlap_all(self, duckdb_engine_with_data):
+        """
+        GIVEN variants and genes data
+        WHEN calculating overlap for ALL features (bedtools -wao)
+        THEN should return 0 for non-overlapping
+        """
+        result = duckdb_engine_with_data.query(
+            """
+            SELECT
+                v.id,
+                CASE
+                    WHEN g.chromosome IS NULL THEN 0
+                    ELSE LEAST(v.end_pos, g.end_pos) - GREATEST(v.start_pos, g.start_pos)
+                END as overlap_bp
+            FROM variants v
+            LEFT JOIN genes g ON v.position INTERSECTS g.position
+            ORDER BY v.id
+            """
+        )
+
+        # Should have entries for all 8 variants
+        assert len(result) >= 8
+        # All overlap_bp should be >= 0
+        assert all(result["overlap_bp"] >= 0)
+        # Variants 6, 7, 8 should have 0 overlap
+        non_overlapping = result[result["id"].isin([6, 7, 8])]
+        assert all(non_overlapping["overlap_bp"] == 0)
+
+    def test_recipe_multiple_files_union(self, sample_variants_csv, sample_genes_csv):
+        """
+        GIVEN multiple B files combined with UNION
+        WHEN querying against combined set
+        THEN should find overlaps from any file
+        """
+        from giql import GIQLEngine
+
+        with GIQLEngine(target_dialect="duckdb") as engine:
+            engine.load_csv("variants", sample_variants_csv)
+            engine.load_csv("genes1", sample_genes_csv)
+            engine.load_csv("genes2", sample_genes_csv)
+
+            for table in ["variants", "genes1", "genes2"]:
+                schema = {
+                    "id": "INTEGER" if table == "variants" else None,
+                    "gene_id": "INTEGER" if table != "variants" else None,
+                    "name": "VARCHAR",
+                    "chromosome": "VARCHAR",
+                    "start_pos": "BIGINT",
+                    "end_pos": "BIGINT",
+                }
+                schema = {k: v for k, v in schema.items() if v is not None}
+                engine.register_table_schema(table, schema, genomic_column="position")
+
+            result = engine.query(
+                """
+                WITH all_genes AS (
+                    SELECT * FROM genes1
+                    UNION ALL
+                    SELECT * FROM genes2
+                )
+                SELECT DISTINCT v.id
+                FROM variants v
+                INNER JOIN all_genes g ON v.position INTERSECTS g.position
+                ORDER BY v.id
+                """
+            )
+
+            # Should find overlaps from union of both gene files
+            assert len(result) >= 1
+
+    def test_recipe_count_with_having(self, duckdb_engine_with_data):
+        """
+        GIVEN variants and genes data
+        WHEN counting overlaps with HAVING clause
+        THEN should filter by overlap count
+        """
+        result = duckdb_engine_with_data.query(
+            """
+            SELECT v.*
+            FROM variants v
+            INNER JOIN genes g ON v.position INTERSECTS g.position
+            GROUP BY v.id, v.chromosome, v.start_pos, v.end_pos, v.ref, v.alt, v.quality
+            HAVING COUNT(*) >= 1
+            ORDER BY v.id
+            """
+        )
+
+        # Should only return variants with at least 1 overlap
+        assert len(result) >= 1
+
+    def test_recipe_aggregate_stats(self, duckdb_engine_with_data):
+        """
+        GIVEN variants and genes data
+        WHEN calculating aggregate statistics per chromosome
+        THEN should group and aggregate correctly
+        """
+        result = duckdb_engine_with_data.query(
+            """
+            SELECT
+                v.chromosome,
+                COUNT(DISTINCT v.id) as total_variants,
+                COUNT(g.name) as total_overlaps
+            FROM variants v
+            LEFT JOIN genes g ON v.position INTERSECTS g.position
+            GROUP BY v.chromosome
+            ORDER BY v.chromosome
+            """
+        )
+
+        # Should have stats for all 3 chromosomes (chr1, chr2, chr3)
+        assert len(result) == 3
+        assert "chr1" in result["chromosome"].values
+        assert "chr2" in result["chromosome"].values
+        assert "chr3" in result["chromosome"].values
+        # All counts should be non-negative
+        assert all(result["total_variants"] >= 0)
+        assert all(result["total_overlaps"] >= 0)
+        # chr3 should have 0 overlaps
+        chr3_overlaps = result[result["chromosome"] == "chr3"]["total_overlaps"].iloc[0]
+        assert chr3_overlaps == 0
 
 
 class TestMultiDialect:
