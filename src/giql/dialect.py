@@ -12,6 +12,8 @@ from sqlglot.tokens import Tokenizer
 from sqlglot.tokens import TokenType
 
 from giql.expressions import Contains
+from giql.expressions import GIQLCluster
+from giql.expressions import GIQLMerge
 from giql.expressions import Intersects
 from giql.expressions import SpatialSetPredicate
 from giql.expressions import Within
@@ -47,10 +49,17 @@ class GIQLDialect(Dialect):
     class Parser(Parser):
         """Parser with genomic predicate support."""
 
+        FUNCTIONS = {
+            **Parser.FUNCTIONS,
+            "CLUSTER": GIQLCluster.from_arg_list,
+            "MERGE": GIQLMerge.from_arg_list,
+        }
+
         def _parse_comparison(self):
             """Override to handle spatial operators.
 
-            :return: Parsed spatial expression or falls back to parent's comparison parsing
+            :return:
+                Parsed spatial expression or falls back to parent's comparison parsing
             """
             return self._parse_spatial() or super()._parse_comparison()
 
@@ -63,7 +72,8 @@ class GIQLDialect(Dialect):
                 - column CONTAINS 'chr1:1500'
                 - column WITHIN 'chr1:1000-5000'
 
-            :return: Parsed spatial expression or None if no spatial operator found
+            :return:
+                Parsed spatial expression or None if no spatial operator found
             """
             start_index = self._index
             this = self._parse_term()
@@ -82,10 +92,14 @@ class GIQLDialect(Dialect):
         def _parse_spatial_predicate(self, left, operator, expr_class):
             """Parse right side of spatial predicate.
 
-            :param left: Left side expression (column reference)
-            :param operator: Spatial operator token (INTERSECTS, CONTAINS, WITHIN)
-            :param expr_class: Expression class to instantiate (Intersects, Contains, Within)
-            :return: Parsed spatial predicate expression
+            :param left:
+                Left side expression (column reference)
+            :param operator:
+                Spatial operator token (INTERSECTS, CONTAINS, WITHIN)
+            :param expr_class:
+                Expression class to instantiate (Intersects, Contains, Within)
+            :return:
+                Parsed spatial predicate expression
             """
             # Check for ANY/ALL quantifier
             if self._match_set((TokenType.ANY, TokenType.ALL, TokenType.SOME)):

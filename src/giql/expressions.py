@@ -71,3 +71,101 @@ class SpatialSetPredicate(exp.Expression):
         "quantifier": True,
         "ranges": True,
     }
+
+
+class GIQLCluster(exp.Func):
+    """CLUSTER window function for assigning cluster IDs to overlapping intervals.
+
+    Implicitly partitions by chromosome and orders by start position.
+
+    Examples:
+        CLUSTER(position)
+        CLUSTER(position, 1000)
+        CLUSTER(position, stranded=true)
+        CLUSTER(position, 1000, stranded=true)
+    """
+
+    arg_types = {
+        "this": True,  # genomic column
+        "distance": False,  # maximum distance between features
+        "stranded": False,  # strand-specific clustering
+    }
+
+    @classmethod
+    def from_arg_list(cls, args):
+        """Parse argument list, handling named parameters.
+
+        :param args:
+            List of arguments from parser
+        :return:
+            GIQLCluster instance with properly mapped arguments
+        """
+        kwargs = {}
+        positional_args = []
+
+        # Separate named (EQ) and positional arguments
+        for arg in args:
+            if isinstance(arg, exp.EQ):
+                # Named parameter: extract name and value
+                param_name = (
+                    arg.this.name if isinstance(arg.this, exp.Column) else str(arg.this)
+                )
+                kwargs[param_name.lower()] = arg.expression
+            else:
+                positional_args.append(arg)
+
+        # Map positional arguments
+        if len(positional_args) > 0:
+            kwargs["this"] = positional_args[0]
+        if len(positional_args) > 1:
+            kwargs["distance"] = positional_args[1]
+
+        return cls(**kwargs)
+
+
+class GIQLMerge(exp.Func):
+    """MERGE aggregate function for combining overlapping intervals.
+
+    Merges overlapping or bookended intervals into single intervals.
+    Built on top of CLUSTER operation.
+
+    Examples:
+        MERGE(position)
+        MERGE(position, 1000)
+        MERGE(position, stranded=true)
+    """
+
+    arg_types = {
+        "this": True,  # genomic column
+        "distance": False,  # maximum distance between features
+        "stranded": False,  # strand-specific merging
+    }
+
+    @classmethod
+    def from_arg_list(cls, args):
+        """Parse argument list, handling named parameters.
+
+        :param args: List of arguments from parser
+        :return: GIQLMerge instance with properly mapped arguments
+        """
+        kwargs = {}
+        positional_args = []
+
+        # Separate named (EQ) and positional arguments
+        for arg in args:
+            if isinstance(arg, exp.EQ):
+                # Named parameter: extract name and value
+                param_name = (
+                    arg.this.name if isinstance(arg.this, exp.Column) else str(arg.this)
+                )
+                kwargs[param_name.lower()] = arg.expression
+            else:
+                positional_args.append(arg)
+
+        # Map positional arguments
+        if len(positional_args) > 0:
+            kwargs["this"] = positional_args[0]
+        if len(positional_args) > 1:
+            kwargs["distance"] = positional_args[1]
+
+        return cls(**kwargs)
