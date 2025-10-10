@@ -54,17 +54,22 @@ class SchemaInfo:
     def get_table(self, name: str) -> Optional[TableSchema]:
         """Get table schema by name.
 
-        :param name: Table name
-        :return: TableSchema object or None if not found
+        :param name:
+            Table name
+        :return:
+            TableSchema object or None if not found
         """
         return self.tables.get(name)
 
     def get_column_info(self, table: str, column: str) -> Optional[ColumnInfo]:
         """Get column information.
 
-        :param table: Table name
-        :param column: Column name
-        :return: ColumnInfo object or None if not found
+        :param table:
+            Table name
+        :param column:
+            Column name
+        :return:
+            ColumnInfo object or None if not found
         """
         table_schema = self.get_table(table)
         if table_schema:

@@ -435,6 +435,166 @@ result = engine.query("""
 """)
 ```
 
+### Clustering and Merging Operations
+
+GIQL provides dedicated operators for clustering and merging overlapping genomic intervals, replicating `bedtools cluster` and `bedtools merge` functionality.
+
+#### Cluster: Assign cluster IDs to overlapping intervals
+
+**Basic clustering:**
+
+**Bedtools:**
+```bash
+bedtools cluster -i features.bed
+```
+
+**GIQL:**
+```python
+result = engine.query("""
+    SELECT
+        *,
+        CLUSTER(position) AS cluster_id
+    FROM features
+    ORDER BY chromosome, start_pos
+""")
+```
+
+**Clustering with distance parameter** (merge intervals within 1000bp):
+
+**Bedtools:**
+```bash
+bedtools cluster -i features.bed -d 1000
+```
+
+**GIQL:**
+```python
+result = engine.query("""
+    SELECT
+        *,
+        CLUSTER(position, 1000) AS cluster_id
+    FROM features
+    ORDER BY chromosome, start_pos
+""")
+```
+
+**Strand-specific clustering:**
+
+**Bedtools:**
+```bash
+bedtools cluster -i features.bed -s
+```
+
+**GIQL:**
+```python
+result = engine.query("""
+    SELECT
+        *,
+        CLUSTER(position, stranded=true) AS cluster_id
+    FROM features
+    ORDER BY chromosome, start_pos
+""")
+```
+
+#### Merge: Combine overlapping intervals
+
+**Basic merge:**
+
+**Bedtools:**
+```bash
+bedtools merge -i features.bed
+```
+
+**GIQL:**
+```python
+result = engine.query("""
+    SELECT MERGE(position)
+    FROM features
+""")
+```
+
+Returns `chromosome`, `start_pos`, and `end_pos` of merged intervals.
+
+**Merge with distance parameter:**
+
+**Bedtools:**
+```bash
+bedtools merge -i features.bed -d 1000
+```
+
+**GIQL:**
+```python
+result = engine.query("""
+    SELECT MERGE(position, 1000)
+    FROM features
+""")
+```
+
+**Strand-specific merge:**
+
+**Bedtools:**
+```bash
+bedtools merge -i features.bed -s
+```
+
+**GIQL:**
+```python
+result = engine.query("""
+    SELECT MERGE(position, stranded=true)
+    FROM features
+""")
+```
+
+**Merge with aggregations** (count features):
+
+**Bedtools:**
+```bash
+bedtools merge -i features.bed -c 1 -o count
+```
+
+**GIQL:**
+```python
+result = engine.query("""
+    SELECT
+        MERGE(position),
+        COUNT(*) as feature_count
+    FROM features
+""")
+```
+
+**Merge with column operations** (average score):
+
+**Bedtools:**
+```bash
+bedtools merge -i features.bed -c 5 -o mean
+```
+
+**GIQL:**
+```python
+result = engine.query("""
+    SELECT
+        MERGE(position),
+        AVG(score) as avg_score
+    FROM features
+""")
+```
+
+**Collect names of merged features:**
+
+**Bedtools:**
+```bash
+bedtools merge -i features.bed -c 4 -o collapse
+```
+
+**GIQL:**
+```python
+result = engine.query("""
+    SELECT
+        MERGE(position),
+        STRING_AGG(name, ',') as feature_names
+    FROM features
+""")
+```
+
 ## Development
 
 This project is in active development. See `giql.md` for the development plan.

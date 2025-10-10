@@ -164,9 +164,12 @@ class RangeParser:
     def _parse_simple(cls, match) -> ParsedRange:
         """Parse simple format: chr1:1000-2000.
 
-        :param match: Regex match object
-        :return: ParsedRange in half-open format
-        :raises ValueError: If start >= end
+        :param match:
+            Regex match object
+        :return:
+            ParsedRange in half-open format
+        :raises ValueError:
+            If start >= end
         """
         chromosome = match.group("chr")
         start = int(match.group("start"))
