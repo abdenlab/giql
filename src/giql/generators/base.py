@@ -37,41 +37,52 @@ class BaseGIQLGenerator(Generator):
     def intersects_sql(self, expression: Intersects) -> str:
         """Generate standard SQL for INTERSECTS.
 
-        :param expression: INTERSECTS expression node
-        :return: SQL predicate string
+        :param expression:
+            INTERSECTS expression node
+        :return:
+            SQL predicate string
         """
         return self._generate_spatial_op(expression, "intersects")
 
     def contains_sql(self, expression: Contains) -> str:
         """Generate standard SQL for CONTAINS.
 
-        :param expression: CONTAINS expression node
-        :return: SQL predicate string
+        :param expression:
+            CONTAINS expression node
+        :return:
+            SQL predicate string
         """
         return self._generate_spatial_op(expression, "contains")
 
     def within_sql(self, expression: Within) -> str:
         """Generate standard SQL for WITHIN.
 
-        :param expression: WITHIN expression node
-        :return: SQL predicate string
+        :param expression:
+            WITHIN expression node
+        :return:
+            SQL predicate string
         """
         return self._generate_spatial_op(expression, "within")
 
     def spatialsetpredicate_sql(self, expression: SpatialSetPredicate) -> str:
         """Generate SQL for spatial set predicates (ANY/ALL).
 
-        :param expression: SpatialSetPredicate expression node
-        :return: SQL predicate string
+        :param expression:
+            SpatialSetPredicate expression node
+        :return:
+            SQL predicate string
         """
         return self._generate_spatial_set(expression)
 
     def _generate_spatial_op(self, expression: exp.Binary, op_type: str) -> str:
         """Generate SQL for a spatial operation.
 
-        :param expression: AST node (Intersects, Contains, or Within)
-        :param op_type: 'intersects', 'contains', or 'within'
-        :return: SQL predicate string
+        :param expression:
+            AST node (Intersects, Contains, or Within)
+        :param op_type:
+            'intersects', 'contains', or 'within'
+        :return:
+            SQL predicate string
         """
         left = self.sql(expression, "this")
         right_raw = self.sql(expression, "expression")
@@ -99,10 +110,14 @@ class BaseGIQLGenerator(Generator):
     ) -> str:
         """Generate SQL predicate for a range operation.
 
-        :param column_ref: Column reference (e.g., 'v.position' or 'position')
-        :param parsed_range: Parsed genomic range
-        :param op_type: 'intersects', 'contains', or 'within'
-        :return: SQL predicate string
+        :param column_ref:
+            Column reference (e.g., 'v.position' or 'position')
+        :param parsed_range:
+            Parsed genomic range
+        :param op_type:
+            'intersects', 'contains', or 'within'
+        :return:
+            SQL predicate string
         """
         # Get column references
         chrom_col, start_col, end_col = self._get_column_refs(column_ref)
@@ -148,10 +163,14 @@ class BaseGIQLGenerator(Generator):
     def _generate_column_join(self, left_col: str, right_col: str, op_type: str) -> str:
         """Generate SQL for column-to-column spatial joins.
 
-        :param left_col: Left column reference (e.g., 'a.position')
-        :param right_col: Right column reference (e.g., 'b.position')
-        :param op_type: 'intersects', 'contains', or 'within'
-        :return: SQL predicate string
+        :param left_col:
+            Left column reference (e.g., 'a.position')
+        :param right_col:
+            Right column reference (e.g., 'b.position')
+        :param op_type:
+            'intersects', 'contains', or 'within'
+        :return:
+            SQL predicate string
         """
         # Get column references for both sides
         l_chrom, l_start, l_end = self._get_column_refs(left_col)
@@ -190,8 +209,10 @@ class BaseGIQLGenerator(Generator):
             column INTERSECTS ANY(...) -> (condition1 OR condition2 OR ...)
             column INTERSECTS ALL(...) -> (condition1 AND condition2 AND ...)
 
-        :param expression: SpatialSetPredicate expression node
-        :return: SQL predicate string
+        :param expression:
+            SpatialSetPredicate expression node
+        :return:
+            SQL predicate string
         """
         column_ref = self.sql(expression, "this")
         operator = expression.args["operator"]
@@ -220,8 +241,10 @@ class BaseGIQLGenerator(Generator):
     def _get_column_refs(self, column_ref: str) -> tuple[str, str, str]:
         """Get physical column names for genomic data.
 
-        :param column_ref: Logical column reference (e.g., 'v.position')
-        :return: Tuple of (chromosome_col, start_col, end_col)
+        :param column_ref:
+            Logical column reference (e.g., 'v.position')
+        :return:
+            Tuple of (chromosome_col, start_col, end_col)
         """
         # TODO: Use schema_info to get actual column mappings
         # For now, use default column names

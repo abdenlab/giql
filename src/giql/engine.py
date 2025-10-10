@@ -15,6 +15,8 @@ from giql.generators import GIQLDuckDBGenerator
 from giql.schema import ColumnInfo
 from giql.schema import SchemaInfo
 from giql.schema import TableSchema
+from giql.transformer import ClusterTransformer
+from giql.transformer import MergeTransformer
 
 DialectType = Literal["duckdb", "sqlite"]
 
@@ -71,11 +73,16 @@ class GIQLEngine:
     ):
         """Initialize engine.
 
-        :param target_dialect: Target SQL dialect ('duckdb', 'sqlite', 'standard')
-        :param connection: Existing database connection (optional)
-        :param db_path: Database path or connection string
-        :param verbose: Print transpiled SQL
-        :param dialect_options: Additional options for specific dialects
+        :param target_dialect:
+            Target SQL dialect ('duckdb', 'sqlite', 'standard')
+        :param connection:
+            Existing database connection (optional)
+        :param db_path:
+            Database path or connection string
+        :param verbose:
+            Print transpiled SQL
+        :param dialect_options:
+            Additional options for specific dialects
         """
         self.target_dialect = target_dialect
         self.verbose = verbose
@@ -93,13 +100,21 @@ class GIQLEngine:
         # Get appropriate generator
         self.generator = self._get_generator()
 
+        # Initialize query transformers
+        self.cluster_transformer = ClusterTransformer(self.schema_info)
+        self.merge_transformer = MergeTransformer(self.schema_info)
+
     def _create_connection(self, db_path: str):
         """Create database connection based on target dialect.
 
-        :param db_path: Path to database file or connection string
-        :return: Connection object for the specified database backend
-        :raises ImportError: If the required database driver is not installed
-        :raises ValueError: If the dialect is not supported
+        :param db_path:
+            Path to database file or connection string
+        :return:
+            Connection object for the specified database backend
+        :raises ImportError:
+            If the required database driver is not installed
+        :raises ValueError:
+            If the dialect is not supported
         """
         if self.target_dialect == "duckdb":
             try:
@@ -122,7 +137,8 @@ class GIQLEngine:
     def _get_generator(self):
         """Get generator for target dialect.
 
-        :return: SQL generator instance configured for the target dialect
+        :return:
+            SQL generator instance configured for the target dialect
         """
         generators = {
             "duckdb": GIQLDuckDBGenerator,
@@ -148,13 +164,20 @@ class GIQLEngine:
         This method tells the engine how genomic ranges are stored in the table,
         mapping logical genomic column names to physical column names.
 
-        :param table_name: Table name
-        :param columns: Dict of column_name -> type
-        :param genomic_column: Logical name for genomic position
-        :param chrom_col: Physical chromosome column
-        :param start_col: Physical start position column
-        :param end_col: Physical end position column
-        :param strand_col: Physical strand column (optional)
+        :param table_name:
+            Table name
+        :param columns:
+            Dict of column_name -> type
+        :param genomic_column:
+            Logical name for genomic position
+        :param chrom_col:
+            Physical chromosome column
+        :param start_col:
+            Physical start position column
+        :param end_col:
+            Physical end position column
+        :param strand_col:
+            Physical strand column (optional)
         """
         column_infos = {}
 
@@ -180,8 +203,10 @@ class GIQLEngine:
     def load_csv(self, table_name: str, file_path: str):
         """Load CSV file into database.
 
-        :param table_name: Name to assign to the table
-        :param file_path: Path to the CSV file
+        :param table_name:
+            Name to assign to the table
+        :param file_path:
+            Path to the CSV file
         """
         if self.target_dialect == "duckdb":
             self.conn.execute(
@@ -199,8 +224,10 @@ class GIQLEngine:
     def load_parquet(self, table_name: str, file_path: str):
         """Load Parquet file into database.
 
-        :param table_name: Name to assign to the table
-        :param file_path: Path to the Parquet file
+        :param table_name:
+            Name to assign to the table
+        :param file_path:
+            Path to the Parquet file
         """
         if self.target_dialect == "duckdb":
             self.conn.execute(
@@ -219,15 +246,27 @@ class GIQLEngine:
         Parses the GIQL syntax, transpiles to target SQL dialect,
         and executes the query.
 
-        :param giql: Query string with GIQL genomic extensions
-        :return: Query results as a pandas DataFrame
-        :raises ValueError: If the query cannot be parsed, transpiled, or executed
+        :param giql:
+            Query string with GIQL genomic extensions
+        :return:
+            Query results as a pandas DataFrame
+        :raises ValueError:
+            If the query cannot be parsed, transpiled, or executed
         """
         # Parse with GIQL dialect
         try:
             ast = parse_one(giql, dialect=GIQLDialect)
         except Exception as e:
             raise ValueError(f"Parse error: {e}\nQuery: {giql}")
+
+        # Transform query (MERGE first, then CLUSTER)
+        try:
+            # Apply MERGE transformation (which may internally use CLUSTER)
+            ast = self.merge_transformer.transform(ast)
+            # Apply CLUSTER transformation for any standalone CLUSTER expressions
+            ast = self.cluster_transformer.transform(ast)
+        except Exception as e:
+            raise ValueError(f"Transformation error: {e}")
 
         # Transpile to target dialect
         try:
@@ -253,8 +292,10 @@ class GIQLEngine:
     def execute_raw(self, sql: str) -> pd.DataFrame:
         """Execute raw SQL directly, bypassing GIQL parsing.
 
-        :param sql: Raw SQL query string
-        :return: Query results as a pandas DataFrame
+        :param sql:
+            Raw SQL query string
+        :return:
+            Query results as a pandas DataFrame
         """
         return pd.read_sql(sql, self.conn)
 
