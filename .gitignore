@@ -30,6 +30,8 @@ ENV/
 .coverage
 htmlcov/
 .tox/
+.data/
+sandbox.ipynb
 
 # IDE
 .vscode/
