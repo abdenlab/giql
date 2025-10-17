@@ -7,7 +7,9 @@ authors = [
     { name = "Conrad Bzura", email = "conrad.bzura@umassmed.edu" }
 ]
 dependencies = [
+    "click>=8.3.0",
     "duckdb>=1.4.0",
+    "oxbow>=0.4.0",
     "pandas>=2.0.0",
     "psycopg2-binary>=2.9.10",
     "sqlglot>=20.0.0",
@@ -17,6 +19,9 @@ name = "giql"
 readme = "README.md"
 requires-python = ">=3.11"
 version = "0.1.0"
+
+[project.scripts]
+giql = "giql.cli:cli"
 
 [project.optional-dependencies]
 all = [
