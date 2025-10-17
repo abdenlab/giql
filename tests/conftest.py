@@ -2,9 +2,30 @@
 Pytest fixtures for integration tests.
 """
 
+import pandas as pd
 import pytest
 
 from giql import GIQLEngine
+
+
+@pytest.fixture(scope="session")
+def to_df():
+    """Fixture providing a helper to convert cursors to DataFrames.
+
+    Returns a function that materializes cursor results for testing.
+    Session-scoped since it's a pure function with no state.
+
+    Usage:
+        result = to_df(engine.execute("SELECT ..."))
+    """
+
+    def _to_df(cursor):
+        if cursor.description:
+            columns = [desc[0] for desc in cursor.description]
+            return pd.DataFrame(cursor.fetchall(), columns=columns)
+        return pd.DataFrame()
+
+    return _to_df
 
 
 @pytest.fixture

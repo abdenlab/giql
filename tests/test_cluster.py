@@ -83,9 +83,10 @@ def duckdb_stranded_engine(stranded_test_data_csv):
 class TestCluster:
     """Tests for CLUSTER window function."""
 
-    def test_basic_cluster(self, duckdb_cluster_engine):
+    def test_basic_cluster(self, duckdb_cluster_engine, to_df):
         """Test basic CLUSTER operation."""
-        result = duckdb_cluster_engine.query("""
+        result = to_df(
+            duckdb_cluster_engine.execute("""
             SELECT
                 id,
                 chromosome,
@@ -96,6 +97,7 @@ class TestCluster:
             FROM features
             ORDER BY chromosome, start_pos
         """)
+        )
 
         # Expected clusters:
         # chr1: features 1,2,3 are cluster 1 (overlapping/bookended)
@@ -115,9 +117,10 @@ class TestCluster:
         chr2_results = result[result["chromosome"] == "chr2"]
         assert chr2_results.iloc[0]["cluster_id"] != chr2_results.iloc[1]["cluster_id"]
 
-    def test_cluster_with_distance(self, duckdb_cluster_engine):
+    def test_cluster_with_distance(self, duckdb_cluster_engine, to_df):
         """Test CLUSTER with distance parameter."""
-        result = duckdb_cluster_engine.query("""
+        result = to_df(
+            duckdb_cluster_engine.execute("""
             SELECT
                 id,
                 chromosome,
@@ -128,6 +131,7 @@ class TestCluster:
             FROM features
             ORDER BY chromosome, start_pos
         """)
+        )
 
         # With distance=100, chr1 features 1,2,3,4 should all be in same cluster
         # (gap of 1bp at position 501 is within 100bp tolerance)
@@ -135,9 +139,10 @@ class TestCluster:
         cluster_ids = chr1_results["cluster_id"].tolist()
         assert len(set(cluster_ids)) == 1  # All in same cluster
 
-    def test_stranded_cluster(self, duckdb_stranded_engine):
+    def test_stranded_cluster(self, duckdb_stranded_engine, to_df):
         """Test CLUSTER with stranded=true."""
-        result = duckdb_stranded_engine.query("""
+        result = to_df(
+            duckdb_stranded_engine.execute("""
             SELECT
                 id,
                 chromosome,
@@ -149,6 +154,7 @@ class TestCluster:
             FROM stranded_features
             ORDER BY chromosome, start_pos
         """)
+        )
 
         # Features should cluster only within the same strand:
         # + strand: f1,f2 overlap -> cluster 1, f5 is separate -> cluster 2
@@ -179,13 +185,15 @@ class TestCluster:
         assert f5["strand"] == "+"
 
         # Verify stranded clustering works: compare with non-stranded
-        result_nonstranded = duckdb_stranded_engine.query("""
+        result_nonstranded = to_df(
+            duckdb_stranded_engine.execute("""
             SELECT
                 id,
                 CLUSTER(position) AS cluster_id
             FROM stranded_features
             ORDER BY id
         """)
+        )
 
         # Without stranded, f1-f4 should all be in same cluster (overlapping)
         ns_f1 = result_nonstranded[result_nonstranded["id"] == 1].iloc[0]
@@ -201,12 +209,14 @@ class TestCluster:
 class TestMerge:
     """Tests for MERGE aggregate function."""
 
-    def test_basic_merge(self, duckdb_cluster_engine):
+    def test_basic_merge(self, duckdb_cluster_engine, to_df):
         """Test basic MERGE operation."""
-        result = duckdb_cluster_engine.query("""
+        result = to_df(
+            duckdb_cluster_engine.execute("""
             SELECT MERGE(position)
             FROM features
         """)
+        )
 
         # Expected merged intervals:
         # chr1: features 1,2,3 merge into [100, 500]
@@ -232,12 +242,14 @@ class TestMerge:
         assert chr2_results.iloc[1]["start_pos"] == 300
         assert chr2_results.iloc[1]["end_pos"] == 400
 
-    def test_merge_with_distance(self, duckdb_cluster_engine):
+    def test_merge_with_distance(self, duckdb_cluster_engine, to_df):
         """Test MERGE with distance parameter."""
-        result = duckdb_cluster_engine.query("""
+        result = to_df(
+            duckdb_cluster_engine.execute("""
             SELECT MERGE(position, 100)
             FROM features
         """)
+        )
 
         # With distance=100, chr1 features 1-4 should merge into one interval
         chr1_results = result[result["chromosome"] == "chr1"]
@@ -245,12 +257,14 @@ class TestMerge:
         assert chr1_results.iloc[0]["start_pos"] == 100
         assert chr1_results.iloc[0]["end_pos"] == 1000
 
-    def test_merge_with_aggregation(self, duckdb_cluster_engine):
+    def test_merge_with_aggregation(self, duckdb_cluster_engine, to_df):
         """Test MERGE with additional aggregation columns."""
-        result = duckdb_cluster_engine.query("""
+        result = to_df(
+            duckdb_cluster_engine.execute("""
             SELECT MERGE(position), COUNT(*) as feature_count
             FROM features
         """)
+        )
 
         # chr1 should have 2 merged intervals with counts
         chr1_results = result[result["chromosome"] == "chr1"].sort_values("start_pos")
@@ -258,12 +272,14 @@ class TestMerge:
         assert chr1_results.iloc[0]["feature_count"] == 3  # f1, f2, f3 merged
         assert chr1_results.iloc[1]["feature_count"] == 1  # f4 alone
 
-    def test_stranded_merge(self, duckdb_stranded_engine):
+    def test_stranded_merge(self, duckdb_stranded_engine, to_df):
         """Test MERGE with stranded=true."""
-        result = duckdb_stranded_engine.query("""
+        result = to_df(
+            duckdb_stranded_engine.execute("""
             SELECT MERGE(position, stranded=true)
             FROM stranded_features
         """)
+        )
 
         # + strand: f1,f2 merge -> [100,250], f5 stays -> [400,500]
         # - strand: f3,f4 merge -> [200,350]

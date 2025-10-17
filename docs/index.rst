@@ -44,11 +44,15 @@ Basic usage:
            genomic_column="position",
        )
 
-       # Query with genomic operators
-       result = engine.query("""
+       # Query with genomic operators (returns cursor for streaming)
+       cursor = engine.execute("""
            SELECT * FROM variants
            WHERE position INTERSECTS 'chr1:1000-2000'
        """)
+
+       # Process results
+       for row in cursor:
+           print(row)
 
 Features
 --------

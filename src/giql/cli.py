@@ -346,6 +346,11 @@ def _detect_genomic_columns(columns: dict[str, str]) -> dict[str, str | None]:
     is_flag=True,
     help="For compatibility with bedtools (currently ignored).",
 )
+@click.option(
+    "--chunksize",
+    type=int,
+    help="Process results in chunks of N rows (streaming mode for large datasets).",
+)
 def intersect(
     file_a,
     file_b,
@@ -366,6 +371,7 @@ def intersect(
     header,
     names,
     sorted_input,
+    chunksize,
 ):
     """Find overlaps between genomic features.
 
@@ -491,35 +497,40 @@ def intersect(
                 either=either,
             )
 
-            result = engine.query(query)
+            # Execute query and get cursor
+            cursor = engine.execute(query)
 
-            # Expand "rest" columns if present (BED format compatibility)
-            result = _expand_rest_columns(result)
+            # Get column names
+            col_names = [desc[0] for desc in cursor.description]
 
-            # If names provided, add a column indicating which B file
-            if names and idx < len(names):
-                result["b_file"] = names[idx]
-            elif len(file_b) > 1:
-                result["b_file"] = b_path.name
+            # Output header if requested (only once, before first row)
+            if header and idx == 0:
+                print("\t".join(col_names))
 
-            results.append(result)
+            # Stream results row by row
+            while True:
+                row = cursor.fetchone()
+                if row is None:
+                    break
+                # Expand rest columns inline
+                output_fields = []
+                for i, value in enumerate(row):
+                    col_name = col_names[i]
+                    if col_name == "rest" and value:
+                        # Expand rest column - split on tabs
+                        rest_fields = str(value).split("\t")
+                        output_fields.extend(rest_fields)
+                    else:
+                        output_fields.append(str(value) if value is not None else "")
 
-        # Combine results if multiple B files
-        if results:
-            if len(results) > 1:
-                import pandas as pd
+                # Add file identifier if needed
+                if names and idx < len(names):
+                    output_fields.append(names[idx])
+                elif len(file_b) > 1:
+                    output_fields.append(b_path.name)
 
-                final_result = pd.concat(results, ignore_index=True)
-            else:
-                final_result = results[0]
-
-            # Output results
-            if header:
-                # Print header
-                print("\t".join(final_result.columns))
-
-            # Print results as TSV
-            final_result.to_csv(sys.stdout, sep="\t", index=False, header=False)
+                # Output row as TSV
+                print("\t".join(output_fields))
 
     finally:
         engine.close()

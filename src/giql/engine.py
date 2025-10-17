@@ -17,6 +17,7 @@ from giql.constants import DEFAULT_STRAND_COL
 from giql.dialect import GIQLDialect
 from giql.generators import BaseGIQLGenerator
 from giql.generators import GIQLDuckDBGenerator
+from giql.protocols import CursorLike
 from giql.schema import ColumnInfo
 from giql.schema import SchemaInfo
 from giql.schema import TableSchema
@@ -48,24 +49,34 @@ class GIQLEngine:
         )
         with GIQLEngine(target_dialect="duckdb") as engine:
             engine.conn.register("variants", df)
-            result = engine.query(
+            cursor = engine.execute(
                 "SELECT * FROM variants WHERE position INTERSECTS 'chr1:1000-2000'"
             )
+            for row in cursor:
+                print(row)
 
     Load from CSV::
 
         with GIQLEngine(target_dialect="duckdb") as engine:
             engine.load_csv("variants", "variants.csv")
-            result = engine.query(
+            cursor = engine.execute(
                 "SELECT * FROM variants WHERE position INTERSECTS 'chr1:1000-2000'"
             )
+            # Process rows lazily
+            while True:
+                row = cursor.fetchone()
+                if row is None:
+                    break
+                print(row)
 
     Using SQLite backend::
 
         with GIQLEngine(target_dialect="sqlite", db_path="data.db") as engine:
-            result = engine.query(
+            cursor = engine.execute(
                 "SELECT * FROM variants WHERE position INTERSECTS 'chr1:1000-2000'"
             )
+            # Materialize all results at once
+            results = cursor.fetchall()
     """
 
     def __init__(
@@ -245,16 +256,16 @@ class GIQLEngine:
         if self.verbose:
             print(f"Loaded {table_name} from {file_path}")
 
-    def query(self, giql: str) -> pd.DataFrame:
-        """Execute a GIQL query.
+    def execute(self, giql: str) -> CursorLike:
+        """Execute a GIQL query and return a database cursor.
 
         Parses the GIQL syntax, transpiles to target SQL dialect,
-        and executes the query.
+        and executes the query, returning a cursor for lazy iteration.
 
         :param giql:
             Query string with GIQL genomic extensions
         :return:
-            Query results as a pandas DataFrame
+            Database cursor (DB-API 2.0 compatible) that can be iterated
         :raises ValueError:
             If the query cannot be parsed, transpiled, or executed
         """
@@ -288,9 +299,9 @@ class GIQLEngine:
             print(target_sql)
             print(f"{'=' * 60}\n")
 
-        # Execute
+        # Execute and return cursor
         try:
-            return pd.read_sql(target_sql, self.conn)
+            return self.conn.execute(target_sql)
         except Exception as e:
             raise ValueError(f"Execution error: {e}\nSQL: {target_sql}")
 
@@ -316,5 +327,5 @@ class GIQLEngine:
     def __enter__(self):
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(self, exc_type, exc_val, exc_tb):  # noqa: ANN001
         self.close()
