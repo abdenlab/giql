@@ -74,11 +74,20 @@ Query with DuckDB
            genomic_column="position",
        )
 
-       # Query using the logical 'position' column
-       result = engine.query("""
+       # Query using the logical 'position' column (returns cursor for streaming)
+       cursor = engine.execute("""
            SELECT * FROM variants
            WHERE position INTERSECTS 'chr1:1000-2000'
        """)
+
+       # Process results lazily
+       for row in cursor:
+           print(row)
+
+       # Or materialize to pandas DataFrame
+       import pandas as pd
+       cursor = engine.execute("SELECT ...")
+       df = pd.DataFrame(cursor.fetchall(), columns=[desc[0] for desc in cursor.description])
 
 Query with SQLite
 ~~~~~~~~~~~~~~~~~
@@ -88,10 +97,14 @@ Query with SQLite
    from giql import GIQLEngine
 
    with GIQLEngine(target_dialect="sqlite", db_path="data.db") as engine:
-       result = engine.query("""
+       cursor = engine.execute("""
            SELECT * FROM variants
            WHERE position INTERSECTS 'chr1:1000-2000'
        """)
+
+       # Iterate results
+       for row in cursor:
+           print(row)
 
 Spatial Operators
 -----------------

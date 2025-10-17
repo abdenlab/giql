@@ -1153,11 +1153,11 @@ class GIQLEngine:
         # DuckDB (default)
         with GIQLEngine(target_dialect="duckdb") as engine:
             engine.load_csv('variants', 'variants.csv')
-            result = engine.query("SELECT * FROM variants WHERE position OVERLAPS 'chr1:1000-2000'")
+            cursor = engine.execute("SELECT * FROM variants WHERE position OVERLAPS 'chr1:1000-2000'")
         
         # PostgreSQL
         with GIQLEngine(target_dialect="postgres", db_path="postgresql://user:pass@localhost/db") as engine:
-            result = engine.query("SELECT * FROM variants WHERE position OVERLAPS 'chr1:1000-2000'")
+            cursor = engine.execute("SELECT * FROM variants WHERE position OVERLAPS 'chr1:1000-2000'")
     """
     
     def __init__(
@@ -1504,6 +1504,9 @@ def duckdb_engine(sample_variants_csv):
 - [ ] Test multiple database backends
 
 **Example `tests/test_integration.py`:**
+
+> **Note:** These test examples are outdated planning artifacts. The actual tests use `execute()` which returns a cursor, and a `to_df` fixture to convert cursors to DataFrames for assertions. See `tests/test_integration.py` in the repository for current implementation.
+
 ```python
 import pytest
 from giql import GIQLEngine
@@ -1511,18 +1514,19 @@ from giql import GIQLEngine
 
 class TestIntegration:
     """Test GIQL queries work correctly across different databases."""
-    
-    def test_simple_overlaps(self, engine_with_data):
-        result = engine_with_data.query("""
+
+    def test_simple_overlaps(self, engine_with_data, to_df):
+        cursor = engine_with_data.execute("""
             SELECT * FROM variants
             WHERE position OVERLAPS 'chr1:1000-2000'
         """)
-        
+        result = to_df(cursor)
+
         assert len(result) == 1
         assert result.iloc[0]['id'] == 1
     
     def test_overlaps_any(self, engine_with_data):
-        result = engine_with_data.query("""
+        cursor = engine_with_data.execute("""
             SELECT * FROM variants
             WHERE position OVERLAPS ANY('chr1:1000-2000', 'chr1:10000-11000')
         """)
@@ -1531,7 +1535,7 @@ class TestIntegration:
         assert set(result['id']) == {1, 2}
     
     def test_overlaps_any_cross_chromosome(self, engine_with_data):
-        result = engine_with_data.query("""
+        cursor = engine_with_data.execute("""
             SELECT * FROM variants
             WHERE position OVERLAPS ANY('chr1:1000-2000', 'chr2:400-700')
         """)
@@ -1540,7 +1544,7 @@ class TestIntegration:
         assert set(result['id']) == {1, 4}
     
     def test_contains_point(self, engine_with_data):
-        result = engine_with_data.query("""
+        cursor = engine_with_data.execute("""
             SELECT * FROM variants
             WHERE position CONTAINS 'chr1:1550'
         """)
@@ -1549,7 +1553,7 @@ class TestIntegration:
         assert result.iloc[0]['id'] == 1
     
     def test_within(self, engine_with_data):
-        result = engine_with_data.query("""
+        cursor = engine_with_data.execute("""
             SELECT * FROM variants
             WHERE position WITHIN 'chr1:0-20000'
         """)
@@ -1558,7 +1562,7 @@ class TestIntegration:
         assert set(result['id']) == {1, 2, 3}
     
     def test_overlaps_all(self, engine_with_data):
-        result = engine_with_data.query("""
+        cursor = engine_with_data.execute("""
             SELECT * FROM variants
             WHERE position OVERLAPS ALL('chr1:1000-2000', 'chr1:1400-1700')
         """)
@@ -1567,7 +1571,7 @@ class TestIntegration:
         assert result.iloc[0]['id'] == 1
     
     def test_complex_with_filters(self, engine_with_data):
-        result = engine_with_data.query("""
+        cursor = engine_with_data.execute("""
             SELECT * FROM variants
             WHERE position OVERLAPS ANY('chr1:1000-2000', 'chr1:10000-11000')
               AND quality > 30
@@ -1578,7 +1582,7 @@ class TestIntegration:
         assert result.iloc[0]['id'] == 2
     
     def test_with_aggregation(self, engine_with_data):
-        result = engine_with_data.query("""
+        cursor = engine_with_data.execute("""
             SELECT chromosome, COUNT(*) as cnt
             FROM variants
             WHERE position OVERLAPS ANY('chr1:0-20000', 'chr2:0-10000')
@@ -1594,7 +1598,7 @@ class TestIntegration:
     
     def test_with_cte(self, duckdb_engine):
         """Test CTE support (DuckDB only for now)."""
-        result = duckdb_engine.query("""
+        cursor = duckdb_engine.execute("""
             WITH chr1_variants AS (
                 SELECT * FROM variants
                 WHERE position OVERLAPS 'chr1:0-100000'
@@ -1605,7 +1609,7 @@ class TestIntegration:
         assert result.iloc[0]['cnt'] == 3
     
     def test_empty_result(self, engine_with_data):
-        result = engine_with_data.query("""
+        cursor = engine_with_data.execute("""
             SELECT * FROM variants
             WHERE position OVERLAPS 'chr3:1000-2000'
         """)
@@ -1634,7 +1638,7 @@ class TestMultiDialect:
                      'start_pos': 'BIGINT', 'end_pos': 'BIGINT'},
                     genomic_column='position'
                 )
-                result = engine.query(query)
+                cursor = engine.execute(query)
                 results[dialect] = set(result['id'])
         
         # All dialects should produce same results
@@ -1872,7 +1876,7 @@ from giql import GIQLEngine
 
 with GIQLEngine(target_dialect="duckdb") as engine:
     engine.load_csv('variants', 'variants.csv')
-    result = engine.query("SELECT * FROM variants WHERE position OVERLAPS 'chr1:1000-2000'")
+    cursor = engine.execute("SELECT * FROM variants WHERE position OVERLAPS 'chr1:1000-2000'")
 ```
 
 ### PostgreSQL
@@ -1895,7 +1899,7 @@ Uses standard SQL predicates that work on any table structure:
 
 ```python
 with GIQLEngine(target_dialect="postgres", db_path="postgresql://...") as engine:
-    result = engine.query("SELECT * FROM variants WHERE position OVERLAPS 'chr1:1000-2000'")
+    cursor = engine.execute("SELECT * FROM variants WHERE position OVERLAPS 'chr1:1000-2000'")
 ```
 
 Transpiles to:
@@ -1915,7 +1919,7 @@ with GIQLEngine(
     db_path="postgresql://...",
     use_range_types=True
 ) as engine:
-    result = engine.query("SELECT * FROM variants WHERE position OVERLAPS 'chr1:1000-2000'")
+    cursor = engine.execute("SELECT * FROM variants WHERE position OVERLAPS 'chr1:1000-2000'")
 ```
 
 Transpiles to:
@@ -1971,7 +1975,7 @@ All GIQL operators work via standard SQL transpilation:
 ```python
 with GIQLEngine(target_dialect="sqlite", db_path="data.db") as engine:
     engine.load_csv('variants', 'variants.csv')
-    result = engine.query("SELECT * FROM variants WHERE position OVERLAPS 'chr1:1000-2000'")
+    cursor = engine.execute("SELECT * FROM variants WHERE position OVERLAPS 'chr1:1000-2000'")
 ```
 
 #### Installation
@@ -2007,7 +2011,7 @@ with GIQLEngine(
     target_dialect="mysql", 
     db_path="host=localhost,user=root,password=pass,database=genomics"
 ) as engine:
-    result = engine.query("SELECT * FROM variants WHERE position OVERLAPS 'chr1:1000-2000'")
+    cursor = engine.execute("SELECT * FROM variants WHERE position OVERLAPS 'chr1:1000-2000'")
 ```
 
 #### Installation
@@ -2091,7 +2095,7 @@ def main():
         )
         
         print("Example 1: Simple OVERLAPS")
-        result = engine.query("""
+        cursor = engine.execute("""
             SELECT * FROM variants
             WHERE position OVERLAPS 'chr1:1000-2000'
         """)
@@ -2099,7 +2103,7 @@ def main():
         print()
         
         print("Example 2: OVERLAPS ANY")
-        result = engine.query("""
+        cursor = engine.execute("""
             SELECT id, chromosome, ref, alt
             FROM variants
             WHERE position OVERLAPS ANY('chr1:1000-2000', 'chr1:5000-6000')
@@ -2108,7 +2112,7 @@ def main():
         print()
         
         print("Example 3: CONTAINS point")
-        result = engine.query("""
+        cursor = engine.execute("""
             SELECT * FROM variants
             WHERE position CONTAINS 'chr1:1550'
         """)
@@ -2116,7 +2120,7 @@ def main():
         print()
         
         print("Example 4: Aggregation")
-        result = engine.query("""
+        cursor = engine.execute("""
             SELECT chromosome, COUNT(*) as variant_count
             FROM variants
             WHERE position OVERLAPS ANY('chr1:0-100000', 'chr2:0-100000')
@@ -2162,7 +2166,7 @@ def run_query_on_dialect(dialect, query):
             )
             
             # Execute query
-            result = engine.query(query)
+            cursor = engine.execute(query)
             print(f"\nResults ({len(result)} rows):")
             print(result)
 

@@ -30,11 +30,15 @@ with GIQLEngine(target_dialect="duckdb") as engine:
         genomic_column="position",
     )
 
-    # Query with genomic operators
-    result = engine.query("""
+    # Query with genomic operators (returns cursor for streaming)
+    cursor = engine.execute("""
         SELECT * FROM variants
         WHERE position INTERSECTS 'chr1:1000-2000'
     """)
+
+    # Process results lazily
+    for row in cursor:
+        print(row)
 ```
 
 ## Recipes: Replicating Bedtools with GIQL
@@ -67,6 +71,20 @@ for table in ["features_a", "features_b"]:
     )
 ```
 
+**Note:** All examples below use `engine.execute()` which returns a DB-API 2.0 cursor for lazy/streaming iteration. To process results:
+
+```python
+# Iterate over results
+cursor = engine.execute("SELECT ...")
+for row in cursor:
+    print(row)
+
+# Or materialize to pandas DataFrame
+import pandas as pd
+cursor = engine.execute("SELECT ...")
+df = pd.DataFrame(cursor.fetchall(), columns=[desc[0] for desc in cursor.description])
+```
+
 ### Basic Intersect Operations
 
 #### Default: Report overlaps between A and B
@@ -78,7 +96,7 @@ bedtools intersect -a file_a.bed -b file_b.bed
 
 **GIQL:**
 ```python
-result = engine.query("""
+cursor = engine.execute("""
     SELECT DISTINCT a.*
     FROM features_a a, features_b b
     WHERE a.position INTERSECTS b.position
@@ -94,7 +112,7 @@ bedtools intersect -a file_a.bed -b file_b.bed -wa
 
 **GIQL:**
 ```python
-result = engine.query("""
+cursor = engine.execute("""
     SELECT a.*
     FROM features_a a, features_b b
     WHERE a.position INTERSECTS b.position
@@ -110,7 +128,7 @@ bedtools intersect -a file_a.bed -b file_b.bed -wb
 
 **GIQL:**
 ```python
-result = engine.query("""
+cursor = engine.execute("""
     SELECT b.*
     FROM features_a a, features_b b
     WHERE a.position INTERSECTS b.position
@@ -126,7 +144,7 @@ bedtools intersect -a file_a.bed -b file_b.bed -wa -wb
 
 **GIQL:**
 ```python
-result = engine.query("""
+cursor = engine.execute("""
     SELECT a.*, b.*
     FROM features_a a, features_b b
     WHERE a.position INTERSECTS b.position
@@ -144,7 +162,7 @@ bedtools intersect -a file_a.bed -b file_b.bed -v
 
 **GIQL:**
 ```python
-result = engine.query("""
+cursor = engine.execute("""
     SELECT a.*
     FROM features_a a
     LEFT JOIN features_b b ON a.position INTERSECTS b.position
@@ -161,7 +179,7 @@ bedtools intersect -a file_a.bed -b file_b.bed -u
 
 **GIQL:**
 ```python
-result = engine.query("""
+cursor = engine.execute("""
     SELECT DISTINCT a.*
     FROM features_a a
     INNER JOIN features_b b ON a.position INTERSECTS b.position
@@ -179,7 +197,7 @@ bedtools intersect -a file_a.bed -b file_b.bed -c
 
 **GIQL:**
 ```python
-result = engine.query("""
+cursor = engine.execute("""
     SELECT a.*, COUNT(b.name) as overlap_count
     FROM features_a a
     LEFT JOIN features_b b ON a.position INTERSECTS b.position
@@ -198,7 +216,7 @@ bedtools intersect -a file_a.bed -b file_b.bed -s
 
 **GIQL:**
 ```python
-result = engine.query("""
+cursor = engine.execute("""
     SELECT a.*
     FROM features_a a, features_b b
     WHERE a.position INTERSECTS b.position
@@ -215,7 +233,7 @@ bedtools intersect -a file_a.bed -b file_b.bed -S
 
 **GIQL:**
 ```python
-result = engine.query("""
+cursor = engine.execute("""
     SELECT a.*
     FROM features_a a, features_b b
     WHERE a.position INTERSECTS b.position
@@ -236,7 +254,7 @@ bedtools intersect -a file_a.bed -b file_b.bed -f 0.5
 
 **GIQL:**
 ```python
-result = engine.query("""
+cursor = engine.execute("""
     SELECT a.*
     FROM features_a a, features_b b
     WHERE a.position INTERSECTS b.position
@@ -255,7 +273,7 @@ bedtools intersect -a file_a.bed -b file_b.bed -F 0.5
 
 **GIQL:**
 ```python
-result = engine.query("""
+cursor = engine.execute("""
     SELECT a.*
     FROM features_a a, features_b b
     WHERE a.position INTERSECTS b.position
@@ -274,7 +292,7 @@ bedtools intersect -a file_a.bed -b file_b.bed -f 0.5 -r
 
 **GIQL:**
 ```python
-result = engine.query("""
+cursor = engine.execute("""
     WITH overlap_calcs AS (
         SELECT
             a.*,
@@ -302,7 +320,7 @@ bedtools intersect -a file_a.bed -b file_b.bed -loj
 
 **GIQL:**
 ```python
-result = engine.query("""
+cursor = engine.execute("""
     SELECT a.*, b.*
     FROM features_a a
     LEFT JOIN features_b b ON a.position INTERSECTS b.position
@@ -318,7 +336,7 @@ bedtools intersect -a file_a.bed -b file_b.bed -wo
 
 **GIQL:**
 ```python
-result = engine.query("""
+cursor = engine.execute("""
     SELECT
         a.*,
         b.*,
@@ -337,7 +355,7 @@ bedtools intersect -a file_a.bed -b file_b.bed -wao
 
 **GIQL:**
 ```python
-result = engine.query("""
+cursor = engine.execute("""
     SELECT
         a.*,
         b.*,
@@ -369,7 +387,7 @@ engine.load_csv("features_b3", "file3.bed")
 # Register schemas for each...
 
 # Query using UNION to combine all B features
-result = engine.query("""
+cursor = engine.execute("""
     WITH all_b_features AS (
         SELECT * FROM features_b1
         UNION ALL
@@ -394,7 +412,7 @@ bedtools intersect -a file_a.bed -b file_b.bed -c | awk '$NF >= 2'
 
 **GIQL:**
 ```python
-result = engine.query("""
+cursor = engine.execute("""
     SELECT a.*
     FROM features_a a
     INNER JOIN features_b b ON a.position INTERSECTS b.position
@@ -407,7 +425,7 @@ result = engine.query("""
 
 **GIQL:**
 ```python
-result = engine.query("""
+cursor = engine.execute("""
     SELECT v.*, g.name as gene_name
     FROM variants v
     INNER JOIN genes g ON v.position INTERSECTS g.position
@@ -422,7 +440,7 @@ result = engine.query("""
 
 **GIQL:**
 ```python
-result = engine.query("""
+cursor = engine.execute("""
     SELECT
         a.chromosome,
         COUNT(DISTINCT a.name) as total_features,
@@ -450,7 +468,7 @@ bedtools cluster -i features.bed
 
 **GIQL:**
 ```python
-result = engine.query("""
+cursor = engine.execute("""
     SELECT
         *,
         CLUSTER(position) AS cluster_id
@@ -468,7 +486,7 @@ bedtools cluster -i features.bed -d 1000
 
 **GIQL:**
 ```python
-result = engine.query("""
+cursor = engine.execute("""
     SELECT
         *,
         CLUSTER(position, 1000) AS cluster_id
@@ -486,7 +504,7 @@ bedtools cluster -i features.bed -s
 
 **GIQL:**
 ```python
-result = engine.query("""
+cursor = engine.execute("""
     SELECT
         *,
         CLUSTER(position, stranded=true) AS cluster_id
@@ -506,7 +524,7 @@ bedtools merge -i features.bed
 
 **GIQL:**
 ```python
-result = engine.query("""
+cursor = engine.execute("""
     SELECT MERGE(position)
     FROM features
 """)
@@ -523,7 +541,7 @@ bedtools merge -i features.bed -d 1000
 
 **GIQL:**
 ```python
-result = engine.query("""
+cursor = engine.execute("""
     SELECT MERGE(position, 1000)
     FROM features
 """)
@@ -538,7 +556,7 @@ bedtools merge -i features.bed -s
 
 **GIQL:**
 ```python
-result = engine.query("""
+cursor = engine.execute("""
     SELECT MERGE(position, stranded=true)
     FROM features
 """)
@@ -553,7 +571,7 @@ bedtools merge -i features.bed -c 1 -o count
 
 **GIQL:**
 ```python
-result = engine.query("""
+cursor = engine.execute("""
     SELECT
         MERGE(position),
         COUNT(*) as feature_count
@@ -570,7 +588,7 @@ bedtools merge -i features.bed -c 5 -o mean
 
 **GIQL:**
 ```python
-result = engine.query("""
+cursor = engine.execute("""
     SELECT
         MERGE(position),
         AVG(score) as avg_score
@@ -587,7 +605,7 @@ bedtools merge -i features.bed -c 4 -o collapse
 
 **GIQL:**
 ```python
-result = engine.query("""
+cursor = engine.execute("""
     SELECT
         MERGE(position),
         STRING_AGG(name, ',') as feature_names

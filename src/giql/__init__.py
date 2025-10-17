@@ -19,6 +19,7 @@ from giql.engine import DialectType as DialectType
 from giql.engine import GIQLEngine as GIQLEngine
 from giql.generators import BaseGIQLGenerator as BaseGIQLGenerator
 from giql.generators import GIQLDuckDBGenerator as GIQLDuckDBGenerator
+from giql.protocols import CursorLike as CursorLike
 from giql.range_parser import CoordinateSystem as CoordinateSystem
 from giql.range_parser import IntervalType as IntervalType
 from giql.range_parser import ParsedRange as ParsedRange

@@ -51,7 +51,7 @@ Default: Report overlaps between A and B
 
 .. code-block:: python
 
-   result = engine.query("""
+   cursor = engine.execute("""
        SELECT DISTINCT a.*
        FROM features_a a, features_b b
        WHERE a.position INTERSECTS b.position
@@ -70,7 +70,7 @@ Default: Report overlaps between A and B
 
 .. code-block:: python
 
-   result = engine.query("""
+   cursor = engine.execute("""
        SELECT a.*
        FROM features_a a, features_b b
        WHERE a.position INTERSECTS b.position
@@ -89,7 +89,7 @@ Default: Report overlaps between A and B
 
 .. code-block:: python
 
-   result = engine.query("""
+   cursor = engine.execute("""
        SELECT b.*
        FROM features_a a, features_b b
        WHERE a.position INTERSECTS b.position
@@ -108,7 +108,7 @@ Default: Report overlaps between A and B
 
 .. code-block:: python
 
-   result = engine.query("""
+   cursor = engine.execute("""
        SELECT a.*, b.*
        FROM features_a a, features_b b
        WHERE a.position INTERSECTS b.position
@@ -130,7 +130,7 @@ Filtering Operations
 
 .. code-block:: python
 
-   result = engine.query("""
+   cursor = engine.execute("""
        SELECT a.*
        FROM features_a a
        LEFT JOIN features_b b ON a.position INTERSECTS b.position
@@ -150,7 +150,7 @@ Filtering Operations
 
 .. code-block:: python
 
-   result = engine.query("""
+   cursor = engine.execute("""
        SELECT DISTINCT a.*
        FROM features_a a
        INNER JOIN features_b b ON a.position INTERSECTS b.position
@@ -172,7 +172,7 @@ Counting Operations
 
 .. code-block:: python
 
-   result = engine.query("""
+   cursor = engine.execute("""
        SELECT a.*, COUNT(b.name) as overlap_count
        FROM features_a a
        LEFT JOIN features_b b ON a.position INTERSECTS b.position
@@ -195,7 +195,7 @@ Strand-Specific Operations
 
 .. code-block:: python
 
-   result = engine.query("""
+   cursor = engine.execute("""
        SELECT a.*
        FROM features_a a, features_b b
        WHERE a.position INTERSECTS b.position
@@ -215,7 +215,7 @@ Strand-Specific Operations
 
 .. code-block:: python
 
-   result = engine.query("""
+   cursor = engine.execute("""
        SELECT a.*
        FROM features_a a, features_b b
        WHERE a.position INTERSECTS b.position
@@ -240,7 +240,7 @@ Overlap Fraction Requirements
 
 .. code-block:: python
 
-   result = engine.query("""
+   cursor = engine.execute("""
        SELECT a.*
        FROM features_a a, features_b b
        WHERE a.position INTERSECTS b.position
@@ -262,7 +262,7 @@ Overlap Fraction Requirements
 
 .. code-block:: python
 
-   result = engine.query("""
+   cursor = engine.execute("""
        SELECT a.*
        FROM features_a a, features_b b
        WHERE a.position INTERSECTS b.position
@@ -284,7 +284,7 @@ Overlap Fraction Requirements
 
 .. code-block:: python
 
-   result = engine.query("""
+   cursor = engine.execute("""
        WITH overlap_calcs AS (
            SELECT
                a.*,
@@ -316,7 +316,7 @@ Join Operations
 
 .. code-block:: python
 
-   result = engine.query("""
+   cursor = engine.execute("""
        SELECT a.*, b.*
        FROM features_a a
        LEFT JOIN features_b b ON a.position INTERSECTS b.position
@@ -335,7 +335,7 @@ Join Operations
 
 .. code-block:: python
 
-   result = engine.query("""
+   cursor = engine.execute("""
        SELECT
            a.*,
            b.*,
@@ -357,7 +357,7 @@ Join Operations
 
 .. code-block:: python
 
-   result = engine.query("""
+   cursor = engine.execute("""
        SELECT
            a.*,
            b.*,
@@ -393,7 +393,7 @@ Intersect with multiple B files
    # Register schemas for each...
 
    # Query using UNION to combine all B features
-   result = engine.query("""
+   cursor = engine.execute("""
        WITH all_b_features AS (
            SELECT * FROM features_b1
            UNION ALL
@@ -422,7 +422,7 @@ Find features in A that overlap at least 2 features in B
 
 .. code-block:: python
 
-   result = engine.query("""
+   cursor = engine.execute("""
        SELECT a.*
        FROM features_a a
        INNER JOIN features_b b ON a.position INTERSECTS b.position
@@ -435,7 +435,7 @@ Complex filtering: Overlaps specific genes with quality threshold
 
 .. code-block:: python
 
-   result = engine.query("""
+   cursor = engine.execute("""
        SELECT v.*, g.name as gene_name
        FROM variants v
        INNER JOIN genes g ON v.position INTERSECTS g.position
@@ -450,7 +450,7 @@ Aggregate statistics per chromosome
 
 .. code-block:: python
 
-   result = engine.query("""
+   cursor = engine.execute("""
        SELECT
            a.chromosome,
            COUNT(DISTINCT a.name) as total_features,
@@ -472,7 +472,7 @@ Find variants in multiple genomic regions:
 
 .. code-block:: python
 
-   result = engine.query("""
+   cursor = engine.execute("""
        SELECT * FROM variants
        WHERE position INTERSECTS ANY(
            'chr1:1000-2000',
@@ -488,7 +488,7 @@ Find high-quality variants in specific genes:
 
 .. code-block:: python
 
-   result = engine.query("""
+   cursor = engine.execute("""
        SELECT v.*, g.name as gene_name
        FROM variants v
        INNER JOIN genes g ON v.position INTERSECTS g.position
@@ -504,7 +504,7 @@ Calculate per-chromosome statistics:
 
 .. code-block:: python
 
-   result = engine.query("""
+   cursor = engine.execute("""
        SELECT
            a.chromosome,
            COUNT(DISTINCT a.name) as total_features,
@@ -524,7 +524,7 @@ Find Non-Overlapping Features
 
 .. code-block:: python
 
-   result = engine.query("""
+   cursor = engine.execute("""
        SELECT a.*
        FROM features_a a
        LEFT JOIN features_b b ON a.position INTERSECTS b.position
@@ -538,7 +538,7 @@ Find features within a distance window:
 
 .. code-block:: python
 
-   result = engine.query("""
+   cursor = engine.execute("""
        WITH expanded AS (
            SELECT
                id,

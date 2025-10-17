@@ -1,3 +1,6 @@
+# macOS
+.DS_store
+
 # Python
 __pycache__/
 *.py[cod]
@@ -19,6 +22,7 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+.hypothesis/
 
 # Virtual environments
 .venv/
