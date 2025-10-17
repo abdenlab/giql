@@ -251,9 +251,9 @@ class BaseGIQLGenerator(Generator):
         if "." in column_ref:
             table_alias, _ = column_ref.rsplit(".", 1)
             return (
-                f"{table_alias}.chromosome",
-                f"{table_alias}.start_pos",
-                f"{table_alias}.end_pos",
+                f'"{table_alias}.chrom"',
+                f'"{table_alias}.start"',
+                f'"{table_alias}.end"',
             )
         else:
-            return "chromosome", "start_pos", "end_pos"
+            return '"chrom"', '"start"', '"end"'

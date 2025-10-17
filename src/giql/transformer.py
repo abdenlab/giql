@@ -126,16 +126,18 @@ class ClusterTransformer:
         end_col = "end_pos"
 
         # Build partition clause
-        partition_cols = [exp.column(chrom_col)]
+        partition_cols = [exp.column(chrom_col, quoted=True)]
         if stranded:
             partition_cols.append(exp.column("strand"))
 
         # Build ORDER BY for window
-        order_by = [exp.Ordered(this=exp.column(start_col))]
+        order_by = [exp.Ordered(this=exp.column(start_col, quoted=True))]
 
         # Create LAG window spec
         lag_window = exp.Window(
-            this=exp.Anonymous(this="LAG", expressions=[exp.column(end_col)]),
+            this=exp.Anonymous(
+                this="LAG", expressions=[exp.column(end_col, quoted=True)]
+            ),
             partition_by=partition_cols,
             order=exp.Order(expressions=order_by),
         )
@@ -153,7 +155,8 @@ class ClusterTransformer:
             ifs=[
                 exp.If(
                     this=exp.GTE(
-                        this=lag_with_distance, expression=exp.column(start_col)
+                        this=lag_with_distance,
+                        expression=exp.column(start_col, quoted=True),
                     ),
                     true=exp.Literal.number(0),
                 )
@@ -194,7 +197,7 @@ class ClusterTransformer:
 
         # Add missing required columns
         for col in required_cols - selected_cols:
-            cte_expressions.append(exp.column(col))
+            cte_expressions.append(exp.column(col, quoted=True))
 
         # Add is_new_cluster calculation
         cte_expressions.append(exp.alias_(case_expr, "is_new_cluster", quoted=False))
@@ -398,16 +401,20 @@ class MergeTransformer:
         select_exprs = []
 
         # Add group-by columns (non-aggregated)
-        select_exprs.append(exp.column(chrom_col))
+        select_exprs.append(exp.column(chrom_col, quoted=True))
         if stranded:
             select_exprs.append(exp.column("strand"))
 
         # Add merged interval bounds
         select_exprs.append(
-            exp.alias_(exp.Min(this=exp.column(start_col)), start_col, quoted=False)
+            exp.alias_(
+                exp.Min(this=exp.column(start_col, quoted=True)), start_col, quoted=False
+            )
         )
         select_exprs.append(
-            exp.alias_(exp.Max(this=exp.column(end_col)), end_col, quoted=False)
+            exp.alias_(
+                exp.Max(this=exp.column(end_col, quoted=True)), end_col, quoted=False
+            )
         )
 
         # Process other columns from original SELECT
@@ -438,9 +445,11 @@ class MergeTransformer:
         final_query.group_by(*group_by_cols, copy=False)
 
         # Add ORDER BY (chromosome, start)
-        final_query.order_by(exp.Ordered(this=exp.column(chrom_col)), copy=False)
         final_query.order_by(
-            exp.Ordered(this=exp.column(start_col)), append=True, copy=False
+            exp.Ordered(this=exp.column(chrom_col, quoted=True)), copy=False
+        )
+        final_query.order_by(
+            exp.Ordered(this=exp.column(start_col, quoted=True)), append=True, copy=False
         )
 
         return final_query
