@@ -19,9 +19,9 @@ class TestBaseGenerator:
         output = generator.generate(ast)
 
         # Should expand to chromosome/position checks
-        assert "chromosome = 'chr1'" in output
-        assert "start_pos < 2000" in output
-        assert "end_pos > 1000" in output
+        assert "\"chromosome\" = 'chr1'" in output
+        assert '"start_pos" < 2000' in output
+        assert '"end_pos" > 1000' in output
 
     def test_generate_contains(self):
         """
@@ -36,9 +36,9 @@ class TestBaseGenerator:
         output = generator.generate(ast)
 
         # Point query: start <= point < end
-        assert "chromosome = 'chr1'" in output
-        assert "start_pos <= 1500" in output
-        assert "end_pos > 1500" in output
+        assert "\"chromosome\" = 'chr1'" in output
+        assert '"start_pos" <= 1500' in output
+        assert '"end_pos" > 1500' in output
 
     def test_generate_within(self):
         """
@@ -53,9 +53,9 @@ class TestBaseGenerator:
         output = generator.generate(ast)
 
         # Left within right: start1 >= start2 AND end1 <= end2
-        assert "chromosome = 'chr1'" in output
-        assert "start_pos >= 1000" in output
-        assert "end_pos <= 5000" in output
+        assert "\"chromosome\" = 'chr1'" in output
+        assert '"start_pos" >= 1000' in output
+        assert '"end_pos" <= 5000' in output
 
     def test_generate_intersects_any(self):
         """
@@ -74,7 +74,7 @@ class TestBaseGenerator:
 
         # Should have two conditions combined with OR
         assert " OR " in output
-        assert output.count("chromosome = 'chr1'") == 2
+        assert output.count("\"chromosome\" = 'chr1'") == 2
 
     def test_generate_intersects_all(self):
         """
@@ -93,7 +93,7 @@ class TestBaseGenerator:
 
         # Should have two conditions combined with AND
         assert " AND " in output
-        assert output.count("chromosome = 'chr1'") == 2
+        assert output.count("\"chromosome\" = 'chr1'") == 2
 
     def test_generate_with_table_alias(self):
         """
@@ -108,9 +108,9 @@ class TestBaseGenerator:
         output = generator.generate(ast)
 
         # Should use table alias in generated conditions
-        assert "v.chromosome" in output
-        assert "v.start_pos" in output
-        assert "v.end_pos" in output
+        assert 'v."chromosome"' in output
+        assert 'v."start_pos"' in output
+        assert 'v."end_pos"' in output
 
     def test_contains_range_query(self):
         """
@@ -125,9 +125,9 @@ class TestBaseGenerator:
         output = generator.generate(ast)
 
         # Range containment: start1 <= start2 AND end1 >= end2
-        assert "chromosome = 'chr1'" in output
-        assert "start_pos <= 1500" in output
-        assert "end_pos >= 2000" in output
+        assert "\"chromosome\" = 'chr1'" in output
+        assert '"start_pos" <= 1500' in output
+        assert '"end_pos" >= 2000' in output
 
     def test_invalid_range_string(self):
         """
@@ -160,6 +160,6 @@ class TestDuckDBGenerator:
         output = generator.generate(ast)
 
         # Should still have the basic range conditions
-        assert "chromosome = 'chr1'" in output
-        assert "start_pos < 2000" in output
-        assert "end_pos > 1000" in output
+        assert "\"chromosome\" = 'chr1'" in output
+        assert '"start_pos" < 2000' in output
+        assert '"end_pos" > 1000' in output

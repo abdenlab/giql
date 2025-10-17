@@ -9,6 +9,11 @@ from typing import Literal
 import pandas as pd
 from sqlglot import parse_one
 
+from giql.constants import DEFAULT_CHROM_COL
+from giql.constants import DEFAULT_END_COL
+from giql.constants import DEFAULT_GENOMIC_COL
+from giql.constants import DEFAULT_START_COL
+from giql.constants import DEFAULT_STRAND_COL
 from giql.dialect import GIQLDialect
 from giql.generators import BaseGIQLGenerator
 from giql.generators import GIQLDuckDBGenerator
@@ -153,11 +158,11 @@ class GIQLEngine:
         self,
         table_name: str,
         columns: dict[str, str],
-        genomic_column: str = "position",
-        chrom_col: str = "chromosome",
-        start_col: str = "start_pos",
-        end_col: str = "end_pos",
-        strand_col: str | None = None,
+        genomic_column: str = DEFAULT_GENOMIC_COL,
+        chrom_col: str = DEFAULT_CHROM_COL,
+        start_col: str = DEFAULT_START_COL,
+        end_col: str = DEFAULT_END_COL,
+        strand_col: str | None = DEFAULT_STRAND_COL,
     ):
         """Register schema for a table.
 
@@ -182,20 +187,20 @@ class GIQLEngine:
         column_infos = {}
 
         for col_name, col_type in columns.items():
-            if col_name == genomic_column:
-                column_infos[col_name] = ColumnInfo(
-                    name=col_name,
-                    type=col_type,
-                    is_genomic=True,
-                    chrom_col=chrom_col,
-                    start_col=start_col,
-                    end_col=end_col,
-                    strand_col=strand_col,
-                )
-            else:
-                column_infos[col_name] = ColumnInfo(
-                    name=col_name, type=col_type, is_genomic=False
-                )
+            column_infos[col_name] = ColumnInfo(
+                name=col_name, type=col_type, is_genomic=False
+            )
+
+        # Add virtual genomic column with mappings to physical columns
+        column_infos[genomic_column] = ColumnInfo(
+            name=genomic_column,
+            type="GENOMIC_RANGE",  # Virtual type
+            is_genomic=True,
+            chrom_col=chrom_col,
+            start_col=start_col,
+            end_col=end_col,
+            strand_col=strand_col,
+        )
 
         table_schema = TableSchema(table_name, column_infos)
         self.schema_info.register_table(table_name, table_schema)
