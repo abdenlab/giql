@@ -6,6 +6,10 @@ operations (like CLUSTER and MERGE) into equivalent SQL with CTEs.
 
 from sqlglot import exp
 
+from giql.constants import DEFAULT_CHROM_COL
+from giql.constants import DEFAULT_END_COL
+from giql.constants import DEFAULT_START_COL
+from giql.constants import DEFAULT_STRAND_COL
 from giql.expressions import GIQLCluster
 from giql.expressions import GIQLMerge
 from giql.schema import SchemaInfo
@@ -35,6 +39,57 @@ class ClusterTransformer:
             Schema information for column mapping
         """
         self.schema_info = schema_info
+
+    def _get_table_name(self, query: exp.Select) -> str | None:
+        """Extract table name from query's FROM clause.
+
+        :param query:
+            Query to extract table name from
+        :return:
+            Table name if FROM contains a simple table, None otherwise
+        """
+        from_clause = query.args.get("from")
+        if not from_clause:
+            return None
+
+        if isinstance(from_clause.this, exp.Table):
+            return from_clause.this.name
+
+        return None
+
+    def _get_genomic_columns(self, query: exp.Select) -> tuple[str, str, str, str]:
+        """Get genomic column names from schema info or defaults.
+
+        :param query:
+            Query to extract table and column info from
+        :return:
+            Tuple of (chrom_col, start_col, end_col, strand_col)
+        """
+        table_name = self._get_table_name(query)
+
+        # Default column names
+        chrom_col = DEFAULT_CHROM_COL
+        start_col = DEFAULT_START_COL
+        end_col = DEFAULT_END_COL
+        strand_col = DEFAULT_STRAND_COL
+
+        if table_name:
+            table_schema = self.schema_info.get_table(table_name)
+            if table_schema:
+                # Find the genomic column
+                for col_info in table_schema.columns.values():
+                    if col_info.is_genomic:
+                        if col_info.chrom_col:
+                            chrom_col = col_info.chrom_col
+                        if col_info.start_col:
+                            start_col = col_info.start_col
+                        if col_info.end_col:
+                            end_col = col_info.end_col
+                        if col_info.strand_col:
+                            strand_col = col_info.strand_col
+                        break
+
+        return chrom_col, start_col, end_col, strand_col
 
     def transform(self, query: exp.Expression) -> exp.Expression:
         """Transform query if it contains CLUSTER expressions.
@@ -120,15 +175,13 @@ class ClusterTransformer:
         else:
             stranded = False
 
-        # Get column names (for now, use defaults - TODO: use schema_info)
-        chrom_col = "chromosome"
-        start_col = "start_pos"
-        end_col = "end_pos"
+        # Get column names from schema_info or use defaults
+        chrom_col, start_col, end_col, strand_col = self._get_genomic_columns(query)
 
         # Build partition clause
         partition_cols = [exp.column(chrom_col, quoted=True)]
         if stranded:
-            partition_cols.append(exp.column("strand"))
+            partition_cols.append(exp.column(strand_col, quoted=True))
 
         # Build ORDER BY for window
         order_by = [exp.Ordered(this=exp.column(start_col, quoted=True))]
@@ -180,7 +233,7 @@ class ClusterTransformer:
         # Ensure required columns for window functions are included
         required_cols = {chrom_col, start_col, end_col}
         if stranded:
-            required_cols.add("strand")
+            required_cols.add(strand_col)
 
         # Check if required columns are already in the select list
         selected_cols = set()
@@ -345,10 +398,13 @@ class MergeTransformer:
         distance_expr = merge_expr.args.get("distance")
         stranded_expr = merge_expr.args.get("stranded")
 
-        # Get column names
-        chrom_col = "chromosome"
-        start_col = "start_pos"
-        end_col = "end_pos"
+        # Get column names from schema_info or use defaults
+        (
+            chrom_col,
+            start_col,
+            end_col,
+            strand_col,
+        ) = self.cluster_transformer._get_genomic_columns(query)
 
         # Build CLUSTER expression with same parameters
         cluster_kwargs = {"this": merge_expr.this}
@@ -393,7 +449,7 @@ class MergeTransformer:
             stranded = False
 
         if stranded:
-            group_by_cols.append(exp.column("strand"))
+            group_by_cols.append(exp.column(strand_col, quoted=True))
 
         group_by_cols.append(exp.column("__giql_cluster_id"))
 
@@ -403,7 +459,7 @@ class MergeTransformer:
         # Add group-by columns (non-aggregated)
         select_exprs.append(exp.column(chrom_col, quoted=True))
         if stranded:
-            select_exprs.append(exp.column("strand"))
+            select_exprs.append(exp.column(strand_col, quoted=True))
 
         # Add merged interval bounds
         select_exprs.append(
