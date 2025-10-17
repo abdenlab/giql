@@ -40,7 +40,7 @@ class TestGIQLEngine:
         with GIQLEngine() as engine:
             assert engine.conn is not None
 
-    def test_load_csv_and_query_duckdb(self, tmp_path):
+    def test_load_csv_and_query_duckdb(self, tmp_path, to_df):
         """
         GIVEN CSV data loaded into DuckDB
         WHEN executing GIQL query
@@ -59,14 +59,15 @@ class TestGIQLEngine:
             engine.load_csv("variants", str(csv_path))
 
             # Query using INTERSECTS
-            result = engine.query(
+            cursor = engine.execute(
                 "SELECT * FROM variants WHERE position INTERSECTS 'chr1:1000-2000'"
             )
+            result = to_df(cursor)
 
             assert len(result) == 1
             assert result.iloc[0]["id"] == 1
 
-    def test_load_csv_and_query_sqlite(self, tmp_path):
+    def test_load_csv_and_query_sqlite(self, tmp_path, to_df):
         """
         GIVEN CSV data loaded into SQLite
         WHEN executing GIQL query
@@ -85,14 +86,16 @@ class TestGIQLEngine:
             engine.load_csv("variants", str(csv_path))
 
             # Query using INTERSECTS
-            result = engine.query(
-                "SELECT * FROM variants WHERE position INTERSECTS 'chr1:1000-2000'"
+            result = to_df(
+                engine.execute(
+                    "SELECT * FROM variants WHERE position INTERSECTS 'chr1:1000-2000'"
+                )
             )
 
             assert len(result) == 1
             assert result.iloc[0]["id"] == 1
 
-    def test_intersects_any_query(self, tmp_path):
+    def test_intersects_any_query(self, tmp_path, to_df):
         """
         GIVEN variants data
         WHEN querying with INTERSECTS ANY
@@ -109,15 +112,17 @@ class TestGIQLEngine:
         with GIQLEngine(target_dialect="duckdb") as engine:
             engine.load_csv("variants", str(csv_path))
 
-            result = engine.query(
-                "SELECT * FROM variants "
-                "WHERE position INTERSECTS ANY('chr1:1000-2000', 'chr2:400-700')"
+            result = to_df(
+                engine.execute(
+                    "SELECT * FROM variants "
+                    "WHERE position INTERSECTS ANY('chr1:1000-2000', 'chr2:400-700')"
+                )
             )
 
             assert len(result) == 2
             assert set(result["id"]) == {1, 3}
 
-    def test_contains_query(self, tmp_path):
+    def test_contains_query(self, tmp_path, to_df):
         """
         GIVEN variants data
         WHEN querying with CONTAINS
@@ -133,14 +138,16 @@ class TestGIQLEngine:
         with GIQLEngine(target_dialect="duckdb") as engine:
             engine.load_csv("variants", str(csv_path))
 
-            result = engine.query(
-                "SELECT * FROM variants WHERE position CONTAINS 'chr1:1550'"
+            result = to_df(
+                engine.execute(
+                    "SELECT * FROM variants WHERE position CONTAINS 'chr1:1550'"
+                )
             )
 
             assert len(result) == 1
             assert result.iloc[0]["id"] == 1
 
-    def test_within_query(self, tmp_path):
+    def test_within_query(self, tmp_path, to_df):
         """
         GIVEN variants data
         WHEN querying with WITHIN
@@ -157,14 +164,16 @@ class TestGIQLEngine:
         with GIQLEngine(target_dialect="duckdb") as engine:
             engine.load_csv("variants", str(csv_path))
 
-            result = engine.query(
-                "SELECT * FROM variants WHERE position WITHIN 'chr1:1000-11000'"
+            result = to_df(
+                engine.execute(
+                    "SELECT * FROM variants WHERE position WITHIN 'chr1:1000-11000'"
+                )
             )
 
             assert len(result) == 2
             assert set(result["id"]) == {1, 2}
 
-    def test_verbose_mode(self, tmp_path):
+    def test_verbose_mode(self, tmp_path, to_df):
         """
         GIVEN engine with verbose mode
         WHEN executing query
@@ -178,8 +187,10 @@ class TestGIQLEngine:
 
         with GIQLEngine(target_dialect="duckdb", verbose=True) as engine:
             engine.load_csv("variants", str(csv_path))
-            result = engine.query(
-                "SELECT * FROM variants WHERE position INTERSECTS 'chr1:1000-2000'"
+            result = to_df(
+                engine.execute(
+                    "SELECT * FROM variants WHERE position INTERSECTS 'chr1:1000-2000'"
+                )
             )
             assert len(result) == 1
 
@@ -189,7 +200,9 @@ class TestGIQLEngine:
         end_col=st.sampled_from(["end_pos", "end", "stop", "chromEnd"]),
         strand_col=st.sampled_from(["strand", "str", "orientation", "direction"]),
     )
-    def test_custom_genomic_columns(self, chrom_col, start_col, end_col, strand_col):
+    def test_custom_genomic_columns(
+        self, chrom_col, start_col, end_col, strand_col, to_df
+    ):
         """
         GIVEN CSV data with custom genomic column names
         WHEN registering schema with custom column mappings
@@ -229,15 +242,19 @@ class TestGIQLEngine:
                 )
 
                 # Test INTERSECTS query
-                result = engine.query(
-                    "SELECT * FROM variants WHERE position INTERSECTS 'chr1:1000-2000'"
+                result = to_df(
+                    engine.execute(
+                        "SELECT * FROM variants WHERE position INTERSECTS 'chr1:1000-2000'"
+                    )
                 )
                 assert len(result) == 2
                 assert set(result["id"]) == {1, 4}
 
                 # Test CLUSTER query (uses genomic columns internally)
-                result = engine.query(
-                    "SELECT *, CLUSTER(position) AS cluster_id FROM variants ORDER BY id"
+                result = to_df(
+                    engine.execute(
+                        "SELECT *, CLUSTER(position) AS cluster_id FROM variants ORDER BY id"
+                    )
                 )
                 assert len(result) == 4
                 # Variants 1 and 4 should cluster together (overlapping on chr1)
@@ -246,9 +263,9 @@ class TestGIQLEngine:
                 assert result.iloc[1]["cluster_id"] != result.iloc[0]["cluster_id"]
 
                 # Test stranded CLUSTER query
-                result = engine.query(
-                    """SELECT *, CLUSTER(position, stranded=TRUE) AS cluster_id
-                       FROM variants ORDER BY id"""
+                result = to_df(
+                    engine.execute("""SELECT *, CLUSTER(position, stranded=TRUE) AS cluster_id
+                       FROM variants ORDER BY id""")
                 )
                 assert len(result) == 4
                 # With stranded=TRUE, variants 1 and 4 should cluster together (both + and overlapping)
@@ -258,7 +275,7 @@ class TestGIQLEngine:
                 assert "cluster_id" in result.columns
 
                 # Test MERGE query
-                result = engine.query("SELECT MERGE(position) FROM variants")
+                result = to_df(engine.execute("SELECT MERGE(position) FROM variants"))
                 # Should merge overlapping intervals
                 assert len(result) >= 1
 
@@ -274,7 +291,14 @@ class TestGIQLEngine:
     )
     @settings(deadline=None)
     def test_join_with_different_schemas(
-        self, v_chrom_col, v_start_col, v_end_col, f_chrom_col, f_start_col, f_end_col
+        self,
+        v_chrom_col,
+        v_start_col,
+        v_end_col,
+        f_chrom_col,
+        f_start_col,
+        f_end_col,
+        to_df,
     ):
         """
         GIVEN two tables with different custom genomic column schemas
@@ -339,13 +363,13 @@ class TestGIQLEngine:
                 )
 
                 # Test JOIN with INTERSECTS on both tables
-                result = engine.query(
-                    """
+                result = to_df(
+                    engine.execute("""
                     SELECT v.name, f.type
                     FROM variants v
                     JOIN features f ON v.position INTERSECTS f.region
                     ORDER BY v.id
-                    """
+                    """)
                 )
 
                 # Variant 1 (chr1:1500-1600) intersects Feature 1 (chr1:1000-2000)
@@ -356,26 +380,26 @@ class TestGIQLEngine:
                 assert list(result["type"]) == ["exon", "intron", "promoter"]
 
                 # Test LEFT JOIN to verify schema resolution works
-                result = engine.query(
-                    """
+                result = to_df(
+                    engine.execute("""
                     SELECT v.id, v.name, f.type
                     FROM variants v
                     LEFT JOIN features f ON v.position INTERSECTS f.region
                     WHERE v.id = 1
-                    """
+                    """)
                 )
                 assert len(result) == 1
                 assert result.iloc[0]["name"] == "var1"
                 assert result.iloc[0]["type"] == "exon"
 
                 # Test WHERE clause with INTERSECTS on specific table
-                result = engine.query(
-                    """
+                result = to_df(
+                    engine.execute("""
                     SELECT v.id, v.name
                     FROM variants v, features f
                     WHERE v.position INTERSECTS f.region
                     AND v.position INTERSECTS 'chr1:1000-2000'
-                    """
+                    """)
                 )
                 # Only variant 1 intersects both feature and the specified range
                 assert len(result) == 1
