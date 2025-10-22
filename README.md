@@ -39,6 +39,13 @@ with GIQLEngine(target_dialect="duckdb") as engine:
     # Process results lazily
     for row in cursor:
         print(row)
+
+    # Or just transpile to SQL without executing
+    sql = engine.transpile("""
+        SELECT * FROM variants
+        WHERE position INTERSECTS 'chr1:1000-2000'
+    """)
+    print(sql)  # See the generated SQL
 ```
 
 ## Recipes: Replicating Bedtools with GIQL
@@ -612,6 +619,31 @@ cursor = engine.execute("""
     FROM features
 """)
 ```
+
+## Transpiling GIQL to SQL
+
+The `transpile()` method allows you to convert GIQL queries to standard SQL without executing them. This is useful for debugging, understanding the generated SQL, or integrating GIQL with external tools:
+
+```python
+from giql import GIQLEngine
+
+with GIQLEngine(target_dialect="duckdb") as engine:
+    # Transpile GIQL to target SQL dialect
+    sql = engine.transpile("""
+        SELECT * FROM variants
+        WHERE position INTERSECTS 'chr1:1000-2000'
+    """)
+
+    print(sql)
+    # Output: SELECT * FROM variants WHERE chromosome = 'chr1' AND start_pos < 2000 AND end_pos > 1000
+
+# Different dialects generate different SQL
+with GIQLEngine(target_dialect="sqlite") as engine:
+    sql = engine.transpile("SELECT * FROM variants WHERE position INTERSECTS 'chr1:1000-2000'")
+    # Generates SQLite-compatible SQL
+```
+
+The transpiled SQL can be executed directly on your database or used with other tools. The `transpile()` method respects the engine's `verbose` setting to print detailed transpilation information.
 
 ## Development
 

@@ -54,6 +54,13 @@ Basic usage:
        for row in cursor:
            print(row)
 
+       # Or just transpile to SQL without executing
+       sql = engine.transpile("""
+           SELECT * FROM variants
+           WHERE position INTERSECTS 'chr1:1000-2000'
+       """)
+       print(sql)  # See the generated SQL
+
 Features
 --------
 
@@ -63,6 +70,7 @@ Features
 * **Set quantifiers**: ANY, ALL for multi-range queries
 * **Column-to-column joins**: Join tables on genomic position
 * **Zero-copy**: Efficient in-memory operations with DuckDB
+* **Transpilation**: Convert GIQL to standard SQL for debugging or external use
 
 Indices and tables
 ==================

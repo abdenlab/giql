@@ -554,3 +554,128 @@ Find features within a distance window:
            AND b.start_pos < a.search_end
            AND b.end_pos > a.search_start
    """)
+
+Debugging and Transpilation
+----------------------------
+
+Understanding Generated SQL
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Use the ``transpile()`` method to see what SQL is generated for your GIQL queries:
+
+.. code-block:: python
+
+   from giql import GIQLEngine
+
+   with GIQLEngine(target_dialect="duckdb") as engine:
+       # Register schema
+       engine.register_table_schema(
+           "variants",
+           {
+               "chromosome": "VARCHAR",
+               "start_pos": "BIGINT",
+               "end_pos": "BIGINT",
+           },
+           genomic_column="position",
+       )
+
+       # Transpile without executing
+       sql = engine.transpile("""
+           SELECT * FROM variants
+           WHERE position INTERSECTS 'chr1:1000-2000'
+       """)
+
+       print(sql)
+       # Shows: SELECT * FROM variants WHERE chromosome = 'chr1' AND start_pos < 2000 AND end_pos > 1000
+
+Comparing Dialects
+~~~~~~~~~~~~~~~~~~
+
+See how different dialects handle the same query:
+
+.. code-block:: python
+
+   from giql import GIQLEngine
+
+   query = """
+       SELECT * FROM variants
+       WHERE position INTERSECTS ANY('chr1:1000-2000', 'chr2:5000-6000')
+   """
+
+   # DuckDB
+   with GIQLEngine(target_dialect="duckdb") as engine:
+       engine.register_table_schema("variants", {
+           "chromosome": "VARCHAR",
+           "start_pos": "BIGINT",
+           "end_pos": "BIGINT",
+       }, genomic_column="position")
+       duckdb_sql = engine.transpile(query)
+       print("DuckDB SQL:")
+       print(duckdb_sql)
+
+   # SQLite
+   with GIQLEngine(target_dialect="sqlite") as engine:
+       engine.register_table_schema("variants", {
+           "chromosome": "VARCHAR",
+           "start_pos": "BIGINT",
+           "end_pos": "BIGINT",
+       }, genomic_column="position")
+       sqlite_sql = engine.transpile(query)
+       print("\nSQLite SQL:")
+       print(sqlite_sql)
+
+Verbose Mode for Debugging
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Enable verbose mode to see detailed transpilation information:
+
+.. code-block:: python
+
+   from giql import GIQLEngine
+
+   with GIQLEngine(target_dialect="duckdb", verbose=True) as engine:
+       engine.register_table_schema("variants", {
+           "chromosome": "VARCHAR",
+           "start_pos": "BIGINT",
+           "end_pos": "BIGINT",
+       }, genomic_column="position")
+
+       # This will print detailed transpilation steps
+       sql = engine.transpile("""
+           SELECT * FROM variants
+           WHERE position INTERSECTS 'chr1:1000-2000'
+       """)
+
+       # Also shows transpilation details when executing
+       cursor = engine.execute("""
+           SELECT * FROM variants
+           WHERE position INTERSECTS 'chr1:1000-2000'
+       """)
+
+Using Transpiled SQL Externally
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The transpiled SQL can be used with external tools or libraries:
+
+.. code-block:: python
+
+   from giql import GIQLEngine
+   import duckdb
+
+   # Get transpiled SQL
+   with GIQLEngine(target_dialect="duckdb") as engine:
+       engine.register_table_schema("variants", {
+           "chromosome": "VARCHAR",
+           "start_pos": "BIGINT",
+           "end_pos": "BIGINT",
+       }, genomic_column="position")
+
+       sql = engine.transpile("""
+           SELECT * FROM variants
+           WHERE position INTERSECTS 'chr1:1000-2000'
+       """)
+
+   # Execute with external DuckDB connection
+   conn = duckdb.connect("my_database.duckdb")
+   result = conn.execute(sql).fetchall()
+   conn.close()
