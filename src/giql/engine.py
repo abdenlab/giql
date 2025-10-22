@@ -256,18 +256,19 @@ class GIQLEngine:
         if self.verbose:
             print(f"Loaded {table_name} from {file_path}")
 
-    def execute(self, giql: str) -> CursorLike:
-        """Execute a GIQL query and return a database cursor.
+    def transpile(self, giql: str) -> str:
+        """Transpile a GIQL query to the engine's target SQL dialect.
 
-        Parses the GIQL syntax, transpiles to target SQL dialect,
-        and executes the query, returning a cursor for lazy iteration.
+        Parses the GIQL syntax and transpiles it to the target SQL dialect
+        without executing it. Useful for debugging or generating SQL for
+        external use.
 
         :param giql:
             Query string with GIQL genomic extensions
         :return:
-            Database cursor (DB-API 2.0 compatible) that can be iterated
+            Transpiled SQL query string in the target dialect
         :raises ValueError:
-            If the query cannot be parsed, transpiled, or executed
+            If the query cannot be parsed or transpiled
         """
         # Parse with GIQL dialect
         try:
@@ -298,6 +299,24 @@ class GIQLEngine:
             print("\nTranspiled SQL:")
             print(target_sql)
             print(f"{'=' * 60}\n")
+
+        return target_sql
+
+    def execute(self, giql: str) -> CursorLike:
+        """Execute a GIQL query and return a database cursor.
+
+        Parses the GIQL syntax, transpiles to target SQL dialect,
+        and executes the query returning a cursor for lazy iteration.
+
+        :param giql:
+            Query string with GIQL genomic extensions
+        :return:
+            Database cursor (DB-API 2.0 compatible) that can be iterated
+        :raises ValueError:
+            If the query cannot be parsed, transpiled, or executed
+        """
+        # Transpile GIQL to target SQL
+        target_sql = self.transpile(giql)
 
         # Execute and return cursor
         try:
