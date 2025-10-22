@@ -404,3 +404,77 @@ class TestGIQLEngine:
                 # Only variant 1 intersects both feature and the specified range
                 assert len(result) == 1
                 assert result.iloc[0]["name"] == "var1"
+
+    def test_transpile_returns_sql_string(self):
+        """
+        GIVEN GIQLEngine with a GIQL query
+        WHEN calling transpile()
+        THEN should return SQL string without executing it
+        """
+        with GIQLEngine(target_dialect="duckdb") as engine:
+            sql = engine.transpile(
+                "SELECT * FROM variants WHERE position INTERSECTS 'chr1:1000-2000'"
+            )
+
+            assert isinstance(sql, str)
+            assert len(sql) > 0
+            assert "SELECT" in sql.upper()
+            # Should contain genomic comparison logic
+            assert "chromosome" in sql or "start_pos" in sql or "end_pos" in sql
+
+    def test_transpile_different_dialects(self):
+        """
+        GIVEN GIQLEngine with different SQL dialects
+        WHEN calling transpile()
+        THEN should return SQL appropriate for each dialect
+        """
+        query = "SELECT * FROM variants WHERE position INTERSECTS 'chr1:1000-2000'"
+
+        for dialect in ["duckdb", "sqlite"]:
+            with GIQLEngine(target_dialect=dialect) as engine:
+                sql = engine.transpile(query)
+                assert isinstance(sql, str)
+                assert len(sql) > 0
+                assert "SELECT" in sql.upper()
+
+    def test_transpile_verbose_mode(self, tmp_path, capsys):
+        """
+        GIVEN GIQLEngine with verbose mode enabled
+        WHEN calling transpile()
+        THEN should print transpilation details
+        """
+        with GIQLEngine(target_dialect="duckdb", verbose=True) as engine:
+            sql = engine.transpile(
+                "SELECT * FROM variants WHERE position INTERSECTS 'chr1:1000-2000'"
+            )
+
+            captured = capsys.readouterr()
+            assert "Target Dialect: duckdb" in captured.out
+            assert "Original GIQL:" in captured.out
+            assert "Transpiled SQL:" in captured.out
+            assert isinstance(sql, str)
+
+    def test_execute_uses_transpile(self, tmp_path, to_df):
+        """
+        GIVEN GIQLEngine after refactoring
+        WHEN calling execute()
+        THEN should use transpile() internally and execute correctly
+        """
+        csv_content = """id,chromosome,start_pos,end_pos
+1,chr1,1500,1600
+2,chr1,10500,10600
+"""
+        csv_path = tmp_path / "variants.csv"
+        csv_path.write_text(csv_content)
+
+        with GIQLEngine(target_dialect="duckdb") as engine:
+            engine.load_csv("variants", str(csv_path))
+
+            # execute() should internally call transpile()
+            cursor = engine.execute(
+                "SELECT * FROM variants WHERE position INTERSECTS 'chr1:1000-2000'"
+            )
+            result = to_df(cursor)
+
+            assert len(result) == 1
+            assert result.iloc[0]["id"] == 1

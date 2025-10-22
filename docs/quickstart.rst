@@ -172,3 +172,57 @@ Join tables on genomic position:
    SELECT v.*, g.name
    FROM variants v
    INNER JOIN genes g ON v.position INTERSECTS g.position
+
+Transpiling to SQL
+------------------
+
+The ``transpile()`` method converts GIQL queries to standard SQL without executing them.
+This is useful for debugging, understanding the generated SQL, or integrating with external tools:
+
+.. code-block:: python
+
+   from giql import GIQLEngine
+
+   with GIQLEngine(target_dialect="duckdb") as engine:
+       # Register table schema
+       engine.register_table_schema(
+           "variants",
+           {
+               "chromosome": "VARCHAR",
+               "start_pos": "BIGINT",
+               "end_pos": "BIGINT",
+           },
+           genomic_column="position",
+       )
+
+       # Transpile GIQL to SQL
+       sql = engine.transpile("""
+           SELECT * FROM variants
+           WHERE position INTERSECTS 'chr1:1000-2000'
+       """)
+
+       print(sql)
+       # Output: SELECT * FROM variants WHERE chromosome = 'chr1' AND start_pos < 2000 AND end_pos > 1000
+
+Different target dialects generate different SQL:
+
+.. code-block:: python
+
+   # DuckDB dialect
+   with GIQLEngine(target_dialect="duckdb") as engine:
+       sql = engine.transpile("SELECT * FROM variants WHERE position INTERSECTS 'chr1:1000-2000'")
+       # Generates DuckDB-optimized SQL
+
+   # SQLite dialect
+   with GIQLEngine(target_dialect="sqlite") as engine:
+       sql = engine.transpile("SELECT * FROM variants WHERE position INTERSECTS 'chr1:1000-2000'")
+       # Generates SQLite-compatible SQL
+
+The transpiled SQL can be executed directly on your database or used with other tools.
+Use ``verbose=True`` when creating the engine to see detailed transpilation information:
+
+.. code-block:: python
+
+   with GIQLEngine(target_dialect="duckdb", verbose=True) as engine:
+       sql = engine.transpile("SELECT * FROM variants WHERE position INTERSECTS 'chr1:1000-2000'")
+       # Prints detailed information about the transpilation process
