@@ -10,6 +10,42 @@ WIP
 
 GIQL extends SQL with spatial operators for genomic interval queries. It transpiles to standard SQL that works across multiple database backends.
 
+## Installation
+
+### From Source
+
+Clone the repository and install locally:
+
+```bash
+# Clone the repository
+git clone https://github.com/abdennlab/giql.git
+cd giql
+
+# Install in development mode
+pip install -e .
+
+# Or with development dependencies
+pip install -e ".[dev]"
+```
+
+### Building Documentation
+
+To build the documentation locally:
+
+```bash
+cd docs
+
+# Install documentation dependencies
+pip install -r requirements.txt
+
+# Build HTML documentation
+make html
+
+# View the documentation
+# The built docs will be in docs/_build/html/
+# Open docs/_build/html/index.html in your browser
+```
+
 ## Quick Start
 
 ```python
