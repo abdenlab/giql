@@ -205,6 +205,65 @@ class TestCluster:
         assert ns_f2["cluster_id"] == ns_f3["cluster_id"]
         assert ns_f3["cluster_id"] == ns_f4["cluster_id"]
 
+    def test_cluster_in_cte(self, duckdb_cluster_engine, to_df):
+        """Test CLUSTER operation inside a CTE."""
+        result = to_df(
+            duckdb_cluster_engine.execute("""
+            WITH clustered_features AS (
+                SELECT
+                    id,
+                    chromosome,
+                    start_pos,
+                    end_pos,
+                    name,
+                    CLUSTER(position) AS cluster_id
+                FROM features
+            )
+            SELECT *
+            FROM clustered_features
+            WHERE cluster_id = 1
+            ORDER BY chromosome, start_pos
+        """)
+        )
+
+        # Should return features in cluster 1 from each chromosome
+        assert len(result) > 0
+        assert all("cluster_id" in row for _, row in result.iterrows())
+
+    def test_cluster_in_cte_with_aggregation(self, duckdb_cluster_engine, to_df):
+        """Test CLUSTER in CTE with aggregation in outer query."""
+        result = to_df(
+            duckdb_cluster_engine.execute("""
+            WITH clustered_features AS (
+                SELECT
+                    chromosome,
+                    start_pos,
+                    end_pos,
+                    CLUSTER(position) AS cluster_id
+                FROM features
+            )
+            SELECT
+                chromosome,
+                cluster_id,
+                COUNT(*) as interval_count,
+                MIN(start_pos) as min_start,
+                MAX(end_pos) as max_end
+            FROM clustered_features
+            GROUP BY chromosome, cluster_id
+            ORDER BY chromosome, cluster_id
+        """)
+        )
+
+        # chr1 should have 2 clusters, chr2 should have 2 clusters
+        assert len(result) == 4
+
+        chr1_results = result[result["chromosome"] == "chr1"]
+        assert len(chr1_results) == 2
+        # First cluster should have 3 intervals (f1, f2, f3)
+        assert chr1_results.iloc[0]["interval_count"] == 3
+        # Second cluster should have 1 interval (f4)
+        assert chr1_results.iloc[1]["interval_count"] == 1
+
 
 class TestMerge:
     """Tests for MERGE aggregate function."""
@@ -296,3 +355,83 @@ class TestMerge:
         assert len(minus_strand) == 1
         assert minus_strand.iloc[0]["start_pos"] == 200
         assert minus_strand.iloc[0]["end_pos"] == 350
+
+    def test_merge_in_cte(self, duckdb_cluster_engine, to_df):
+        """Test MERGE operation inside a CTE."""
+        result = to_df(
+            duckdb_cluster_engine.execute("""
+            WITH merged_intervals AS (
+                SELECT MERGE(position)
+                FROM features
+            )
+            SELECT *
+            FROM merged_intervals
+            ORDER BY chromosome, start_pos
+        """)
+        )
+
+        # Should have same results as basic merge
+        assert len(result) == 4
+
+        chr1_results = result[result["chromosome"] == "chr1"].sort_values("start_pos")
+        assert len(chr1_results) == 2
+        assert chr1_results.iloc[0]["start_pos"] == 100
+        assert chr1_results.iloc[0]["end_pos"] == 500
+
+    def test_merge_in_cte_with_aggregation_and_filter(self, duckdb_cluster_engine, to_df):
+        """Test MERGE in CTE with aggregation and filtering in outer query."""
+        result = to_df(
+            duckdb_cluster_engine.execute("""
+            WITH merged_intervals AS (
+                SELECT
+                    MERGE(position),
+                    COUNT(*) as interval_count
+                FROM features
+            )
+            SELECT *
+            FROM merged_intervals
+            WHERE interval_count > 1
+            ORDER BY chromosome, start_pos
+        """)
+        )
+
+        # Only chr1's first merged interval has count > 1 (3 intervals merged)
+        assert len(result) == 1
+        assert result.iloc[0]["chromosome"] == "chr1"
+        assert result.iloc[0]["start_pos"] == 100
+        assert result.iloc[0]["end_pos"] == 500
+        assert result.iloc[0]["interval_count"] == 3
+
+    def test_merge_in_cte_with_distance_and_aggregation(self, duckdb_cluster_engine, to_df):
+        """Test MERGE with distance parameter in CTE with aggregation."""
+        result = to_df(
+            duckdb_cluster_engine.execute("""
+            WITH merged_intervals AS (
+                SELECT
+                    MERGE(position, 100),
+                    COUNT(*) as interval_count,
+                    AVG(id) as avg_id
+                FROM features
+            )
+            SELECT *
+            FROM merged_intervals
+            WHERE interval_count >= 2
+            ORDER BY chromosome, start_pos
+        """)
+        )
+
+        # With distance=100, chr1 all 4 features merge, chr2 features also merge
+        # (gap between chr2 features is exactly 100bp)
+        assert len(result) == 2
+
+        # Check chr1 merged interval
+        chr1_result = result[result["chromosome"] == "chr1"].iloc[0]
+        assert chr1_result["interval_count"] == 4
+        assert chr1_result["start_pos"] == 100
+        assert chr1_result["end_pos"] == 1000
+
+        # Check chr2 merged interval
+        chr2_result = result[result["chromosome"] == "chr2"].iloc[0]
+        assert chr2_result["interval_count"] == 2
+        assert chr2_result["start_pos"] == 100
+        assert chr2_result["end_pos"] == 400

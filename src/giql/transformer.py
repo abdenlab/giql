@@ -102,6 +102,28 @@ class ClusterTransformer:
         if not isinstance(query, exp.Select):
             return query
 
+        # First, recursively transform any CTEs that might contain CLUSTER
+        if query.args.get("with"):
+            cte = query.args["with"]
+            for cte_expr in cte.expressions:
+                if isinstance(cte_expr, exp.CTE):
+                    # Transform the CTE's subquery
+                    cte_expr.set("this", self.transform(cte_expr.this))
+
+        # Recursively transform subqueries in FROM clause
+        if query.args.get("from"):
+            from_clause = query.args["from"]
+            self._transform_subqueries_in_node(from_clause)
+
+        # Recursively transform subqueries in JOIN clauses
+        if query.args.get("joins"):
+            for join in query.args["joins"]:
+                self._transform_subqueries_in_node(join)
+
+        # Recursively transform subqueries in WHERE clause
+        if query.args.get("where"):
+            self._transform_subqueries_in_node(query.args["where"])
+
         # Find all CLUSTER expressions in the SELECT clause
         cluster_exprs = self._find_cluster_expressions(query)
 
@@ -113,6 +135,18 @@ class ClusterTransformer:
             query = self._transform_for_cluster(query, cluster_expr)
 
         return query
+
+    def _transform_subqueries_in_node(self, node: exp.Expression):
+        """Recursively transform subqueries within an expression node.
+
+        :param node:
+            Expression node to search for subqueries
+        """
+        # Find and transform any Subquery nodes
+        for subquery in node.find_all(exp.Subquery):
+            if isinstance(subquery.this, exp.Select):
+                transformed = self.transform(subquery.this)
+                subquery.set("this", transformed)
 
     def _find_cluster_expressions(self, query: exp.Select) -> list[GIQLCluster]:
         """Find all CLUSTER expressions in query.
@@ -350,6 +384,28 @@ class MergeTransformer:
         if not isinstance(query, exp.Select):
             return query
 
+        # First, recursively transform any CTEs that might contain MERGE
+        if query.args.get("with"):
+            cte = query.args["with"]
+            for cte_expr in cte.expressions:
+                if isinstance(cte_expr, exp.CTE):
+                    # Transform the CTE's subquery
+                    cte_expr.set("this", self.transform(cte_expr.this))
+
+        # Recursively transform subqueries in FROM clause
+        if query.args.get("from"):
+            from_clause = query.args["from"]
+            self._transform_subqueries_in_node(from_clause)
+
+        # Recursively transform subqueries in JOIN clauses
+        if query.args.get("joins"):
+            for join in query.args["joins"]:
+                self._transform_subqueries_in_node(join)
+
+        # Recursively transform subqueries in WHERE clause
+        if query.args.get("where"):
+            self._transform_subqueries_in_node(query.args["where"])
+
         # Find all MERGE expressions in the SELECT clause
         merge_exprs = self._find_merge_expressions(query)
 
@@ -362,6 +418,18 @@ class MergeTransformer:
 
         merge_expr = merge_exprs[0]
         return self._transform_for_merge(query, merge_expr)
+
+    def _transform_subqueries_in_node(self, node: exp.Expression):
+        """Recursively transform subqueries within an expression node.
+
+        :param node:
+            Expression node to search for subqueries
+        """
+        # Find and transform any Subquery nodes
+        for subquery in node.find_all(exp.Subquery):
+            if isinstance(subquery.this, exp.Select):
+                transformed = self.transform(subquery.this)
+                subquery.set("this", transformed)
 
     def _find_merge_expressions(self, query: exp.Select) -> list[GIQLMerge]:
         """Find all MERGE expressions in query.

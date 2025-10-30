@@ -47,3 +47,10 @@ sandbox.ipynb
 # uv
 .uv/
 uv.lock
+
+# hidden
+.*
+
+# except for...
+!.gitignore
+!.coveragerc
