@@ -54,3 +54,4 @@ uv.lock
 # except for...
 !.gitignore
 !.coveragerc
+!.specify/
