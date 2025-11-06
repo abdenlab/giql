@@ -69,7 +69,6 @@ Features
 * **Spatial operators**: INTERSECTS, CONTAINS, WITHIN
 * **Set quantifiers**: ANY, ALL for multi-range queries
 * **Column-to-column joins**: Join tables on genomic position
-* **Zero-copy**: Efficient in-memory operations with DuckDB
 * **Transpilation**: Convert GIQL to standard SQL for debugging or external use
 
 Indices and tables

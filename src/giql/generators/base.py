@@ -17,7 +17,9 @@ from sqlglot.generator import Generator
 from giql.constants import DEFAULT_CHROM_COL
 from giql.constants import DEFAULT_END_COL
 from giql.constants import DEFAULT_START_COL
+from giql.constants import DEFAULT_STRAND_COL
 from giql.expressions import Contains
+from giql.expressions import GIQLDistance
 from giql.expressions import Intersects
 from giql.expressions import SpatialSetPredicate
 from giql.expressions import Within
@@ -110,6 +112,61 @@ class BaseGIQLGenerator(Generator):
             SQL predicate string
         """
         return self._generate_spatial_set(expression)
+
+    def giqldistance_sql(self, expression: GIQLDistance) -> str:
+        """Generate SQL CASE expression for DISTANCE function.
+
+        :param expression:
+            GIQLDistance expression node
+        :return:
+            SQL CASE expression string calculating genomic distance
+        """
+        # Extract the two interval arguments
+        interval_a = expression.this
+        interval_b = expression.args.get("expression")
+
+        # Get SQL representations
+        interval_a_sql = self.sql(interval_a)
+        interval_b_sql = self.sql(interval_b)
+
+        # Check if we're dealing with column-to-column or column-to-literal
+        if "." in interval_a_sql and not interval_a_sql.startswith("'"):
+            # Column reference for interval_a
+            chrom_a, start_a, end_a = self._get_column_refs(interval_a_sql, None)
+        else:
+            # Literal range - not implemented yet for interval_a
+            raise ValueError("Literal range as first argument not yet supported")
+
+        if "." in interval_b_sql and not interval_b_sql.startswith("'"):
+            # Column reference for interval_b
+            chrom_b, start_b, end_b = self._get_column_refs(interval_b_sql, None)
+        else:
+            # Literal range - not implemented yet
+            raise ValueError("Literal range as second argument not yet supported")
+
+        # Generate CASE expression
+        return self._generate_distance_case(chrom_a, start_a, end_a, chrom_b, start_b, end_b)
+
+    def _generate_distance_case(
+        self,
+        chrom_a: str,
+        start_a: str,
+        end_a: str,
+        chrom_b: str,
+        start_b: str,
+        end_b: str,
+    ) -> str:
+        """Generate SQL CASE expression for distance calculation.
+
+        :param chrom_a: Chromosome column for interval A
+        :param start_a: Start column for interval A
+        :param end_a: End column for interval A
+        :param chrom_b: Chromosome column for interval B
+        :param start_b: Start column for interval B
+        :param end_b: End column for interval B
+        :return: SQL CASE expression
+        """
+        return f"""CASE WHEN {chrom_a} != {chrom_b} THEN NULL WHEN {start_a} < {end_b} AND {end_a} > {start_b} THEN 0 WHEN {end_a} <= {start_b} THEN ({start_b} - {end_a}) ELSE ({start_a} - {end_b}) END"""
 
     def _generate_spatial_op(self, expression: exp.Binary, op_type: str) -> str:
         """Generate SQL for a spatial operation.
@@ -279,21 +336,25 @@ class BaseGIQLGenerator(Generator):
         return "(" + combinator.join(conditions) + ")"
 
     def _get_column_refs(
-        self, column_ref: str, table_name: str | None = None
-    ) -> tuple[str, str, str]:
+        self, column_ref: str, table_name: str | None = None, include_strand: bool = False
+    ) -> tuple[str, str, str] | tuple[str, str, str, str]:
         """Get physical column names for genomic data.
 
         :param column_ref:
             Logical column reference (e.g., 'v.position' or 'position')
         :param table_name:
             Table name to look up schema (optional, overrides extraction from column_ref)
+        :param include_strand:
+            If True, return 4-tuple with strand column; otherwise return 3-tuple
         :return:
-            Tuple of (chromosome_col, start_col, end_col)
+            Tuple of (chromosome_col, start_col, end_col) or
+            (chromosome_col, start_col, end_col, strand_col) if include_strand=True
         """
         # Default column names
         chrom_col = DEFAULT_CHROM_COL
         start_col = DEFAULT_START_COL
         end_col = DEFAULT_END_COL
+        strand_col = DEFAULT_STRAND_COL
 
         # Extract table alias/name from column reference if present
         table_alias = None
@@ -317,18 +378,26 @@ class BaseGIQLGenerator(Generator):
                             start_col = col_info.start_col
                         if col_info.end_col:
                             end_col = col_info.end_col
+                        if col_info.strand_col:
+                            strand_col = col_info.strand_col
                         break
 
         # Format with table alias if present
         if table_alias:
-            return (
+            base_cols = (
                 f'{table_alias}."{chrom_col}"',
                 f'{table_alias}."{start_col}"',
                 f'{table_alias}."{end_col}"',
             )
+            if include_strand:
+                return base_cols + (f'{table_alias}."{strand_col}"',)
+            return base_cols
         else:
-            return (
+            base_cols = (
                 f'"{chrom_col}"',
                 f'"{start_col}"',
                 f'"{end_col}"',
             )
+            if include_strand:
+                return base_cols + (f'"{strand_col}"',)
+            return base_cols

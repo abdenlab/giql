@@ -656,6 +656,38 @@ cursor = engine.execute("""
 """)
 ```
 
+### Distance Calculation
+
+GIQL provides a `DISTANCE()` operator for calculating genomic distances between intervals, replicating `bedtools closest -d` functionality.
+
+#### Calculate distance between intervals
+
+**Bedtools:**
+```bash
+bedtools closest -a peaks.bed -b genes.bed -d
+```
+
+**GIQL:**
+```python
+cursor = engine.execute("""
+    SELECT
+        a.name AS peak,
+        b.name AS gene,
+        DISTANCE(a.position, b.position) AS distance
+    FROM peaks a
+    CROSS JOIN genes b
+    WHERE a.chromosome = b.chromosome
+    ORDER BY a.name, distance
+""")
+```
+
+**Distance calculation rules:**
+- Returns `0` for overlapping intervals
+- Returns positive integer (gap in base pairs) for non-overlapping intervals
+- Returns `NULL` for intervals on different chromosomes
+
+**Performance tip:** Always include `WHERE a.chromosome = b.chromosome` to avoid unnecessary cross-chromosome comparisons.
+
 ## Transpiling GIQL to SQL
 
 The `transpile()` method allows you to convert GIQL queries to standard SQL without executing them. This is useful for debugging, understanding the generated SQL, or integrating GIQL with external tools:
