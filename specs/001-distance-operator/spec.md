@@ -1,6 +1,6 @@
 # Feature Specification: DISTANCE UDF Operator
 
-**Feature Branch**: `distance-operator`
+**Feature Branch**: `001-distance-operator`
 **Created**: 2025-11-03
 **Status**: Draft
 **Input**: User description: "I'd like to add a DISTANCE UDF-based operator that mirrors bedtools' 'closest -d' command"
@@ -112,11 +112,12 @@ A researcher wants to know not just the distance but also the directionality (up
 - **FR-010**: DISTANCE() MUST accept optional named parameter `signed` (boolean, default=false) for directional distance calculation
 - **FR-011**: When `signed=true`, DISTANCE() MUST return negative values for upstream intervals and positive for downstream intervals
 - **FR-012**: Both `stranded` and `signed` parameters MAY be used together
-- **FR-013**: SQL generator MUST resolve position column references to physical chromosome/start/end/strand columns at transpilation time
-- **FR-014**: Documentation MUST include examples showing how to combine DISTANCE() with window functions to replicate `bedtools closest -d`
-- **FR-015**: Documentation MUST include examples showing how to use `stranded=true` parameter to replicate `bedtools closest -d -s`
-- **FR-016**: Documentation MUST include examples showing how to use `signed=true` parameter to replicate `bedtools closest -D ref`
-- **FR-017**: Documentation MUST include a note that data does not need to be presorted for correctness (unlike bedtools), though sorting may impact performance
+- **FR-013**: When both `signed=true` AND `stranded=true`, directionality MUST be relative to reference genome coordinates (lower coordinates = upstream) regardless of feature strand orientation
+- **FR-014**: SQL generator MUST resolve position column references to physical chromosome/start/end/strand columns at transpilation time
+- **FR-015**: Documentation MUST include examples showing how to combine DISTANCE() with window functions to replicate `bedtools closest -d`
+- **FR-016**: Documentation MUST include examples showing how to use `stranded=true` parameter to replicate `bedtools closest -d -s`
+- **FR-017**: Documentation MUST include examples showing how to use `signed=true` parameter to replicate `bedtools closest -D ref`
+- **FR-018**: Documentation MUST include a note that data does not need to be presorted for correctness (unlike bedtools), though sorting may impact performance
 
 ### Implementation Considerations
 

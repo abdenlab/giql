@@ -169,3 +169,56 @@ class GIQLMerge(exp.Func):
             kwargs["distance"] = positional_args[1]
 
         return cls(**kwargs)
+
+
+class GIQLDistance(exp.Func):
+    """DISTANCE function for calculating genomic distances between intervals.
+
+    Generates SQL CASE expression that computes distance between two genomic
+    intervals, with optional strand-specific and signed (directional) modes.
+
+    Examples:
+        DISTANCE(a.position, b.position)
+        DISTANCE(a.position, 'chr1:1000-2000')
+        DISTANCE(a.position, b.position, stranded=true)
+        DISTANCE(a.position, b.position, signed=true)
+        DISTANCE(a.position, b.position, stranded=true, signed=true)
+    """
+
+    arg_types = {
+        "this": True,  # Required: interval_a (column ref or literal range)
+        "expression": True,  # Required: interval_b (column ref or literal range)
+        "stranded": False,  # Optional: boolean for strand-specific distance
+        "signed": False,  # Optional: boolean for directional distance
+    }
+
+    @classmethod
+    def from_arg_list(cls, args):
+        """Parse argument list, handling named parameters.
+
+        :param args:
+            List of arguments from parser
+        :return:
+            GIQLDistance instance with properly mapped arguments
+        """
+        kwargs = {}
+        positional_args = []
+
+        # Separate named (EQ) and positional arguments
+        for arg in args:
+            if isinstance(arg, exp.EQ):
+                # Named parameter: extract name and value
+                param_name = (
+                    arg.this.name if isinstance(arg.this, exp.Column) else str(arg.this)
+                )
+                kwargs[param_name.lower()] = arg.expression
+            else:
+                positional_args.append(arg)
+
+        # Map positional arguments
+        if len(positional_args) >= 1:
+            kwargs["this"] = positional_args[0]
+        if len(positional_args) >= 2:
+            kwargs["expression"] = positional_args[1]
+
+        return cls(**kwargs)
