@@ -222,3 +222,55 @@ class GIQLDistance(exp.Func):
             kwargs["expression"] = positional_args[1]
 
         return cls(**kwargs)
+
+
+class GIQLNearest(exp.Func):
+    """NEAREST function for finding k-nearest genomic features.
+
+    Generates SQL for k-nearest neighbor queries using LATERAL joins
+    (PostgreSQL/DuckDB) or window functions (SQLite).
+
+    Examples:
+        NEAREST(genes, k=3)
+        NEAREST(genes, reference=peaks.position, k=5)
+        NEAREST(genes, reference='chr1:1000-2000', k=3)
+        NEAREST(genes, k=5, max_distance=100000, stranded=true)
+    """
+
+    arg_types = {
+        "this": True,  # Required: target table name
+        "reference": False,  # Optional: position reference (column or literal)
+        "k": False,  # Optional: number of neighbors (default=1)
+        "max_distance": False,  # Optional: distance threshold
+        "stranded": False,  # Optional: strand-specific search
+        "signed": False,  # Optional: directional distance
+    }
+
+    @classmethod
+    def from_arg_list(cls, args):
+        """Parse argument list, handling named parameters.
+
+        :param args:
+            List of arguments from parser
+        :return:
+            GIQLNearest instance with properly mapped arguments
+        """
+        kwargs = {}
+        positional_args = []
+
+        # Separate named (EQ) and positional arguments
+        for arg in args:
+            if isinstance(arg, exp.EQ):
+                # Named parameter: extract name and value
+                param_name = (
+                    arg.this.name if isinstance(arg.this, exp.Column) else str(arg.this)
+                )
+                kwargs[param_name.lower()] = arg.expression
+            else:
+                positional_args.append(arg)
+
+        # Map positional arguments
+        if len(positional_args) >= 1:
+            kwargs["this"] = positional_args[0]
+
+        return cls(**kwargs)

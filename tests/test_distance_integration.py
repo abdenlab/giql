@@ -102,15 +102,15 @@ class TestDistanceIntegration:
         # peak3 (chr2:1000-1100) vs geneC (chr2:2000-2100) = 900 (gap: 2000-1100)
 
         expected = [
-            ('peak1', 'geneA', 0),
-            ('peak1', 'geneB', 500),
-            ('peak1', 'geneC', None),
-            ('peak2', 'geneA', 200),
-            ('peak2', 'geneB', 100),
-            ('peak2', 'geneC', None),
-            ('peak3', 'geneA', None),
-            ('peak3', 'geneB', None),
-            ('peak3', 'geneC', 900),
+            ("peak1", "geneA", 0),
+            ("peak1", "geneB", 500),
+            ("peak1", "geneC", None),
+            ("peak2", "geneA", 200),
+            ("peak2", "geneB", 100),
+            ("peak2", "geneC", None),
+            ("peak3", "geneA", None),
+            ("peak3", "geneB", None),
+            ("peak3", "geneC", 900),
         ]
 
         assert results == expected, f"Expected:\n{expected}\n\nGot:\n{results}"

@@ -25,11 +25,15 @@ class TestDistanceParsing:
 
         # Find the DISTANCE expression in the SELECT clause
         select_expr = ast.expressions[0]
-        assert isinstance(select_expr, GIQLDistance), f"Expected GIQLDistance node, got {type(select_expr)}"
+        assert isinstance(select_expr, GIQLDistance), (
+            f"Expected GIQLDistance node, got {type(select_expr)}"
+        )
 
         # Verify arguments are present
         assert select_expr.this is not None, "Missing first argument (this)"
-        assert select_expr.args.get("expression") is not None, "Missing second argument (expression)"
+        assert select_expr.args.get("expression") is not None, (
+            "Missing second argument (expression)"
+        )
 
     def test_parse_distance_with_literal_range(self):
         """
@@ -43,7 +47,9 @@ class TestDistanceParsing:
 
         # Find the DISTANCE expression
         select_expr = ast.expressions[0]
-        assert isinstance(select_expr, GIQLDistance), f"Expected GIQLDistance node, got {type(select_expr)}"
+        assert isinstance(select_expr, GIQLDistance), (
+            f"Expected GIQLDistance node, got {type(select_expr)}"
+        )
 
         # Verify both arguments present
         assert select_expr.this is not None, "Missing first argument"

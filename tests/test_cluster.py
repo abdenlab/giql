@@ -378,7 +378,9 @@ class TestMerge:
         assert chr1_results.iloc[0]["start_pos"] == 100
         assert chr1_results.iloc[0]["end_pos"] == 500
 
-    def test_merge_in_cte_with_aggregation_and_filter(self, duckdb_cluster_engine, to_df):
+    def test_merge_in_cte_with_aggregation_and_filter(
+        self, duckdb_cluster_engine, to_df
+    ):
         """Test MERGE in CTE with aggregation and filtering in outer query."""
         result = to_df(
             duckdb_cluster_engine.execute("""
@@ -402,7 +404,9 @@ class TestMerge:
         assert result.iloc[0]["end_pos"] == 500
         assert result.iloc[0]["interval_count"] == 3
 
-    def test_merge_in_cte_with_distance_and_aggregation(self, duckdb_cluster_engine, to_df):
+    def test_merge_in_cte_with_distance_and_aggregation(
+        self, duckdb_cluster_engine, to_df
+    ):
         """Test MERGE with distance parameter in CTE with aggregation."""
         result = to_df(
             duckdb_cluster_engine.execute("""
