@@ -20,6 +20,7 @@ from giql.constants import DEFAULT_START_COL
 from giql.constants import DEFAULT_STRAND_COL
 from giql.expressions import Contains
 from giql.expressions import GIQLDistance
+from giql.expressions import GIQLNearest
 from giql.expressions import Intersects
 from giql.expressions import SpatialSetPredicate
 from giql.expressions import Within
@@ -34,6 +35,10 @@ class BaseGIQLGenerator(Generator):
     This generator uses only SQL-92 compatible constructs,
     ensuring compatibility with virtually all SQL databases.
     """
+
+    # Most databases support LATERAL joins (PostgreSQL 9.3+, DuckDB 0.7.0+)
+    # SQLite does not support LATERAL, so it overrides this to False
+    SUPPORTS_LATERAL = True
 
     def __init__(self, schema_info: Optional[SchemaInfo] = None, **kwargs):
         super().__init__(**kwargs)
@@ -112,6 +117,136 @@ class BaseGIQLGenerator(Generator):
             SQL predicate string
         """
         return self._generate_spatial_set(expression)
+
+    def giqlnearest_sql(self, expression: GIQLNearest) -> str:
+        """Generate SQL for NEAREST function.
+
+        Detects mode (standalone vs correlated) and generates appropriate SQL:
+        - Standalone: Direct query with ORDER BY + LIMIT
+        - Correlated (LATERAL): Subquery for k-nearest neighbors
+
+        :param expression:
+            GIQLNearest expression node
+        :return:
+            SQL string for NEAREST operation
+        """
+        # Detect mode
+        mode = self._detect_nearest_mode(expression)
+
+        # Resolve target table
+        table_name, (target_chrom, target_start, target_end) = (
+            self._resolve_target_table(expression)
+        )
+
+        # Resolve reference
+        ref_chrom, ref_start, ref_end = self._resolve_nearest_reference(expression, mode)
+
+        # Extract parameters
+        k = expression.args.get("k")
+        k_value = int(str(k)) if k else 1  # Default k=1
+
+        max_distance = expression.args.get("max_distance")
+        max_dist_value = int(str(max_distance)) if max_distance else None
+
+        stranded = expression.args.get("stranded")
+        is_stranded = stranded and str(stranded).lower() in ("true", "1")
+
+        signed = expression.args.get("signed")
+        is_signed = signed and str(signed).lower() in ("true", "1")
+
+        # Resolve strand columns if stranded mode
+        ref_strand = None
+        target_strand = None
+        if is_stranded:
+            # Get strand column for reference
+            reference = expression.args.get("reference")
+            if reference:
+                reference_sql = self.sql(reference)
+
+                # Check if reference is a literal string or column reference
+                if reference_sql.startswith("'") or reference_sql.startswith('"'):
+                    # Literal reference - parse for strand
+                    range_str = reference_sql.strip("'\"")
+                    from giql.range_parser import RangeParser
+
+                    parsed_range = RangeParser.parse(range_str).to_zero_based_half_open()
+                    if parsed_range.strand:
+                        ref_strand = f"'{parsed_range.strand}'"
+                else:
+                    # Column reference - get strand column
+                    ref_cols = self._get_column_refs(
+                        reference_sql, None, include_strand=True
+                    )
+                    if len(ref_cols) == 4:
+                        ref_strand = ref_cols[3]
+
+            # Get strand column for target table
+            target_table_info = (
+                self.schema_info.get_table(table_name) if self.schema_info else None
+            )
+            if target_table_info:
+                for col_info in target_table_info.columns.values():
+                    if col_info.is_genomic and col_info.strand_col:
+                        target_strand = f'{table_name}."{col_info.strand_col}"'
+                        break
+
+        # Build distance calculation using CASE expression
+        distance_expr = self._generate_distance_case(
+            ref_chrom,
+            ref_start,
+            ref_end,
+            f'{table_name}."{target_chrom}"',
+            f'{table_name}."{target_start}"',
+            f'{table_name}."{target_end}"',
+            signed=is_signed,
+        )
+
+        # Build WHERE clauses
+        where_clauses = [
+            f'{ref_chrom} = {table_name}."{target_chrom}"'  # Chromosome pre-filter
+        ]
+
+        if max_dist_value is not None:
+            where_clauses.append(f"({distance_expr}) <= {max_dist_value}")
+
+        if is_stranded and ref_strand and target_strand:
+            where_clauses.append(f"{ref_strand} = {target_strand}")
+
+        where_sql = " AND ".join(where_clauses)
+
+        # Generate SQL based on mode
+        if mode == "standalone":
+            # Standalone mode: direct ORDER BY + LIMIT
+            sql = f"""(
+                SELECT {table_name}.*, {distance_expr} AS distance
+                FROM {table_name}
+                WHERE {where_sql}
+                ORDER BY distance
+                LIMIT {k_value}
+            )"""
+        else:
+            # Correlated mode: requires LATERAL join support
+            if not self.SUPPORTS_LATERAL:
+                raise ValueError(
+                    "NEAREST in correlated mode (CROSS JOIN LATERAL) is not supported "
+                    "in SQLite. SQLite does not support LATERAL joins. "
+                    "\n\nAlternatives:"
+                    "\n1. Use standalone mode: SELECT * FROM NEAREST(table, "
+                    "reference='chr1:100-200', k=3)"
+                    "\n2. Use DuckDB for queries requiring LATERAL joins"
+                    "\n3. Manually write equivalent window function query"
+                )
+
+            # LATERAL mode: subquery for k-nearest neighbors
+            sql = f"""(
+                SELECT {table_name}.*, {distance_expr} AS distance
+                FROM {table_name}
+                WHERE {where_sql}
+                ORDER BY distance
+                LIMIT {k_value}
+            )"""
+
+        return sql.strip()
 
     def giqldistance_sql(self, expression: GIQLDistance) -> str:
         """Generate SQL CASE expression for DISTANCE function.
@@ -371,8 +506,229 @@ class BaseGIQLGenerator(Generator):
         combinator = " OR " if quantifier.upper() == "ANY" else " AND "
         return "(" + combinator.join(conditions) + ")"
 
+    def _detect_nearest_mode(
+        self, expression: GIQLNearest, parent_expression: Optional[exp.Expression] = None
+    ) -> str:
+        """Detect whether NEAREST is in standalone or correlated mode.
+
+        :param expression:
+            GIQLNearest expression node
+        :param parent_expression:
+            Parent AST node (optional, used to detect LATERAL context)
+        :return:
+            "standalone" or "correlated"
+        """
+        # Check if reference parameter is explicitly provided
+        reference = expression.args.get("reference")
+
+        if reference:
+            # Explicit reference means standalone mode
+            return "standalone"
+
+        # No explicit reference - check for LATERAL context
+        # In correlated mode, NEAREST appears in a LATERAL join context
+        # For now, default to correlated mode if no reference specified
+        # (validation will catch missing reference errors later)
+        return "correlated"
+
+    def _find_outer_table_in_lateral_join(
+        self, expression: GIQLNearest
+    ) -> Optional[str]:
+        """Find the outer table name in a LATERAL join context.
+
+        Walks up the AST to find the JOIN clause and extracts the outer table
+        that the LATERAL subquery is correlated with.
+
+        :param expression:
+            GIQLNearest expression node
+        :return:
+            Table name or alias of the outer table, or None if not found
+        """
+        # Walk up the AST to find the JOIN
+        current = expression
+        while current:
+            parent = current.parent
+            if not parent:
+                break
+
+            # Check if parent is a Lateral expression
+            if isinstance(parent, exp.Lateral):
+                # Continue up to find the Join
+                current = parent
+                continue
+
+            # Check if parent is a Join
+            if isinstance(parent, exp.Join):
+                # The outer table is in the parent Select's FROM clause
+                # or in previous joins
+                select = parent.parent
+                if isinstance(select, exp.Select):
+                    # Get the FROM clause
+                    from_expr = select.args.get("from")
+                    if from_expr:
+                        # Extract table from FROM
+                        table_expr = from_expr.this
+                        if isinstance(table_expr, exp.Table):
+                            # Return alias if it exists, otherwise table name
+                            return table_expr.alias or table_expr.name
+                        elif isinstance(table_expr, exp.Alias):
+                            return table_expr.alias
+                break
+
+            current = parent
+
+        return None
+
+    def _resolve_nearest_reference(
+        self, expression: GIQLNearest, mode: str
+    ) -> tuple[str, str, str] | tuple[str, str, str, str]:
+        """Resolve the reference position for NEAREST queries.
+
+        :param expression:
+            GIQLNearest expression node
+        :param mode:
+            "standalone" or "correlated"
+        :return:
+            Tuple of (chromosome, start, end) or (chromosome, start, end, strand)
+            Returns SQL expressions (column refs for correlated, literals for standalone)
+        :raises ValueError:
+            If reference is missing in standalone mode or invalid format
+        """
+        reference = expression.args.get("reference")
+
+        if mode == "standalone":
+            if not reference:
+                raise ValueError(
+                    "NEAREST in standalone mode requires explicit reference parameter"
+                )
+
+            # Get SQL representation of reference
+            reference_sql = self.sql(reference)
+
+            # Check if it's a literal range string
+            if reference_sql.startswith("'") or reference_sql.startswith('"'):
+                # Parse literal genomic range
+                range_str = reference_sql.strip("'\"")
+                try:
+                    parsed_range = RangeParser.parse(range_str).to_zero_based_half_open()
+                    # Return as SQL literals
+                    return (
+                        f"'{parsed_range.chromosome}'",
+                        str(parsed_range.start),
+                        str(parsed_range.end),
+                    )
+                except Exception as e:
+                    raise ValueError(
+                        f"Could not parse reference genomic range: "
+                        f"{range_str}. Error: {e}"
+                    )
+            else:
+                # Column reference - resolve via _get_column_refs
+                return self._get_column_refs(reference_sql, None)
+
+        else:  # correlated mode
+            if reference:
+                # Explicit reference in correlated mode (e.g., peaks.position)
+                reference_sql = self.sql(reference)
+                return self._get_column_refs(reference_sql, None)
+            else:
+                # Implicit reference - resolve from outer table in LATERAL join
+                outer_table = self._find_outer_table_in_lateral_join(expression)
+                if not outer_table:
+                    raise ValueError(
+                        "Could not find outer table in LATERAL join context. "
+                        "Please specify reference parameter explicitly."
+                    )
+
+                # Look up the table's schema to find the genomic column
+                # Check if outer_table is an alias
+                actual_table = self._alias_to_table.get(outer_table, outer_table)
+                table_schema = self.schema_info.get_table(actual_table)
+
+                if not table_schema:
+                    raise ValueError(
+                        f"Outer table '{outer_table}' not found in schema. "
+                        "Please specify reference parameter explicitly."
+                    )
+
+                # Find the genomic column in the table schema
+                genomic_col_name = None
+                for col_info in table_schema.columns.values():
+                    if col_info.is_genomic:
+                        genomic_col_name = col_info.name
+                        break
+
+                if not genomic_col_name:
+                    raise ValueError(
+                        f"No genomic column found in table '{outer_table}'. "
+                        "Please specify reference parameter explicitly."
+                    )
+
+                # Build column references using the outer table and genomic column
+                reference_sql = f"{outer_table}.{genomic_col_name}"
+                return self._get_column_refs(reference_sql, None)
+
+    def _resolve_target_table(
+        self, expression: GIQLNearest
+    ) -> tuple[str, tuple[str, str, str]]:
+        """Resolve the target table name and its genomic column references.
+
+        :param expression:
+            GIQLNearest expression node
+        :return:
+            Tuple of (table_name, (chromosome_col, start_col, end_col))
+        :raises ValueError:
+            If target table is not found or doesn't have genomic columns
+        """
+        # Extract target table from 'this' argument
+        target = expression.this
+
+        if isinstance(target, exp.Table):
+            table_name = target.name
+        elif isinstance(target, exp.Column):
+            # If it's a column reference, extract table name
+            table_name = target.table if target.table else str(target.this)
+        else:
+            # Try to extract as string
+            table_name = str(target)
+
+        # Look up table in schema
+        if not self.schema_info:
+            raise ValueError(
+                f"Cannot resolve target table '{table_name}': schema_info not available"
+            )
+
+        table_schema = self.schema_info.get_table(table_name)
+        if not table_schema:
+            raise ValueError(
+                f"Target table '{table_name}' not found in schema. "
+                f"Available tables: {list(self.schema_info.tables.keys())}"
+            )
+
+        # Find genomic column in target table
+        genomic_col = None
+        for col_info in table_schema.columns.values():
+            if col_info.is_genomic:
+                genomic_col = col_info
+                break
+
+        if not genomic_col:
+            raise ValueError(
+                f"Target table '{table_name}' does not have a genomic column"
+            )
+
+        # Get physical column names
+        chrom_col = genomic_col.chrom_col or DEFAULT_CHROM_COL
+        start_col = genomic_col.start_col or DEFAULT_START_COL
+        end_col = genomic_col.end_col or DEFAULT_END_COL
+
+        return table_name, (chrom_col, start_col, end_col)
+
     def _get_column_refs(
-        self, column_ref: str, table_name: str | None = None, include_strand: bool = False
+        self,
+        column_ref: str,
+        table_name: str | None = None,
+        include_strand: bool = False,
     ) -> tuple[str, str, str] | tuple[str, str, str, str]:
         """Get physical column names for genomic data.
 

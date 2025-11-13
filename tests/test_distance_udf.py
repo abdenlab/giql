@@ -45,7 +45,9 @@ class TestDistanceCalculation:
         result = conn.execute(output_sql).fetchone()
 
         # Overlapping intervals should return distance = 0
-        assert result[0] == 0, f"Expected distance 0 for overlapping intervals, got {result[0]}"
+        assert result[0] == 0, (
+            f"Expected distance 0 for overlapping intervals, got {result[0]}"
+        )
 
         conn.close()
 
@@ -102,7 +104,9 @@ class TestDistanceCalculation:
         result = conn.execute(output_sql).fetchone()
 
         # Different chromosomes should return NULL
-        assert result[0] is None, f"Expected NULL for different chromosomes, got {result[0]}"
+        assert result[0] is None, (
+            f"Expected NULL for different chromosomes, got {result[0]}"
+        )
 
         conn.close()
 
@@ -131,7 +135,9 @@ class TestDistanceCalculation:
         result = conn.execute(output_sql).fetchone()
 
         # Bookended intervals should return distance = 0
-        assert result[0] == 0, f"Expected distance 0 for bookended intervals, got {result[0]}"
+        assert result[0] == 0, (
+            f"Expected distance 0 for bookended intervals, got {result[0]}"
+        )
 
         conn.close()
 
