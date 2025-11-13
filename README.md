@@ -688,6 +688,182 @@ cursor = engine.execute("""
 
 **Performance tip:** Always include `WHERE a.chromosome = b.chromosome` to avoid unnecessary cross-chromosome comparisons.
 
+### K-Nearest Neighbor Queries
+
+GIQL provides a `NEAREST()` operator for finding k-nearest genomic features, replicating `bedtools closest -k` functionality with enhanced capabilities.
+
+#### Find k nearest features
+
+**Bedtools:**
+```bash
+bedtools closest -a peaks.bed -b genes.bed -k 3
+```
+
+**GIQL:**
+```python
+cursor = engine.execute("""
+    SELECT
+        peaks.name AS peak,
+        nearest.name AS gene,
+        nearest.distance
+    FROM peaks
+    CROSS JOIN LATERAL NEAREST(genes, reference=peaks.position, k=3) AS nearest
+    ORDER BY peaks.name, nearest.distance
+""")
+```
+
+**Standalone query (literal reference point):**
+```python
+# Find 5 nearest genes to a specific genomic location
+cursor = engine.execute("""
+    SELECT
+        gene_name,
+        distance
+    FROM NEAREST(genes, reference='chr1:1000000-1001000', k=5)
+    ORDER BY distance
+""")
+```
+
+#### Distance-constrained nearest neighbors
+
+Find nearest features within a maximum distance threshold:
+
+**GIQL:**
+```python
+cursor = engine.execute("""
+    SELECT
+        peaks.name,
+        nearest.name AS gene,
+        nearest.distance
+    FROM peaks
+    CROSS JOIN LATERAL NEAREST(
+        genes,
+        reference=peaks.position,
+        k=5,
+        max_distance=100000
+    ) AS nearest
+    WHERE nearest.distance <= 100000
+    ORDER BY peaks.name, nearest.distance
+""")
+```
+
+**Use case:** Find regulatory elements within 100kb of gene promoters.
+
+#### Strand-specific nearest neighbors
+
+Find nearest features on the same strand only:
+
+**Bedtools:**
+```bash
+bedtools closest -a peaks.bed -b genes.bed -s -k 3
+```
+
+**GIQL:**
+```python
+cursor = engine.execute("""
+    SELECT
+        peaks.name,
+        nearest.name AS gene,
+        nearest.strand,
+        nearest.distance
+    FROM peaks
+    CROSS JOIN LATERAL NEAREST(
+        genes,
+        reference=peaks.position,
+        k=3,
+        stranded=true
+    ) AS nearest
+    ORDER BY peaks.name, nearest.distance
+""")
+```
+
+**Use case:** Find nearest genes on the same strand for strand-specific regulatory analysis.
+
+#### Directional (upstream/downstream) nearest neighbors
+
+Find nearest features with signed distances (negative = upstream, positive = downstream):
+
+**GIQL:**
+```python
+# Find upstream features (negative distances)
+cursor = engine.execute("""
+    SELECT
+        peaks.name,
+        nearest.name AS gene,
+        nearest.distance
+    FROM peaks
+    CROSS JOIN LATERAL NEAREST(
+        genes,
+        reference=peaks.position,
+        k=10,
+        signed=true
+    ) AS nearest
+    WHERE nearest.distance < 0
+    ORDER BY peaks.name, nearest.distance DESC
+""")
+
+# Find downstream features (positive distances)
+cursor = engine.execute("""
+    SELECT
+        peaks.name,
+        nearest.name AS gene,
+        nearest.distance
+    FROM peaks
+    CROSS JOIN LATERAL NEAREST(
+        genes,
+        reference=peaks.position,
+        k=10,
+        signed=true
+    ) AS nearest
+    WHERE nearest.distance > 0
+    ORDER BY peaks.name, nearest.distance
+""")
+```
+
+**Use case:** Identify promoter-proximal peaks (upstream of TSS) or enhancers in gene bodies (downstream).
+
+#### Combined parameters
+
+Find nearest same-strand features with distance constraints:
+
+**GIQL:**
+```python
+cursor = engine.execute("""
+    SELECT
+        peaks.name,
+        nearest.name AS gene,
+        nearest.distance
+    FROM peaks
+    CROSS JOIN LATERAL NEAREST(
+        genes,
+        reference=peaks.position,
+        k=5,
+        max_distance=50000,
+        stranded=true,
+        signed=true
+    ) AS nearest
+    WHERE nearest.distance BETWEEN -10000 AND 10000
+    ORDER BY peaks.name, ABS(nearest.distance)
+""")
+```
+
+**Use case:** Find nearby same-strand genes within ±10kb for promoter-enhancer interaction analysis.
+
+#### Performance tips
+
+1. **Chromosome pre-filtering:** NEAREST automatically filters by chromosome for efficiency
+2. **Use max_distance:** Reduces search space when you have distance constraints
+3. **Limit k:** Only request as many neighbors as you need
+4. **Add indexes:** Create indexes on chromosome, start_pos, end_pos columns for better performance
+
+```python
+# Create indexes for better performance
+engine.conn.execute("""
+    CREATE INDEX idx_genes_position
+    ON genes (chromosome, start_pos, end_pos)
+""")
+```
+
 ## Transpiling GIQL to SQL
 
 The `transpile()` method allows you to convert GIQL queries to standard SQL without executing them. This is useful for debugging, understanding the generated SQL, or integrating GIQL with external tools:
