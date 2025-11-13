@@ -15,6 +15,7 @@ from giql.expressions import Contains
 from giql.expressions import GIQLCluster
 from giql.expressions import GIQLDistance
 from giql.expressions import GIQLMerge
+from giql.expressions import GIQLNearest
 from giql.expressions import Intersects
 from giql.expressions import SpatialSetPredicate
 from giql.expressions import Within
@@ -55,6 +56,7 @@ class GIQLDialect(Dialect):
             "CLUSTER": GIQLCluster.from_arg_list,
             "MERGE": GIQLMerge.from_arg_list,
             "DISTANCE": GIQLDistance.from_arg_list,
+            "NEAREST": GIQLNearest.from_arg_list,
         }
 
         def _parse_comparison(self):
