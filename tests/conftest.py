@@ -124,3 +124,57 @@ def duckdb_engine_with_data(sample_variants_csv, sample_genes_csv):
 
     yield engine
     engine.close()
+
+
+@pytest.fixture
+def sample_peaks_csv(tmp_path):
+    """Create sample ChIP-seq peaks CSV for NEAREST testing."""
+    csv_content = """
+    peak_id,chromosome,start_pos,end_pos,signal
+    1,chr1,5000,5200,100.5
+    2,chr1,12000,12100,85.2
+    3,chr1,20000,20500,120.8
+    4,chr2,3000,3100,95.3
+    5,chr2,8000,8200,110.7
+    """
+    csv_path = tmp_path / "peaks.csv"
+    csv_path.write_text(csv_content.strip())
+    return str(csv_path)
+
+
+@pytest.fixture
+def engine_with_peaks_and_genes(request, sample_peaks_csv, sample_genes_csv):
+    """Create engine with peaks and genes loaded for NEAREST testing."""
+    dialect = request.param if hasattr(request, "param") else "duckdb"
+
+    engine = GIQLEngine(target_dialect=dialect, verbose=False)
+    engine.load_csv("peaks", sample_peaks_csv)
+    engine.load_csv("genes", sample_genes_csv)
+
+    engine.register_table_schema(
+        "peaks",
+        {
+            "peak_id": "INTEGER",
+            "chromosome": "VARCHAR",
+            "start_pos": "BIGINT",
+            "end_pos": "BIGINT",
+            "signal": "FLOAT",
+        },
+        genomic_column="position",
+    )
+
+    engine.register_table_schema(
+        "genes",
+        {
+            "gene_id": "INTEGER",
+            "name": "VARCHAR",
+            "chromosome": "VARCHAR",
+            "start_pos": "BIGINT",
+            "end_pos": "BIGINT",
+            "strand": "VARCHAR",
+        },
+        genomic_column="position",
+    )
+
+    yield engine
+    engine.close()
