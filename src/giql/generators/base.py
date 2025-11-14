@@ -125,6 +125,17 @@ class BaseGIQLGenerator(Generator):
         interval_a = expression.this
         interval_b = expression.args.get("expression")
 
+        # Extract stranded parameter
+        stranded_expr = expression.args.get("stranded")
+        stranded = False
+        if stranded_expr:
+            if isinstance(stranded_expr, exp.Boolean):
+                stranded = stranded_expr.this
+            elif isinstance(stranded_expr, exp.Literal):
+                stranded = str(stranded_expr.this).upper() == "TRUE"
+            else:
+                stranded = str(stranded_expr).upper() in ("TRUE", "1", "YES")
+
         # Get SQL representations
         interval_a_sql = self.sql(interval_a)
         interval_b_sql = self.sql(interval_b)
@@ -132,41 +143,66 @@ class BaseGIQLGenerator(Generator):
         # Check if we're dealing with column-to-column or column-to-literal
         if "." in interval_a_sql and not interval_a_sql.startswith("'"):
             # Column reference for interval_a
-            chrom_a, start_a, end_a = self._get_column_refs(interval_a_sql, None)
+            if stranded:
+                chrom_a, start_a, end_a, strand_a = self._get_column_refs(interval_a_sql, None, include_strand=True)
+            else:
+                chrom_a, start_a, end_a = self._get_column_refs(interval_a_sql, None)
+                strand_a = None
         else:
             # Literal range - not implemented yet for interval_a
             raise ValueError("Literal range as first argument not yet supported")
 
         if "." in interval_b_sql and not interval_b_sql.startswith("'"):
             # Column reference for interval_b
-            chrom_b, start_b, end_b = self._get_column_refs(interval_b_sql, None)
+            if stranded:
+                chrom_b, start_b, end_b, strand_b = self._get_column_refs(interval_b_sql, None, include_strand=True)
+            else:
+                chrom_b, start_b, end_b = self._get_column_refs(interval_b_sql, None)
+                strand_b = None
         else:
             # Literal range - not implemented yet
             raise ValueError("Literal range as second argument not yet supported")
 
         # Generate CASE expression
-        return self._generate_distance_case(chrom_a, start_a, end_a, chrom_b, start_b, end_b)
+        return self._generate_distance_case(
+            chrom_a, start_a, end_a, strand_a,
+            chrom_b, start_b, end_b, strand_b,
+            stranded=stranded
+        )
 
     def _generate_distance_case(
         self,
         chrom_a: str,
         start_a: str,
         end_a: str,
+        strand_a: str | None,
         chrom_b: str,
         start_b: str,
         end_b: str,
+        strand_b: str | None,
+        stranded: bool = False,
     ) -> str:
         """Generate SQL CASE expression for distance calculation.
 
         :param chrom_a: Chromosome column for interval A
         :param start_a: Start column for interval A
         :param end_a: End column for interval A
+        :param strand_a: Strand column for interval A (None if not stranded)
         :param chrom_b: Chromosome column for interval B
         :param start_b: Start column for interval B
         :param end_b: End column for interval B
+        :param strand_b: Strand column for interval B (None if not stranded)
+        :param stranded: Whether to use strand-aware distance calculation
         :return: SQL CASE expression
         """
-        return f"""CASE WHEN {chrom_a} != {chrom_b} THEN NULL WHEN {start_a} < {end_b} AND {end_a} > {start_b} THEN 0 WHEN {end_a} <= {start_b} THEN ({start_b} - {end_a}) ELSE ({start_a} - {end_b}) END"""
+        if not stranded or strand_a is None or strand_b is None:
+            # Basic distance calculation without strand awareness
+            return f"""CASE WHEN {chrom_a} != {chrom_b} THEN NULL WHEN {start_a} < {end_b} AND {end_a} > {start_b} THEN 0 WHEN {end_a} <= {start_b} THEN ({start_b} - {end_a}) ELSE ({start_a} - {end_b}) END"""
+
+        # Stranded distance calculation
+        # Return NULL if either strand is '.', '?', or NULL
+        # Calculate distance and multiply by -1 if first interval is on '-' strand
+        return f"""CASE WHEN {chrom_a} != {chrom_b} THEN NULL WHEN {strand_a} IS NULL OR {strand_b} IS NULL THEN NULL WHEN {strand_a} = '.' OR {strand_a} = '?' THEN NULL WHEN {strand_b} = '.' OR {strand_b} = '?' THEN NULL WHEN {start_a} < {end_b} AND {end_a} > {start_b} THEN 0 WHEN {end_a} <= {start_b} THEN CASE WHEN {strand_a} = '-' THEN -({start_b} - {end_a}) ELSE ({start_b} - {end_a}) END ELSE CASE WHEN {strand_a} = '-' THEN -({start_a} - {end_b}) ELSE ({start_a} - {end_b}) END END"""
 
     def _generate_spatial_op(self, expression: exp.Binary, op_type: str) -> str:
         """Generate SQL for a spatial operation.
