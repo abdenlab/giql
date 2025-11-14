@@ -164,3 +164,223 @@ class TestDistanceCalculation:
         assert result[0] == 150, f"Expected distance 150, got {result[0]}"
 
         conn.close()
+
+
+class TestStrandedDistance:
+    """Tests for stranded distance calculation."""
+
+    def test_stranded_same_strand_plus(self):
+        """
+        GIVEN two intervals on the same chromosome and same '+' strand
+        WHEN DISTANCE() is calculated with stranded=true
+        THEN the distance should be calculated normally (positive value)
+        """
+        sql = """
+        SELECT
+            DISTANCE(a.position, b.position, stranded=true) as distance
+        FROM
+            (SELECT 'chr1' as chromosome, 100 as start_pos, 200 as end_pos, '+' as strand) a
+        CROSS JOIN
+            (SELECT 'chr1' as chromosome, 300 as start_pos, 400 as end_pos, '+' as strand) b
+        """
+
+        ast = parse_one(sql, dialect=GIQLDialect)
+        generator = BaseGIQLGenerator()
+        output_sql = generator.generate(ast)
+
+        conn = duckdb.connect(":memory:")
+        result = conn.execute(output_sql).fetchone()
+
+        # Gap distance should be 100 (positive, since strand is '+')
+        assert result[0] == 100, f"Expected distance 100, got {result[0]}"
+
+        conn.close()
+
+    def test_stranded_same_strand_minus(self):
+        """
+        GIVEN two intervals on the same chromosome and same '-' strand
+        WHEN DISTANCE() is calculated with stranded=true
+        THEN the distance should be negative (multiplied by -1)
+        """
+        sql = """
+        SELECT
+            DISTANCE(a.position, b.position, stranded=true) as distance
+        FROM
+            (SELECT 'chr1' as chromosome, 100 as start_pos, 200 as end_pos, '-' as strand) a
+        CROSS JOIN
+            (SELECT 'chr1' as chromosome, 300 as start_pos, 400 as end_pos, '-' as strand) b
+        """
+
+        ast = parse_one(sql, dialect=GIQLDialect)
+        generator = BaseGIQLGenerator()
+        output_sql = generator.generate(ast)
+
+        conn = duckdb.connect(":memory:")
+        result = conn.execute(output_sql).fetchone()
+
+        # Gap distance should be -100 (negative, since first interval strand is '-')
+        assert result[0] == -100, f"Expected distance -100, got {result[0]}"
+
+        conn.close()
+
+    def test_stranded_different_strands_calculates_distance(self):
+        """
+        GIVEN two intervals on different strands ('+' and '-')
+        WHEN DISTANCE() is calculated with stranded=true
+        THEN the distance should be calculated normally (positive, since first interval is '+')
+        """
+        sql = """
+        SELECT
+            DISTANCE(a.position, b.position, stranded=true) as distance
+        FROM
+            (SELECT 'chr1' as chromosome, 100 as start_pos, 200 as end_pos, '+' as strand) a
+        CROSS JOIN
+            (SELECT 'chr1' as chromosome, 300 as start_pos, 400 as end_pos, '-' as strand) b
+        """
+
+        ast = parse_one(sql, dialect=GIQLDialect)
+        generator = BaseGIQLGenerator()
+        output_sql = generator.generate(ast)
+
+        conn = duckdb.connect(":memory:")
+        result = conn.execute(output_sql).fetchone()
+
+        # Different strands should still calculate distance, sign based on first interval
+        assert result[0] == 100, f"Expected distance 100, got {result[0]}"
+
+        conn.close()
+
+    def test_stranded_different_strands_minus_first(self):
+        """
+        GIVEN two intervals on different strands ('-' first, then '+')
+        WHEN DISTANCE() is calculated with stranded=true
+        THEN the distance should be negative (based on first interval's strand)
+        """
+        sql = """
+        SELECT
+            DISTANCE(a.position, b.position, stranded=true) as distance
+        FROM
+            (SELECT 'chr1' as chromosome, 100 as start_pos, 200 as end_pos, '-' as strand) a
+        CROSS JOIN
+            (SELECT 'chr1' as chromosome, 300 as start_pos, 400 as end_pos, '+' as strand) b
+        """
+
+        ast = parse_one(sql, dialect=GIQLDialect)
+        generator = BaseGIQLGenerator()
+        output_sql = generator.generate(ast)
+
+        conn = duckdb.connect(":memory:")
+        result = conn.execute(output_sql).fetchone()
+
+        # Distance should be negative since first interval is '-'
+        assert result[0] == -100, f"Expected distance -100, got {result[0]}"
+
+        conn.close()
+
+    def test_stranded_dot_strand_returns_null(self):
+        """
+        GIVEN intervals with '.' strand (unspecified)
+        WHEN DISTANCE() is calculated with stranded=true
+        THEN the distance should be NULL
+        """
+        sql = """
+        SELECT
+            DISTANCE(a.position, b.position, stranded=true) as distance
+        FROM
+            (SELECT 'chr1' as chromosome, 100 as start_pos, 200 as end_pos, '.' as strand) a
+        CROSS JOIN
+            (SELECT 'chr1' as chromosome, 300 as start_pos, 400 as end_pos, '.' as strand) b
+        """
+
+        ast = parse_one(sql, dialect=GIQLDialect)
+        generator = BaseGIQLGenerator()
+        output_sql = generator.generate(ast)
+
+        conn = duckdb.connect(":memory:")
+        result = conn.execute(output_sql).fetchone()
+
+        # '.' strand should return NULL
+        assert result[0] is None, f"Expected NULL for '.' strand, got {result[0]}"
+
+        conn.close()
+
+    def test_stranded_question_mark_strand_returns_null(self):
+        """
+        GIVEN intervals with '?' strand (unknown)
+        WHEN DISTANCE() is calculated with stranded=true
+        THEN the distance should be NULL
+        """
+        sql = """
+        SELECT
+            DISTANCE(a.position, b.position, stranded=true) as distance
+        FROM
+            (SELECT 'chr1' as chromosome, 100 as start_pos, 200 as end_pos, '?' as strand) a
+        CROSS JOIN
+            (SELECT 'chr1' as chromosome, 300 as start_pos, 400 as end_pos, '+' as strand) b
+        """
+
+        ast = parse_one(sql, dialect=GIQLDialect)
+        generator = BaseGIQLGenerator()
+        output_sql = generator.generate(ast)
+
+        conn = duckdb.connect(":memory:")
+        result = conn.execute(output_sql).fetchone()
+
+        # '?' strand should return NULL
+        assert result[0] is None, f"Expected NULL for '?' strand, got {result[0]}"
+
+        conn.close()
+
+    def test_stranded_null_strand_returns_null(self):
+        """
+        GIVEN intervals with NULL strand
+        WHEN DISTANCE() is calculated with stranded=true
+        THEN the distance should be NULL
+        """
+        sql = """
+        SELECT
+            DISTANCE(a.position, b.position, stranded=true) as distance
+        FROM
+            (SELECT 'chr1' as chromosome, 100 as start_pos, 200 as end_pos, NULL as strand) a
+        CROSS JOIN
+            (SELECT 'chr1' as chromosome, 300 as start_pos, 400 as end_pos, '+' as strand) b
+        """
+
+        ast = parse_one(sql, dialect=GIQLDialect)
+        generator = BaseGIQLGenerator()
+        output_sql = generator.generate(ast)
+
+        conn = duckdb.connect(":memory:")
+        result = conn.execute(output_sql).fetchone()
+
+        # NULL strand should return NULL
+        assert result[0] is None, f"Expected NULL for NULL strand, got {result[0]}"
+
+        conn.close()
+
+    def test_stranded_overlapping_intervals_minus_strand(self):
+        """
+        GIVEN two overlapping intervals on '-' strand
+        WHEN DISTANCE() is calculated with stranded=true
+        THEN the distance should be 0 (overlaps have distance 0 regardless of strand)
+        """
+        sql = """
+        SELECT
+            DISTANCE(a.position, b.position, stranded=true) as distance
+        FROM
+            (SELECT 'chr1' as chromosome, 100 as start_pos, 200 as end_pos, '-' as strand) a
+        CROSS JOIN
+            (SELECT 'chr1' as chromosome, 150 as start_pos, 250 as end_pos, '-' as strand) b
+        """
+
+        ast = parse_one(sql, dialect=GIQLDialect)
+        generator = BaseGIQLGenerator()
+        output_sql = generator.generate(ast)
+
+        conn = duckdb.connect(":memory:")
+        result = conn.execute(output_sql).fetchone()
+
+        # Overlapping intervals should return 0
+        assert result[0] == 0, f"Expected distance 0 for overlapping intervals, got {result[0]}"
+
+        conn.close()
