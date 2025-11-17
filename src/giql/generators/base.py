@@ -151,9 +151,6 @@ class BaseGIQLGenerator(Generator):
         stranded = expression.args.get("stranded")
         is_stranded = stranded and str(stranded).lower() in ("true", "1")
 
-        signed = expression.args.get("signed")
-        is_signed = signed and str(signed).lower() in ("true", "1")
-
         # Resolve strand columns if stranded mode
         ref_strand = None
         target_strand = None
@@ -191,15 +188,21 @@ class BaseGIQLGenerator(Generator):
                         break
 
         # Build distance calculation using CASE expression
+        # For NEAREST: ORDER BY absolute distance, but RETURN signed distance
         distance_expr = self._generate_distance_case(
             ref_chrom,
             ref_start,
             ref_end,
+            ref_strand,
             f'{table_name}."{target_chrom}"',
             f'{table_name}."{target_start}"',
             f'{table_name}."{target_end}"',
-            signed=is_signed,
+            target_strand,
+            stranded=is_stranded,
         )
+
+        # Use absolute distance for ordering and filtering
+        abs_distance_expr = f"ABS({distance_expr})"
 
         # Build WHERE clauses
         where_clauses = [
@@ -207,21 +210,19 @@ class BaseGIQLGenerator(Generator):
         ]
 
         if max_dist_value is not None:
-            where_clauses.append(f"({distance_expr}) <= {max_dist_value}")
-
-        if is_stranded and ref_strand and target_strand:
-            where_clauses.append(f"{ref_strand} = {target_strand}")
+            where_clauses.append(f"({abs_distance_expr}) <= {max_dist_value}")
 
         where_sql = " AND ".join(where_clauses)
 
         # Generate SQL based on mode
         if mode == "standalone":
             # Standalone mode: direct ORDER BY + LIMIT
+            # Return signed distance, but order by absolute distance
             sql = f"""(
                 SELECT {table_name}.*, {distance_expr} AS distance
                 FROM {table_name}
                 WHERE {where_sql}
-                ORDER BY distance
+                ORDER BY {abs_distance_expr}
                 LIMIT {k_value}
             )"""
         else:
@@ -238,11 +239,12 @@ class BaseGIQLGenerator(Generator):
                 )
 
             # LATERAL mode: subquery for k-nearest neighbors
+            # Return signed distance, but order by absolute distance
             sql = f"""(
                 SELECT {table_name}.*, {distance_expr} AS distance
                 FROM {table_name}
                 WHERE {where_sql}
-                ORDER BY distance
+                ORDER BY {abs_distance_expr}
                 LIMIT {k_value}
             )"""
 
@@ -279,7 +281,9 @@ class BaseGIQLGenerator(Generator):
         if "." in interval_a_sql and not interval_a_sql.startswith("'"):
             # Column reference for interval_a
             if stranded:
-                chrom_a, start_a, end_a, strand_a = self._get_column_refs(interval_a_sql, None, include_strand=True)
+                chrom_a, start_a, end_a, strand_a = self._get_column_refs(
+                    interval_a_sql, None, include_strand=True
+                )
             else:
                 chrom_a, start_a, end_a = self._get_column_refs(interval_a_sql, None)
                 strand_a = None
@@ -290,7 +294,9 @@ class BaseGIQLGenerator(Generator):
         if "." in interval_b_sql and not interval_b_sql.startswith("'"):
             # Column reference for interval_b
             if stranded:
-                chrom_b, start_b, end_b, strand_b = self._get_column_refs(interval_b_sql, None, include_strand=True)
+                chrom_b, start_b, end_b, strand_b = self._get_column_refs(
+                    interval_b_sql, None, include_strand=True
+                )
             else:
                 chrom_b, start_b, end_b = self._get_column_refs(interval_b_sql, None)
                 strand_b = None
@@ -300,9 +306,15 @@ class BaseGIQLGenerator(Generator):
 
         # Generate CASE expression
         return self._generate_distance_case(
-            chrom_a, start_a, end_a, strand_a,
-            chrom_b, start_b, end_b, strand_b,
-            stranded=stranded
+            chrom_a,
+            start_a,
+            end_a,
+            strand_a,
+            chrom_b,
+            start_b,
+            end_b,
+            strand_b,
+            stranded=stranded,
         )
 
     def _generate_distance_case(

@@ -155,32 +155,6 @@ class TestNearestTranspilationDuckDB:
         assert "strand" in output.lower()
         assert "LIMIT 3" in output
 
-    def test_nearest_with_signed_duckdb(self, schema_with_peaks_and_genes):
-        """
-        GIVEN a GIQL query with NEAREST(genes, k=3, signed=true)
-        WHEN transpiling to DuckDB SQL
-        THEN should generate SQL with signed distance calculation
-        """
-        sql = """
-        SELECT *
-        FROM peaks
-        CROSS JOIN LATERAL NEAREST(genes, reference=peaks.position, k=3, signed=true)
-        """
-
-        ast = parse_one(sql, dialect=GIQLDialect)
-        generator = GIQLDuckDBGenerator(schema_info=schema_with_peaks_and_genes)
-        output = generator.generate(ast)
-
-        # Expectations:
-        # - LATERAL subquery
-        # - Signed distance calculation (negative for upstream)
-        # - LIMIT 3
-        assert "LATERAL" in output.upper()
-        # Check for negative distance calculation in ELSE clause
-        # The signed version should have -( in the ELSE branch
-        assert "-(" in output or "- (" in output
-        assert "LIMIT 3" in output
-
 
 # PostgreSQL uses same generator as base for now
 # class TestNearestTranspilationPostgreSQL:
@@ -290,29 +264,4 @@ class TestNearestTranspilationSQLite:
         # - LIMIT 3
         assert "LATERAL" in output.upper()
         assert "strand" in output.lower()
-        assert "LIMIT 3" in output
-
-    def test_nearest_with_signed_sqlite(self, schema_with_peaks_and_genes):
-        """
-        GIVEN a GIQL query with NEAREST(genes, k=3, signed=true)
-        WHEN transpiling to SQLite SQL
-        THEN should generate SQL with signed distance calculation
-        """
-        sql = """
-        SELECT *
-        FROM peaks
-        CROSS JOIN LATERAL NEAREST(genes, reference=peaks.position, k=3, signed=true)
-        """
-
-        ast = parse_one(sql, dialect=GIQLDialect)
-        generator = BaseGIQLGenerator(schema_info=schema_with_peaks_and_genes)
-        output = generator.generate(ast)
-
-        # Expectations:
-        # - LATERAL subquery
-        # - Signed distance calculation (negative for upstream)
-        # - LIMIT 3
-        assert "LATERAL" in output.upper()
-        # Check for negative distance calculation in ELSE clause
-        assert "-(" in output or "- (" in output
         assert "LIMIT 3" in output

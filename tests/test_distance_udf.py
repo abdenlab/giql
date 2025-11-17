@@ -387,6 +387,8 @@ class TestStrandedDistance:
         result = conn.execute(output_sql).fetchone()
 
         # Overlapping intervals should return 0
-        assert result[0] == 0, f"Expected distance 0 for overlapping intervals, got {result[0]}"
+        assert result[0] == 0, (
+            f"Expected distance 0 for overlapping intervals, got {result[0]}"
+        )
 
         conn.close()
