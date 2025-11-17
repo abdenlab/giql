@@ -130,32 +130,6 @@ class TestNearestParsing:
         stranded = nearest_expr.args.get("stranded")
         assert stranded is not None, "Missing stranded parameter"
 
-    def test_parse_nearest_with_signed(self):
-        """
-        GIVEN a GIQL query with NEAREST(genes, k=3, signed=true)
-        WHEN parsing the query
-        THEN should parse signed parameter correctly
-        """
-        sql = "SELECT * FROM peaks CROSS JOIN LATERAL NEAREST(genes, k=3, signed=true)"
-
-        ast = parse_one(sql, dialect=GIQLDialect)
-
-        # Navigate to NEAREST
-        joins = ast.args.get("joins")
-        join = joins[0]
-        lateral_expr = join.this
-
-        if hasattr(lateral_expr, "this"):
-            nearest_expr = lateral_expr.this
-        else:
-            nearest_expr = lateral_expr
-
-        assert isinstance(nearest_expr, GIQLNearest), f"Expected GIQLNearest node"
-
-        # Verify signed parameter
-        signed_param = nearest_expr.args.get("signed")
-        assert signed_param is not None, "Missing signed parameter"
-
     def test_parse_nearest_all_parameters(self):
         """
         GIVEN a GIQL query with all NEAREST parameters
@@ -169,8 +143,7 @@ class TestNearestParsing:
             reference=peaks.position,
             k=5,
             max_distance=50000,
-            stranded=true,
-            signed=true
+            stranded=true
         )
         """
 
@@ -194,7 +167,6 @@ class TestNearestParsing:
         assert nearest_expr.args.get("k") is not None, "Missing k"
         assert nearest_expr.args.get("max_distance") is not None, "Missing max_distance"
         assert nearest_expr.args.get("stranded") is not None, "Missing stranded"
-        assert nearest_expr.args.get("signed") is not None, "Missing signed"
 
     def test_parse_nearest_with_strand_notation(self):
         """
