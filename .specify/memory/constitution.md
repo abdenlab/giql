@@ -27,7 +27,7 @@ Follow-up TODOs: None
 ## Core Principles
 
 ### I. Expressive
-GIQL should make common genomic operations concise and natural to express, reducing SQL boilerplate for the procedures and predicates that genomics practitioners use most frequently.
+GIQL should make common genomic operations clear, concise and natural to express. It SHOULD reduce SQL boilerplate for the operations and predicates that genomics practitioners use most frequently.
 
 **Rules:**
 - Common genomic operations (intersect, merge, cluster, within, contains, etc.) MUST have dedicated operators
