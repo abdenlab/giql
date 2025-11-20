@@ -4,6 +4,8 @@ Auto-generated from all feature plans. Last updated: 2025-11-06
 
 ## Active Technologies
 - N/A (operates on existing database connections) (002-nearest-operator)
+- Python 3.11+ + pytest, DuckDB Python driver, bedtools (external binary 2.30.0+), GIQL library (project under test) (003-bedtools-integration-tests)
+- DuckDB in-memory databases (via pytest fixtures) (003-bedtools-integration-tests)
 
 - Python 3.11+ + sqlglot (>=20.0.0), duckdb (>=1.4.0), psycopg2-binary (>=2.9.10) (001-distance-operator)
 
@@ -23,8 +25,8 @@ cd src [ONLY COMMANDS FOR ACTIVE TECHNOLOGIES][ONLY COMMANDS FOR ACTIVE TECHNOLO
 Python 3.11+: Follow standard conventions
 
 ## Recent Changes
+- 003-bedtools-integration-tests: Added Python 3.11+ + pytest, DuckDB Python driver, bedtools (external binary 2.30.0+), GIQL library (project under test)
 - 002-nearest-operator: Added Python 3.11+ + sqlglot (>=20.0.0), duckdb (>=1.4.0), psycopg2-binary (>=2.9.10)
-
 - 001-distance-operator: Added Python 3.11+ + sqlglot (>=20.0.0), duckdb (>=1.4.0), psycopg2-binary (>=2.9.10)
 
 <!-- MANUAL ADDITIONS START -->

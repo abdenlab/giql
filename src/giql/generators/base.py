@@ -52,8 +52,8 @@ class BaseGIQLGenerator(Generator):
         self._alias_to_table = {}
 
         # Extract from FROM clause
-        if expression.args.get("from"):
-            from_clause = expression.args["from"]
+        if expression.args.get("from_"):
+            from_clause = expression.args["from_"]
             if isinstance(from_clause.this, exp.Table):
                 table_name = from_clause.this.name
                 self._current_table = table_name
@@ -176,6 +176,17 @@ class BaseGIQLGenerator(Generator):
                     )
                     if len(ref_cols) == 4:
                         ref_strand = ref_cols[3]
+            else:
+                # Implicit reference in correlated mode - get strand from outer table
+                outer_table = self._find_outer_table_in_lateral_join(expression)
+                if outer_table and self.schema_info:
+                    actual_table = self._alias_to_table.get(outer_table, outer_table)
+                    table_schema = self.schema_info.get_table(actual_table)
+                    if table_schema:
+                        for col_info in table_schema.columns.values():
+                            if col_info.is_genomic and col_info.strand_col:
+                                ref_strand = f'{outer_table}."{col_info.strand_col}"'
+                                break
 
             # Get strand column for target table
             target_table_info = (
@@ -185,6 +196,22 @@ class BaseGIQLGenerator(Generator):
                 for col_info in target_table_info.columns.values():
                     if col_info.is_genomic and col_info.strand_col:
                         target_strand = f'{table_name}."{col_info.strand_col}"'
+                        break
+
+        # Determine if we should add 1 for gap distances (bedtools compatibility)
+        # This depends on the interval types of the tables involved
+        add_one = False
+        if self.schema_info:
+            target_table_info = self.schema_info.get_table(table_name)
+            if target_table_info:
+                for col_info in target_table_info.columns.values():
+                    if col_info.is_genomic:
+                        # Import IntervalType to check
+                        from giql.range_parser import IntervalType
+
+                        # Add 1 for closed intervals (bedtools behavior)
+                        if col_info.interval_type == IntervalType.CLOSED:
+                            add_one = True
                         break
 
         # Build distance calculation using CASE expression
@@ -199,6 +226,7 @@ class BaseGIQLGenerator(Generator):
             f'{table_name}."{target_end}"',
             target_strand,
             stranded=is_stranded,
+            add_one_for_gap=add_one,
         )
 
         # Use absolute distance for ordering and filtering
@@ -208,6 +236,10 @@ class BaseGIQLGenerator(Generator):
         where_clauses = [
             f'{ref_chrom} = {table_name}."{target_chrom}"'  # Chromosome pre-filter
         ]
+
+        # Add strand matching for stranded mode
+        if is_stranded and ref_strand and target_strand:
+            where_clauses.append(f"{ref_strand} = {target_strand}")
 
         if max_dist_value is not None:
             where_clauses.append(f"({abs_distance_expr}) <= {max_dist_value}")
@@ -304,6 +336,32 @@ class BaseGIQLGenerator(Generator):
             # Literal range - not implemented yet
             raise ValueError("Literal range as second argument not yet supported")
 
+        # Determine if we should add 1 for gap distances (bedtools compatibility)
+        # Check interval types from schema
+        add_one = False
+        if self.schema_info:
+            # Extract table names from column references
+            # Column refs look like "table.column" or "alias.column"
+            table_a = interval_a_sql.split(".")[0] if "." in interval_a_sql else None
+            table_b = interval_b_sql.split(".")[0] if "." in interval_b_sql else None
+
+            # Check if either table uses closed intervals
+            from giql.range_parser import IntervalType
+
+            for table_name in [table_a, table_b]:
+                if table_name:
+                    # Remove quotes if present
+                    table_name = table_name.strip('"')
+                    # Check if it's an alias first
+                    actual_table = self._alias_to_table.get(table_name, table_name)
+                    table_info = self.schema_info.get_table(actual_table)
+                    if table_info:
+                        for col_info in table_info.columns.values():
+                            if col_info.is_genomic:
+                                if col_info.interval_type == IntervalType.CLOSED:
+                                    add_one = True
+                                break
+
         # Generate CASE expression
         return self._generate_distance_case(
             chrom_a,
@@ -315,6 +373,7 @@ class BaseGIQLGenerator(Generator):
             end_b,
             strand_b,
             stranded=stranded,
+            add_one_for_gap=add_one,
         )
 
     def _generate_distance_case(
@@ -328,6 +387,7 @@ class BaseGIQLGenerator(Generator):
         end_b: str,
         strand_b: str | None,
         stranded: bool = False,
+        add_one_for_gap: bool = False,
     ) -> str:
         """Generate SQL CASE expression for distance calculation.
 
@@ -340,16 +400,20 @@ class BaseGIQLGenerator(Generator):
         :param end_b: End column for interval B
         :param strand_b: Strand column for interval B (None if not stranded)
         :param stranded: Whether to use strand-aware distance calculation
+        :param add_one_for_gap: Whether to add 1 to non-overlapping distance (bedtools compatibility)
         :return: SQL CASE expression
         """
+        # Distance adjustment for non-overlapping intervals
+        gap_adj = " + 1" if add_one_for_gap else ""
+
         if not stranded or strand_a is None or strand_b is None:
             # Basic distance calculation without strand awareness
-            return f"""CASE WHEN {chrom_a} != {chrom_b} THEN NULL WHEN {start_a} < {end_b} AND {end_a} > {start_b} THEN 0 WHEN {end_a} <= {start_b} THEN ({start_b} - {end_a}) ELSE ({start_a} - {end_b}) END"""
+            return f"""CASE WHEN {chrom_a} != {chrom_b} THEN NULL WHEN {start_a} < {end_b} AND {end_a} > {start_b} THEN 0 WHEN {end_a} <= {start_b} THEN ({start_b} - {end_a}{gap_adj}) ELSE ({start_a} - {end_b}{gap_adj}) END"""
 
         # Stranded distance calculation
         # Return NULL if either strand is '.', '?', or NULL
         # Calculate distance and multiply by -1 if first interval is on '-' strand
-        return f"""CASE WHEN {chrom_a} != {chrom_b} THEN NULL WHEN {strand_a} IS NULL OR {strand_b} IS NULL THEN NULL WHEN {strand_a} = '.' OR {strand_a} = '?' THEN NULL WHEN {strand_b} = '.' OR {strand_b} = '?' THEN NULL WHEN {start_a} < {end_b} AND {end_a} > {start_b} THEN 0 WHEN {end_a} <= {start_b} THEN CASE WHEN {strand_a} = '-' THEN -({start_b} - {end_a}) ELSE ({start_b} - {end_a}) END ELSE CASE WHEN {strand_a} = '-' THEN -({start_a} - {end_b}) ELSE ({start_a} - {end_b}) END END"""
+        return f"""CASE WHEN {chrom_a} != {chrom_b} THEN NULL WHEN {strand_a} IS NULL OR {strand_b} IS NULL THEN NULL WHEN {strand_a} = '.' OR {strand_a} = '?' THEN NULL WHEN {strand_b} = '.' OR {strand_b} = '?' THEN NULL WHEN {start_a} < {end_b} AND {end_a} > {start_b} THEN 0 WHEN {end_a} <= {start_b} THEN CASE WHEN {strand_a} = '-' THEN -({start_b} - {end_a}{gap_adj}) ELSE ({start_b} - {end_a}{gap_adj}) END ELSE CASE WHEN {strand_a} = '-' THEN -({start_a} - {end_b}{gap_adj}) ELSE ({start_a} - {end_b}{gap_adj}) END END"""
 
     def _generate_spatial_op(self, expression: exp.Binary, op_type: str) -> str:
         """Generate SQL for a spatial operation.
@@ -576,7 +640,7 @@ class BaseGIQLGenerator(Generator):
                 select = parent.parent
                 if isinstance(select, exp.Select):
                     # Get the FROM clause
-                    from_expr = select.args.get("from")
+                    from_expr = select.args.get("from_")
                     if from_expr:
                         # Extract table from FROM
                         table_expr = from_expr.this
