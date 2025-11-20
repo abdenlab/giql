@@ -62,7 +62,7 @@ GIQL should strive to be usable with any analytic query engine that supports bas
 - New features MUST work on all supported backends or be clearly marked as dialect-specific
 - Dependencies on specific database features SHOULD be minimized
 
-**Rationale:** The genomics community uses diverse database systems depending on scale, infrastructure, and existing tooling. A portable query language protects against vendor lock-in and ensures longevity. Users' investment in learning GIQL should not be tied to a specific database vendor.
+**Rationale:** The genomics community uses diverse database systems and non-database solutions depending on scale, infrastructure, and existing tooling. A portable query language protects against vendor lock-in and ensures longevity. Users' investment in learning GIQL should not be tied to a specific database vendor.
 
 ### IV. Canonical
 GIQL should implement canonical operators and adhere to established conventions from widely-used genomics tools. Where multiple conventions exist, GIQL should follow the most prevalent or well-established approach.
