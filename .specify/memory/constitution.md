@@ -52,7 +52,7 @@ GIQL should provide a "genomic semantic layer" on top of standard SQL, making SQ
 **Rationale:** A domain-specific query language that requires deep SQL expertise creates barriers to adoption. Readable queries reduce cognitive load, improve collaboration, and make code review more effective.
 
 ### III. Portable
-GIQL should strive to be usable with any database query engine that supports basic SQL. GIQL does not prescribe which underlying database engine users should adopt—users should be free to choose the best database for their needs without rewriting analysis code.
+GIQL should strive to be usable with any analytic query engine that supports basic SQL. GIQL does not prescribe which underlying engine users should adopt—users should be free to choose the best database or analytics system for their needs without rewriting analysis code.
 
 **Rules:**
 - GIQL MUST transpile to standard SQL compatible with multiple backends
