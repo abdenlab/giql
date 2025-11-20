@@ -31,9 +31,11 @@ GIQL should make common genomic operations clear, concise and natural to express
 
 **Rules:**
 - Common genomic operations (intersect, merge, cluster, within, contains, etc.) MUST have dedicated operators
-- Genomic interval syntax MUST support standard formats (e.g., 'chr1:1000-2000')
-- Complex genomic workflows SHOULD be expressible in a single query
 - Operators MUST compose naturally with standard SQL (WHERE, JOIN, GROUP BY, etc.)
+- GIQL SHOULD express common genomic operations with declarative syntax and semantics and transpile to the declarative subset of SQL, such that a backend may select and/or optimize the procedural implementation
+- Complex genomic workflows SHOULD be expressible in a single query
+- Genomic interval syntax MUST support standard formats (e.g., 'chr1:1000-2000')
+- GIQL MUST NOT concern itself with any bioinformatic file format idiosyncrasies, besides supporting the two interval coordinate conventions (0-based start, 1-based end; 1-based start, 1-based end).
 
 **Rationale:** Genomic analysis involves repetitive patterns that are cumbersome in standard SQL. GIQL exists to reduce boilerplate and make genomic queries more natural. If users still need to write complex SQL for common operations, GIQL fails its purpose.
 
