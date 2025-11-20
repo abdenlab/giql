@@ -40,7 +40,7 @@ GIQL should make common genomic operations clear, concise and natural to express
 **Rationale:** Genomic analysis involves repetitive patterns that are cumbersome in standard SQL. GIQL exists to reduce boilerplate and make genomic queries more natural. If users still need to write complex SQL for common operations, GIQL fails its purpose.
 
 ### II. Readable
-Like Python, GIQL queries should clearly express their intent even to someone who isn't proficient in SQL. Queries should communicate "what" they do rather than "how" they do it. A bioinformatician should be able to understand a query's purpose without being a database expert.
+GIQL should provide a "genomic semantic layer" on top of standard SQL, making SQL a more approachable front end for genomics practitioners to declare the queries they wish to perform on their genomic data sets. Like Python, GIQL queries should clearly express their intent even to someone who isn't proficient in SQL. Queries should communicate "what" they do rather than "how" they do it. A bioinformatician should be able to understand a query's purpose without being a database expert.
 
 **Rules:**
 - Operator names MUST be self-describing (INTERSECTS, WITHIN, CONTAINS, MERGE, CLUSTER)
