@@ -18,6 +18,8 @@ from giql.dialect import GIQLDialect
 from giql.generators import BaseGIQLGenerator
 from giql.generators import GIQLDuckDBGenerator
 from giql.protocols import CursorLike
+from giql.range_parser import CoordinateSystem
+from giql.range_parser import IntervalType
 from giql.schema import ColumnInfo
 from giql.schema import SchemaInfo
 from giql.schema import TableSchema
@@ -174,6 +176,8 @@ class GIQLEngine:
         start_col: str = DEFAULT_START_COL,
         end_col: str = DEFAULT_END_COL,
         strand_col: str | None = DEFAULT_STRAND_COL,
+        coordinate_system: str = "0based",
+        interval_type: str = "half_open",
     ):
         """Register schema for a table.
 
@@ -194,7 +198,21 @@ class GIQLEngine:
             Physical end position column
         :param strand_col:
             Physical strand column (optional)
+        :param coordinate_system:
+            Coordinate system: "0based" or "1based" (default: "0based")
+        :param interval_type:
+            Interval endpoint handling: "half_open" or "closed" (default: "half_open")
         """
+        # Convert string parameters to enums
+        coord_sys = (
+            CoordinateSystem.ONE_BASED
+            if coordinate_system == "1based"
+            else CoordinateSystem.ZERO_BASED
+        )
+        int_type = (
+            IntervalType.CLOSED if interval_type == "closed" else IntervalType.HALF_OPEN
+        )
+
         column_infos = {}
 
         for col_name, col_type in columns.items():
@@ -211,6 +229,8 @@ class GIQLEngine:
             start_col=start_col,
             end_col=end_col,
             strand_col=strand_col,
+            coordinate_system=coord_sys,
+            interval_type=int_type,
         )
 
         table_schema = TableSchema(table_name, column_infos)

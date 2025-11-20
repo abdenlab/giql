@@ -60,7 +60,7 @@ class TestNearestParsing:
 
         # Navigate to NEAREST function in FROM clause
         # When a function is in FROM, sqlglot wraps it in a Table expression
-        from_clause = ast.args.get("from")
+        from_clause = ast.args.get("from_")
         table_expr = from_clause.this
 
         # The NEAREST expression should be nested in the Table's 'this'
@@ -179,7 +179,7 @@ class TestNearestParsing:
         ast = parse_one(sql, dialect=GIQLDialect)
 
         # Navigate to NEAREST function in FROM clause
-        from_clause = ast.args.get("from")
+        from_clause = ast.args.get("from_")
         table_expr = from_clause.this
 
         # The NEAREST expression should be nested in the Table's 'this'

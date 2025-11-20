@@ -48,7 +48,7 @@ class ClusterTransformer:
         :return:
             Table name if FROM contains a simple table, None otherwise
         """
-        from_clause = query.args.get("from")
+        from_clause = query.args.get("from_")
         if not from_clause:
             return None
 
@@ -103,16 +103,16 @@ class ClusterTransformer:
             return query
 
         # First, recursively transform any CTEs that might contain CLUSTER
-        if query.args.get("with"):
-            cte = query.args["with"]
+        if query.args.get("with_"):
+            cte = query.args["with_"]
             for cte_expr in cte.expressions:
                 if isinstance(cte_expr, exp.CTE):
                     # Transform the CTE's subquery
                     cte_expr.set("this", self.transform(cte_expr.this))
 
         # Recursively transform subqueries in FROM clause
-        if query.args.get("from"):
-            from_clause = query.args["from"]
+        if query.args.get("from_"):
+            from_clause = query.args["from_"]
             self._transform_subqueries_in_node(from_clause)
 
         # Recursively transform subqueries in JOIN clauses
@@ -294,14 +294,16 @@ class ClusterTransformer:
         cte_select.select(*cte_expressions, copy=False)
 
         # Copy FROM, WHERE, GROUP BY, HAVING from original (but not ORDER BY)
-        if query.args.get("from"):
-            cte_select.set("from", query.args["from"])
+        # Use copy() to avoid sharing references between queries
+        if query.args.get("from_"):
+            from_clause = query.args["from_"].copy()
+            cte_select.set("from_", from_clause)
         if query.args.get("where"):
-            cte_select.set("where", query.args["where"])
+            cte_select.set("where", query.args["where"].copy())
         if query.args.get("group"):
-            cte_select.set("group", query.args["group"])
+            cte_select.set("group", query.args["group"].copy())
         if query.args.get("having"):
-            cte_select.set("having", query.args["having"])
+            cte_select.set("having", query.args["having"].copy())
 
         # Create outer query with SUM over is_new_cluster
         sum_window = exp.Window(
@@ -385,16 +387,16 @@ class MergeTransformer:
             return query
 
         # First, recursively transform any CTEs that might contain MERGE
-        if query.args.get("with"):
-            cte = query.args["with"]
+        if query.args.get("with_"):
+            cte = query.args["with_"]
             for cte_expr in cte.expressions:
                 if isinstance(cte_expr, exp.CTE):
                     # Transform the CTE's subquery
                     cte_expr.set("this", self.transform(cte_expr.this))
 
         # Recursively transform subqueries in FROM clause
-        if query.args.get("from"):
-            from_clause = query.args["from"]
+        if query.args.get("from_"):
+            from_clause = query.args["from_"]
             self._transform_subqueries_in_node(from_clause)
 
         # Recursively transform subqueries in JOIN clauses
@@ -494,10 +496,11 @@ class MergeTransformer:
         )
 
         # Copy FROM, WHERE from original
-        if query.args.get("from"):
-            cluster_query.set("from", query.args["from"])
+        # Use copy() to avoid sharing references between queries
+        if query.args.get("from_"):
+            cluster_query.set("from_", query.args["from_"].copy())
         if query.args.get("where"):
-            cluster_query.set("where", query.args["where"])
+            cluster_query.set("where", query.args["where"].copy())
 
         # Apply CLUSTER transformation to get the CTE-based query
         cluster_query = self.cluster_transformer.transform(cluster_query)

@@ -8,6 +8,9 @@ from dataclasses import dataclass
 from typing import Dict
 from typing import Optional
 
+from giql.range_parser import CoordinateSystem
+from giql.range_parser import IntervalType
+
 
 @dataclass
 class ColumnInfo:
@@ -21,6 +24,9 @@ class ColumnInfo:
     start_col: Optional[str] = None
     end_col: Optional[str] = None
     strand_col: Optional[str] = None
+    # Coordinate system configuration for genomic columns
+    coordinate_system: CoordinateSystem = CoordinateSystem.ZERO_BASED
+    interval_type: IntervalType = IntervalType.HALF_OPEN
 
 
 @dataclass
