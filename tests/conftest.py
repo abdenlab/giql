@@ -81,7 +81,7 @@ def engine_with_variants(request, sample_variants_csv):
             "alt": "VARCHAR",
             "quality": "FLOAT",
         },
-        genomic_column="position",
+        genomic_column="interval",
     )
 
     yield engine
@@ -106,7 +106,7 @@ def duckdb_engine_with_data(sample_variants_csv, sample_genes_csv):
             "alt": "VARCHAR",
             "quality": "FLOAT",
         },
-        genomic_column="position",
+        genomic_column="interval",
     )
 
     engine.register_table_schema(
@@ -119,7 +119,7 @@ def duckdb_engine_with_data(sample_variants_csv, sample_genes_csv):
             "end_pos": "BIGINT",
             "strand": "VARCHAR",
         },
-        genomic_column="position",
+        genomic_column="interval",
     )
 
     yield engine
@@ -160,7 +160,7 @@ def engine_with_peaks_and_genes(request, sample_peaks_csv, sample_genes_csv):
             "end_pos": "BIGINT",
             "signal": "FLOAT",
         },
-        genomic_column="position",
+        genomic_column="interval",
     )
 
     engine.register_table_schema(
@@ -173,7 +173,7 @@ def engine_with_peaks_and_genes(request, sample_peaks_csv, sample_genes_csv):
             "end_pos": "BIGINT",
             "strand": "VARCHAR",
         },
-        genomic_column="position",
+        genomic_column="interval",
     )
 
     yield engine

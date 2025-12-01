@@ -106,7 +106,7 @@ Always include chromosome filtering when joining tables:
    cursor = engine.execute("""
        SELECT a.*, b.name
        FROM features_a a
-       JOIN features_b b ON a.position INTERSECTS b.position
+       JOIN features_b b ON a.interval INTERSECTS b.interval
        WHERE a.chromosome = 'chr1'
    """)
 
@@ -115,7 +115,7 @@ Always include chromosome filtering when joining tables:
    cursor = engine.execute("""
        SELECT a.*, b.name
        FROM features_a a
-       JOIN features_b b ON a.position INTERSECTS b.position
+       JOIN features_b b ON a.interval INTERSECTS b.interval
          AND a.chromosome = b.chromosome
    """)
 
@@ -134,14 +134,14 @@ Apply selective filters before joins:
        )
        SELECT f.*, g.name
        FROM filtered_variants f
-       JOIN genes g ON f.position INTERSECTS g.position
+       JOIN genes g ON f.interval INTERSECTS g.interval
    """)
 
    # Less efficient: Filter after joining
    cursor = engine.execute("""
        SELECT v.*, g.name
        FROM variants v
-       JOIN genes g ON v.position INTERSECTS g.position
+       JOIN genes g ON v.interval INTERSECTS g.interval
        WHERE v.quality >= 30 AND v.filter = 'PASS'
    """)
 
@@ -155,7 +155,7 @@ Use LIMIT for exploratory queries:
    # Good: Limit results during exploration
    cursor = engine.execute("""
        SELECT * FROM variants
-       WHERE position INTERSECTS 'chr1:1000000-2000000'
+       WHERE interval INTERSECTS 'chr1:1000000-2000000'
        LIMIT 100
    """)
 
@@ -170,7 +170,7 @@ DISTINCT can be expensive. Only use when necessary:
    cursor = engine.execute("""
        SELECT DISTINCT a.*
        FROM features_a a
-       JOIN features_b b ON a.position INTERSECTS b.position
+       JOIN features_b b ON a.interval INTERSECTS b.interval
    """)
 
    # If you just need to check existence, use EXISTS instead
@@ -179,7 +179,7 @@ DISTINCT can be expensive. Only use when necessary:
        FROM features_a a
        WHERE EXISTS (
            SELECT 1 FROM features_b b
-           WHERE a.position INTERSECTS b.position
+           WHERE a.interval INTERSECTS b.interval
        )
    """)
 
@@ -201,7 +201,7 @@ The NEAREST operator can be expensive for large datasets. Optimize with:
        FROM peaks
        CROSS JOIN LATERAL NEAREST(
            genes,
-           reference=peaks.position,
+           reference=peaks.interval,
            k=5,
            max_distance=100000   -- Only search within 100kb
        ) AS nearest
@@ -212,10 +212,10 @@ The NEAREST operator can be expensive for large datasets. Optimize with:
 .. code-block:: python
 
    # Good: Request exactly what you need
-   NEAREST(genes, reference=peaks.position, k=3)
+   NEAREST(genes, reference=peaks.interval, k=3)
 
    # Wasteful: Request more than needed
-   NEAREST(genes, reference=peaks.position, k=100)
+   NEAREST(genes, reference=peaks.interval, k=100)
 
 **3. Index the target table:**
 
@@ -239,7 +239,7 @@ For large datasets, consider pre-sorting:
            SELECT * FROM features
            ORDER BY chromosome, start_pos
        )
-       SELECT *, CLUSTER(position) AS cluster_id
+       SELECT *, CLUSTER(interval) AS cluster_id
        FROM sorted
    """)
 
@@ -256,7 +256,7 @@ Filter before merging to reduce data volume:
            SELECT * FROM features
            WHERE score >= 10
        )
-       SELECT MERGE(position), COUNT(*) AS count
+       SELECT MERGE(interval), COUNT(*) AS count
        FROM filtered
    """)
 
@@ -274,7 +274,7 @@ Analyze query execution plans:
    sql = engine.transpile("""
        SELECT a.*, b.name
        FROM variants a
-       JOIN genes b ON a.position INTERSECTS b.position
+       JOIN genes b ON a.interval INTERSECTS b.interval
    """)
 
    # Analyze the execution plan
@@ -297,7 +297,7 @@ Measure query execution time:
    start = time.time()
    cursor = engine.execute("""
        SELECT * FROM variants
-       WHERE position INTERSECTS 'chr1:1000000-2000000'
+       WHERE interval INTERSECTS 'chr1:1000000-2000000'
    """)
    results = cursor.fetchall()
    elapsed = time.time() - start
@@ -320,14 +320,14 @@ DuckDB is columnar, so queries that select few columns are faster:
    cursor = engine.execute("""
        SELECT chromosome, start_pos, end_pos, name
        FROM features
-       WHERE position INTERSECTS 'chr1:1000-2000'
+       WHERE interval INTERSECTS 'chr1:1000-2000'
    """)
 
    # Slower: Select all columns
    cursor = engine.execute("""
        SELECT *
        FROM features
-       WHERE position INTERSECTS 'chr1:1000-2000'
+       WHERE interval INTERSECTS 'chr1:1000-2000'
    """)
 
 **Parallel execution:**
@@ -385,7 +385,7 @@ Process large datasets in batches:
        cursor = engine.execute(f"""
            SELECT * FROM features
            WHERE chromosome = '{chrom}'
-             AND position INTERSECTS '{chrom}:1-1000000'
+             AND interval INTERSECTS '{chrom}:1-1000000'
        """)
        process_chromosome(cursor)
 

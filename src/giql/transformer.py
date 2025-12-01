@@ -21,7 +21,7 @@ class ClusterTransformer:
     CLUSTER cannot be a simple window function because it requires nested
     window functions (LAG inside SUM). Instead, we transform:
 
-        SELECT *, CLUSTER(position) AS cluster_id FROM features
+        SELECT *, CLUSTER(interval) AS cluster_id FROM features
 
     Into:
 
@@ -350,12 +350,12 @@ class MergeTransformer:
 
     MERGE combines overlapping intervals using CLUSTER + aggregation:
 
-        SELECT MERGE(position) FROM features
+        SELECT MERGE(interval) FROM features
 
     Into:
 
         WITH clustered AS (
-            SELECT *, CLUSTER(position) AS __giql_cluster_id FROM features
+            SELECT *, CLUSTER(interval) AS __giql_cluster_id FROM features
         )
         SELECT
             chromosome,

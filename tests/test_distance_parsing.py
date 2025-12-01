@@ -15,11 +15,11 @@ class TestDistanceParsing:
 
     def test_parse_distance_with_column_to_column(self):
         """
-        GIVEN a GIQL query with DISTANCE(a.position, b.position)
+        GIVEN a GIQL query with DISTANCE(a.interval, b.interval)
         WHEN parsing the query
         THEN should create GIQLDistance AST node with correct arguments
         """
-        sql = "SELECT DISTANCE(a.position, b.position) FROM features_a a, features_b b"
+        sql = "SELECT DISTANCE(a.interval, b.interval) FROM features_a a, features_b b"
 
         ast = parse_one(sql, dialect=GIQLDialect)
 
@@ -37,11 +37,11 @@ class TestDistanceParsing:
 
     def test_parse_distance_with_literal_range(self):
         """
-        GIVEN a GIQL query with DISTANCE(a.position, 'chr1:100-200')
+        GIVEN a GIQL query with DISTANCE(a.interval, 'chr1:100-200')
         WHEN parsing the query
         THEN should create GIQLDistance node with column and literal range
         """
-        sql = "SELECT DISTANCE(a.position, 'chr1:100-200') FROM features a"
+        sql = "SELECT DISTANCE(a.interval, 'chr1:100-200') FROM features a"
 
         ast = parse_one(sql, dialect=GIQLDialect)
 

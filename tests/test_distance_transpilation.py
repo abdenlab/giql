@@ -21,7 +21,7 @@ class TestDistanceTranspilation:
         THEN should generate complete CASE expression with distance logic
         """
         sql = """
-        SELECT DISTANCE(a.position, b.position) as dist
+        SELECT DISTANCE(a.interval, b.interval) as dist
         FROM features_a a CROSS JOIN features_b b
         """
 
@@ -40,7 +40,7 @@ class TestDistanceTranspilation:
         THEN should generate complete compatible SQL CASE expression
         """
         sql = """
-        SELECT DISTANCE(a.position, b.position) as dist
+        SELECT DISTANCE(a.interval, b.interval) as dist
         FROM features_a a, features_b b
         """
 
@@ -59,7 +59,7 @@ class TestDistanceTranspilation:
         THEN should generate complete compatible SQL CASE expression
         """
         sql = """
-        SELECT DISTANCE(a.position, b.position) as dist
+        SELECT DISTANCE(a.interval, b.interval) as dist
         FROM features_a a CROSS JOIN features_b b
         """
 

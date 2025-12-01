@@ -52,7 +52,7 @@ class GIQLEngine:
         with GIQLEngine(target_dialect="duckdb") as engine:
             engine.conn.register("variants", df)
             cursor = engine.execute(
-                "SELECT * FROM variants WHERE position INTERSECTS 'chr1:1000-2000'"
+                "SELECT * FROM variants WHERE interval INTERSECTS 'chr1:1000-2000'"
             )
             for row in cursor:
                 print(row)
@@ -62,7 +62,7 @@ class GIQLEngine:
         with GIQLEngine(target_dialect="duckdb") as engine:
             engine.load_csv("variants", "variants.csv")
             cursor = engine.execute(
-                "SELECT * FROM variants WHERE position INTERSECTS 'chr1:1000-2000'"
+                "SELECT * FROM variants WHERE interval INTERSECTS 'chr1:1000-2000'"
             )
             # Process rows lazily
             while True:
@@ -75,7 +75,7 @@ class GIQLEngine:
 
         with GIQLEngine(target_dialect="sqlite", db_path="data.db") as engine:
             cursor = engine.execute(
-                "SELECT * FROM variants WHERE position INTERSECTS 'chr1:1000-2000'"
+                "SELECT * FROM variants WHERE interval INTERSECTS 'chr1:1000-2000'"
             )
             # Materialize all results at once
             results = cursor.fetchall()

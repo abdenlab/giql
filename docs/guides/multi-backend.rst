@@ -153,7 +153,7 @@ supported database:
    query = """
        SELECT a.*, b.name AS gene
        FROM variants a
-       JOIN genes b ON a.position INTERSECTS b.position
+       JOIN genes b ON a.interval INTERSECTS b.interval
        WHERE a.quality >= 30
    """
 
@@ -175,16 +175,16 @@ Use ``transpile()`` to see the backend-specific SQL:
 
 .. code-block:: python
 
-   query = "SELECT * FROM features WHERE position INTERSECTS 'chr1:1000-2000'"
+   query = "SELECT * FROM features WHERE interval INTERSECTS 'chr1:1000-2000'"
 
    # DuckDB SQL
    with GIQLEngine(target_dialect="duckdb") as engine:
-       engine.register_table_schema("features", {...}, genomic_column="position")
+       engine.register_table_schema("features", {...}, genomic_column="interval")
        print(engine.transpile(query))
 
    # SQLite SQL (may differ slightly)
    with GIQLEngine(target_dialect="sqlite") as engine:
-       engine.register_table_schema("features", {...}, genomic_column="position")
+       engine.register_table_schema("features", {...}, genomic_column="interval")
        print(engine.transpile(query))
 
 Backend-Specific Features
@@ -238,7 +238,7 @@ Export data from one backend for import into another:
    # Import to SQLite
    with GIQLEngine(target_dialect="sqlite", db_path="target.db") as engine:
        engine.load_csv("features", "features_export.csv")
-       engine.register_table_schema("features", {...}, genomic_column="position")
+       engine.register_table_schema("features", {...}, genomic_column="interval")
 
 Schema Compatibility
 ~~~~~~~~~~~~~~~~~~~~
@@ -260,7 +260,7 @@ Ensure schema definitions work across backends:
    for dialect in ["duckdb", "sqlite"]:
        with GIQLEngine(target_dialect=dialect) as engine:
            engine.load_csv("features", "features.csv")
-           engine.register_table_schema("features", schema, genomic_column="position")
+           engine.register_table_schema("features", schema, genomic_column="interval")
 
 Performance Comparison
 ----------------------
@@ -332,13 +332,13 @@ Connect to databases created outside of GIQL:
                "end_pos": "BIGINT",
                "name": "VARCHAR",
            },
-           genomic_column="position",
+           genomic_column="interval",
        )
 
        # Query existing data with GIQL operators
        cursor = engine.execute("""
            SELECT * FROM my_existing_table
-           WHERE position INTERSECTS 'chr1:1000-2000'
+           WHERE interval INTERSECTS 'chr1:1000-2000'
        """)
 
 Using Transpiled SQL Externally
@@ -352,10 +352,10 @@ Generate SQL for use with external database connections:
 
    # Get transpiled SQL from GIQL
    with GIQLEngine(target_dialect="duckdb") as engine:
-       engine.register_table_schema("features", {...}, genomic_column="position")
+       engine.register_table_schema("features", {...}, genomic_column="interval")
        sql = engine.transpile("""
            SELECT * FROM features
-           WHERE position INTERSECTS 'chr1:1000-2000'
+           WHERE interval INTERSECTS 'chr1:1000-2000'
        """)
 
    # Execute with external connection

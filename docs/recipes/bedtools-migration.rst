@@ -53,19 +53,19 @@ Quick Reference Table
      - ``SELECT ..., DISTANCE(a.pos, b.pos) ...``
      - :ref:`closest-d`
    * - ``cluster -i A``
-     - ``SELECT *, CLUSTER(position) AS cluster_id FROM a``
+     - ``SELECT *, CLUSTER(interval) AS cluster_id FROM a``
      - :ref:`cluster-basic`
    * - ``cluster -i A -d N``
-     - ``SELECT *, CLUSTER(position, N) AS cluster_id FROM a``
+     - ``SELECT *, CLUSTER(interval, N) AS cluster_id FROM a``
      - :ref:`cluster-d`
    * - ``merge -i A``
-     - ``SELECT MERGE(position) FROM a``
+     - ``SELECT MERGE(interval) FROM a``
      - :ref:`merge-basic`
    * - ``merge -i A -d N``
-     - ``SELECT MERGE(position, N) FROM a``
+     - ``SELECT MERGE(interval, N) FROM a``
      - :ref:`merge-d`
    * - ``merge -i A -c 1 -o count``
-     - ``SELECT MERGE(position), COUNT(*) FROM a``
+     - ``SELECT MERGE(interval), COUNT(*) FROM a``
      - :ref:`merge-count`
 
 bedtools intersect
@@ -89,7 +89,7 @@ Default: Report overlaps between A and B
    cursor = engine.execute("""
        SELECT DISTINCT a.*
        FROM features_a a, features_b b
-       WHERE a.position INTERSECTS b.position
+       WHERE a.interval INTERSECTS b.interval
    """)
 
 .. _intersect-wa:
@@ -110,7 +110,7 @@ Default: Report overlaps between A and B
    cursor = engine.execute("""
        SELECT a.*
        FROM features_a a, features_b b
-       WHERE a.position INTERSECTS b.position
+       WHERE a.interval INTERSECTS b.interval
    """)
 
 .. _intersect-wb:
@@ -131,7 +131,7 @@ Default: Report overlaps between A and B
    cursor = engine.execute("""
        SELECT b.*
        FROM features_a a, features_b b
-       WHERE a.position INTERSECTS b.position
+       WHERE a.interval INTERSECTS b.interval
    """)
 
 .. _intersect-wawb:
@@ -152,7 +152,7 @@ Default: Report overlaps between A and B
    cursor = engine.execute("""
        SELECT a.*, b.*
        FROM features_a a, features_b b
-       WHERE a.position INTERSECTS b.position
+       WHERE a.interval INTERSECTS b.interval
    """)
 
 .. _intersect-v:
@@ -173,7 +173,7 @@ Default: Report overlaps between A and B
    cursor = engine.execute("""
        SELECT a.*
        FROM features_a a
-       LEFT JOIN features_b b ON a.position INTERSECTS b.position
+       LEFT JOIN features_b b ON a.interval INTERSECTS b.interval
        WHERE b.chromosome IS NULL
    """)
 
@@ -195,7 +195,7 @@ Default: Report overlaps between A and B
    cursor = engine.execute("""
        SELECT DISTINCT a.*
        FROM features_a a
-       INNER JOIN features_b b ON a.position INTERSECTS b.position
+       INNER JOIN features_b b ON a.interval INTERSECTS b.interval
    """)
 
 .. _intersect-c:
@@ -216,7 +216,7 @@ Default: Report overlaps between A and B
    cursor = engine.execute("""
        SELECT a.*, COUNT(b.name) AS overlap_count
        FROM features_a a
-       LEFT JOIN features_b b ON a.position INTERSECTS b.position
+       LEFT JOIN features_b b ON a.interval INTERSECTS b.interval
        GROUP BY a.chromosome, a.start_pos, a.end_pos, a.name, a.score, a.strand
    """)
 
@@ -241,7 +241,7 @@ Default: Report overlaps between A and B
            b.*,
            (LEAST(a.end_pos, b.end_pos) - GREATEST(a.start_pos, b.start_pos)) AS overlap_bp
        FROM features_a a, features_b b
-       WHERE a.position INTERSECTS b.position
+       WHERE a.interval INTERSECTS b.interval
    """)
 
 .. _intersect-wao:
@@ -268,7 +268,7 @@ Default: Report overlaps between A and B
                ELSE LEAST(a.end_pos, b.end_pos) - GREATEST(a.start_pos, b.start_pos)
            END AS overlap_bp
        FROM features_a a
-       LEFT JOIN features_b b ON a.position INTERSECTS b.position
+       LEFT JOIN features_b b ON a.interval INTERSECTS b.interval
    """)
 
 .. _intersect-loj:
@@ -289,7 +289,7 @@ Default: Report overlaps between A and B
    cursor = engine.execute("""
        SELECT a.*, b.*
        FROM features_a a
-       LEFT JOIN features_b b ON a.position INTERSECTS b.position
+       LEFT JOIN features_b b ON a.interval INTERSECTS b.interval
    """)
 
 ``-s``: Same strand overlaps only
@@ -308,7 +308,7 @@ Default: Report overlaps between A and B
    cursor = engine.execute("""
        SELECT a.*
        FROM features_a a, features_b b
-       WHERE a.position INTERSECTS b.position
+       WHERE a.interval INTERSECTS b.interval
          AND a.strand = b.strand
    """)
 
@@ -328,7 +328,7 @@ Default: Report overlaps between A and B
    cursor = engine.execute("""
        SELECT a.*
        FROM features_a a, features_b b
-       WHERE a.position INTERSECTS b.position
+       WHERE a.interval INTERSECTS b.interval
          AND a.strand != b.strand
          AND a.strand IN ('+', '-')
          AND b.strand IN ('+', '-')
@@ -350,7 +350,7 @@ Default: Report overlaps between A and B
    cursor = engine.execute("""
        SELECT a.*
        FROM features_a a, features_b b
-       WHERE a.position INTERSECTS b.position
+       WHERE a.interval INTERSECTS b.interval
          AND (
              LEAST(a.end_pos, b.end_pos) - GREATEST(a.start_pos, b.start_pos)
          ) >= 0.5 * (a.end_pos - a.start_pos)
@@ -377,7 +377,7 @@ Default: Report overlaps between A and B
                (a.end_pos - a.start_pos) AS a_length,
                (b.end_pos - b.start_pos) AS b_length
            FROM features_a a, features_b b
-           WHERE a.position INTERSECTS b.position
+           WHERE a.interval INTERSECTS b.interval
        )
        SELECT chromosome, start_pos, end_pos, name, score, strand
        FROM overlap_calcs
@@ -409,7 +409,7 @@ bedtools closest
            nearest.name AS gene,
            nearest.distance
        FROM peaks
-       CROSS JOIN LATERAL NEAREST(genes, reference=peaks.position, k=3) AS nearest
+       CROSS JOIN LATERAL NEAREST(genes, reference=peaks.interval, k=3) AS nearest
        ORDER BY peaks.name, nearest.distance
    """)
 
@@ -432,7 +432,7 @@ bedtools closest
        SELECT
            a.name AS peak,
            b.name AS gene,
-           DISTANCE(a.position, b.position) AS distance
+           DISTANCE(a.interval, b.interval) AS distance
        FROM peaks a
        CROSS JOIN genes b
        WHERE a.chromosome = b.chromosome
@@ -449,7 +449,7 @@ Or using NEAREST for just the closest:
            nearest.name AS gene,
            nearest.distance
        FROM peaks
-       CROSS JOIN LATERAL NEAREST(genes, reference=peaks.position, k=1) AS nearest
+       CROSS JOIN LATERAL NEAREST(genes, reference=peaks.interval, k=1) AS nearest
    """)
 
 ``-s``: Same strand only
@@ -473,7 +473,7 @@ Or using NEAREST for just the closest:
        FROM peaks
        CROSS JOIN LATERAL NEAREST(
            genes,
-           reference=peaks.position,
+           reference=peaks.interval,
            k=3,
            stranded=true
        ) AS nearest
@@ -501,7 +501,7 @@ Basic clustering
    cursor = engine.execute("""
        SELECT
            *,
-           CLUSTER(position) AS cluster_id
+           CLUSTER(interval) AS cluster_id
        FROM features
        ORDER BY chromosome, start_pos
    """)
@@ -524,7 +524,7 @@ Basic clustering
    cursor = engine.execute("""
        SELECT
            *,
-           CLUSTER(position, 1000) AS cluster_id
+           CLUSTER(interval, 1000) AS cluster_id
        FROM features
        ORDER BY chromosome, start_pos
    """)
@@ -545,7 +545,7 @@ Basic clustering
    cursor = engine.execute("""
        SELECT
            *,
-           CLUSTER(position, stranded=true) AS cluster_id
+           CLUSTER(interval, stranded=true) AS cluster_id
        FROM features
        ORDER BY chromosome, strand, start_pos
    """)
@@ -569,7 +569,7 @@ Basic merge
 .. code-block:: python
 
    cursor = engine.execute("""
-       SELECT MERGE(position)
+       SELECT MERGE(interval)
        FROM features
    """)
 
@@ -589,7 +589,7 @@ Basic merge
 .. code-block:: python
 
    cursor = engine.execute("""
-       SELECT MERGE(position, 1000)
+       SELECT MERGE(interval, 1000)
        FROM features
    """)
 
@@ -607,7 +607,7 @@ Basic merge
 .. code-block:: python
 
    cursor = engine.execute("""
-       SELECT MERGE(position, stranded=true)
+       SELECT MERGE(interval, stranded=true)
        FROM features
    """)
 
@@ -628,7 +628,7 @@ Basic merge
 
    cursor = engine.execute("""
        SELECT
-           MERGE(position),
+           MERGE(interval),
            COUNT(*) AS feature_count
        FROM features
    """)
@@ -648,7 +648,7 @@ Basic merge
 
    cursor = engine.execute("""
        SELECT
-           MERGE(position),
+           MERGE(interval),
            AVG(score) AS avg_score
        FROM features
    """)
@@ -668,7 +668,7 @@ Basic merge
 
    cursor = engine.execute("""
        SELECT
-           MERGE(position),
+           MERGE(interval),
            STRING_AGG(name, ',') AS feature_names
        FROM features
    """)

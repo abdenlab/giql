@@ -72,7 +72,7 @@ def duckdb_engine_with_edge_case_data():
             "start_pos": "INTEGER",
             "end_pos": "INTEGER",
         },
-        genomic_column="position",
+        genomic_column="interval",
     )
     engine.register_table_schema(
         "genes",
@@ -83,7 +83,7 @@ def duckdb_engine_with_edge_case_data():
             "start_pos": "INTEGER",
             "end_pos": "INTEGER",
         },
-        genomic_column="position",
+        genomic_column="interval",
     )
 
     return engine
@@ -105,7 +105,7 @@ class TestNearestEdgeCases:
                 peaks.peak_id,
                 nearest.gene_name
             FROM peaks
-            CROSS JOIN LATERAL NEAREST(genes, reference=peaks.position, k=0) AS nearest
+            CROSS JOIN LATERAL NEAREST(genes, reference=peaks.interval, k=0) AS nearest
             WHERE peaks.peak_id = 1
         """)
 
@@ -128,7 +128,7 @@ class TestNearestEdgeCases:
                 nearest.gene_name,
                 nearest.distance
             FROM peaks
-            CROSS JOIN LATERAL NEAREST(genes, reference=peaks.position, k=1) AS nearest
+            CROSS JOIN LATERAL NEAREST(genes, reference=peaks.interval, k=1) AS nearest
             WHERE peaks.peak_id = 1
             ORDER BY nearest.distance, nearest.gene_name
         """)
@@ -162,7 +162,7 @@ class TestNearestEdgeCases:
                 nearest.gene_name,
                 nearest.distance
             FROM peaks
-            CROSS JOIN LATERAL NEAREST(genes, reference=peaks.position, k=10) AS nearest
+            CROSS JOIN LATERAL NEAREST(genes, reference=peaks.interval, k=10) AS nearest
             WHERE peaks.peak_id = 2
         """)
 
@@ -188,7 +188,7 @@ class TestNearestEdgeCases:
                 nearest.gene_name,
                 nearest.distance
             FROM peaks
-            CROSS JOIN LATERAL NEAREST(genes, reference=peaks.position, k=5) AS nearest
+            CROSS JOIN LATERAL NEAREST(genes, reference=peaks.interval, k=5) AS nearest
             WHERE peaks.peak_id = 1
             ORDER BY nearest.distance
         """)
@@ -243,7 +243,7 @@ class TestNearestEdgeCases:
             engine.execute("""
                 SELECT *
                 FROM peaks
-                CROSS JOIN LATERAL NEAREST(nonexistent_table, reference=peaks.position, k=3) AS nearest
+                CROSS JOIN LATERAL NEAREST(nonexistent_table, reference=peaks.interval, k=3) AS nearest
             """)
 
         # Should get an error about the missing table
@@ -295,7 +295,7 @@ class TestNearestEdgeCases:
                 nearest.gene_name,
                 nearest.distance
             FROM peaks
-            CROSS JOIN LATERAL NEAREST(genes, reference=peaks.position, k=10) AS nearest
+            CROSS JOIN LATERAL NEAREST(genes, reference=peaks.interval, k=10) AS nearest
             WHERE peaks.peak_id = 1 AND nearest.distance < 600
             ORDER BY nearest.distance
         """)
@@ -327,7 +327,7 @@ class TestNearestEdgeCases:
                 nearest.gene_name,
                 nearest.distance
             FROM selected_peaks
-            CROSS JOIN LATERAL NEAREST(genes, reference=selected_peaks.position, k=2) AS nearest
+            CROSS JOIN LATERAL NEAREST(genes, reference=selected_peaks.interval, k=2) AS nearest
             ORDER BY selected_peaks.peak_id, nearest.distance
         """)
 
@@ -356,7 +356,7 @@ class TestNearestEdgeCases:
                 peaks.peak_id,
                 nearest.gene_name
             FROM peaks
-            CROSS JOIN LATERAL NEAREST(genes, reference=peaks.position, k=1000) AS nearest
+            CROSS JOIN LATERAL NEAREST(genes, reference=peaks.interval, k=1000) AS nearest
             WHERE peaks.peak_id = 1
         """)
 
@@ -380,7 +380,7 @@ class TestNearestEdgeCases:
                 nearest.gene_name,
                 nearest.distance
             FROM peaks
-            CROSS JOIN LATERAL NEAREST(genes, reference=peaks.position, k=3) AS nearest
+            CROSS JOIN LATERAL NEAREST(genes, reference=peaks.interval, k=3) AS nearest
             WHERE peaks.peak_id = 1
             ORDER BY nearest.distance, nearest.gene_name
         """)
@@ -458,7 +458,7 @@ class TestNearestPropertyBased:
                 "start_pos": "INTEGER",
                 "end_pos": "INTEGER",
             },
-            genomic_column="position",
+            genomic_column="interval",
         )
         engine.register_table_schema(
             "target",
@@ -468,14 +468,14 @@ class TestNearestPropertyBased:
                 "start_pos": "INTEGER",
                 "end_pos": "INTEGER",
             },
-            genomic_column="position",
+            genomic_column="interval",
         )
 
         # Query for nearest
         cursor = engine.execute("""
             SELECT nearest.distance
             FROM ref
-            CROSS JOIN LATERAL NEAREST(target, reference=ref.position, k=1) AS nearest
+            CROSS JOIN LATERAL NEAREST(target, reference=ref.interval, k=1) AS nearest
         """)
 
         rows = cursor.fetchall()
@@ -532,7 +532,7 @@ class TestNearestPropertyBased:
                 "start_pos": "INTEGER",
                 "end_pos": "INTEGER",
             },
-            genomic_column="position",
+            genomic_column="interval",
         )
         engine.register_table_schema(
             "target",
@@ -542,14 +542,14 @@ class TestNearestPropertyBased:
                 "start_pos": "INTEGER",
                 "end_pos": "INTEGER",
             },
-            genomic_column="position",
+            genomic_column="interval",
         )
 
         # Query for nearest
         cursor = engine.execute("""
             SELECT nearest.distance
             FROM ref
-            CROSS JOIN LATERAL NEAREST(target, reference=ref.position, k=1) AS nearest
+            CROSS JOIN LATERAL NEAREST(target, reference=ref.interval, k=1) AS nearest
         """)
 
         rows = cursor.fetchall()
@@ -603,7 +603,7 @@ class TestNearestPropertyBased:
                 "start_pos": "INTEGER",
                 "end_pos": "INTEGER",
             },
-            genomic_column="position",
+            genomic_column="interval",
         )
         engine.register_table_schema(
             "target",
@@ -613,14 +613,14 @@ class TestNearestPropertyBased:
                 "start_pos": "INTEGER",
                 "end_pos": "INTEGER",
             },
-            genomic_column="position",
+            genomic_column="interval",
         )
 
         # Query for k nearest
         cursor = engine.execute(f"""
             SELECT COUNT(*)
             FROM ref
-            CROSS JOIN LATERAL NEAREST(target, reference=ref.position, k={k}) AS nearest
+            CROSS JOIN LATERAL NEAREST(target, reference=ref.interval, k={k}) AS nearest
         """)
 
         rows = cursor.fetchall()

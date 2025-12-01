@@ -12,7 +12,7 @@ class TestBaseGenerator:
         WHEN generating SQL code
         THEN should produce standard SQL with range conditions
         """
-        sql = "SELECT * FROM variants WHERE position INTERSECTS 'chr1:1000-2000'"
+        sql = "SELECT * FROM variants WHERE interval INTERSECTS 'chr1:1000-2000'"
         ast = parse_one(sql, dialect=GIQLDialect)
 
         generator = BaseGIQLGenerator()
@@ -29,7 +29,7 @@ class TestBaseGenerator:
         WHEN generating SQL code
         THEN should produce containment conditions
         """
-        sql = "SELECT * FROM variants WHERE position CONTAINS 'chr1:1500'"
+        sql = "SELECT * FROM variants WHERE interval CONTAINS 'chr1:1500'"
         ast = parse_one(sql, dialect=GIQLDialect)
 
         generator = BaseGIQLGenerator()
@@ -46,7 +46,7 @@ class TestBaseGenerator:
         WHEN generating SQL code
         THEN should produce within conditions
         """
-        sql = "SELECT * FROM variants WHERE position WITHIN 'chr1:1000-5000'"
+        sql = "SELECT * FROM variants WHERE interval WITHIN 'chr1:1000-5000'"
         ast = parse_one(sql, dialect=GIQLDialect)
 
         generator = BaseGIQLGenerator()
@@ -64,7 +64,7 @@ class TestBaseGenerator:
         THEN should produce OR conditions
         """
         sql = (
-            "SELECT * FROM v WHERE position INTERSECTS ANY("
+            "SELECT * FROM v WHERE interval INTERSECTS ANY("
             "'chr1:1000-2000', 'chr1:5000-6000')"
         )
         ast = parse_one(sql, dialect=GIQLDialect)
@@ -83,7 +83,7 @@ class TestBaseGenerator:
         THEN should produce AND conditions
         """
         sql = (
-            "SELECT * FROM v WHERE position INTERSECTS ALL("
+            "SELECT * FROM v WHERE interval INTERSECTS ALL("
             "'chr1:1000-2000', 'chr1:1500-1800')"
         )
         ast = parse_one(sql, dialect=GIQLDialect)
@@ -101,7 +101,7 @@ class TestBaseGenerator:
         WHEN generating SQL code
         THEN should properly qualify column names
         """
-        sql = "SELECT * FROM variants v WHERE v.position INTERSECTS 'chr1:1000-2000'"
+        sql = "SELECT * FROM variants v WHERE v.interval INTERSECTS 'chr1:1000-2000'"
         ast = parse_one(sql, dialect=GIQLDialect)
 
         generator = BaseGIQLGenerator()
@@ -118,7 +118,7 @@ class TestBaseGenerator:
         WHEN generating SQL code
         THEN should use range containment logic
         """
-        sql = "SELECT * FROM variants WHERE position CONTAINS 'chr1:1500-2000'"
+        sql = "SELECT * FROM variants WHERE interval CONTAINS 'chr1:1500-2000'"
         ast = parse_one(sql, dialect=GIQLDialect)
 
         generator = BaseGIQLGenerator()
@@ -135,7 +135,7 @@ class TestBaseGenerator:
         WHEN generating SQL code
         THEN should raise ValueError
         """
-        sql = "SELECT * FROM variants WHERE position INTERSECTS 'invalid'"
+        sql = "SELECT * FROM variants WHERE interval INTERSECTS 'invalid'"
         ast = parse_one(sql, dialect=GIQLDialect)
 
         generator = BaseGIQLGenerator()
@@ -153,7 +153,7 @@ class TestDuckDBGenerator:
         WHEN using DuckDB generator
         THEN should produce valid DuckDB SQL
         """
-        sql = "SELECT * FROM variants WHERE position INTERSECTS 'chr1:1000-2000'"
+        sql = "SELECT * FROM variants WHERE interval INTERSECTS 'chr1:1000-2000'"
         ast = parse_one(sql, dialect=GIQLDialect)
 
         generator = GIQLDuckDBGenerator()

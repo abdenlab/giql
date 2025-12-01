@@ -25,13 +25,13 @@ Test positional relationships between genomic ranges.
      - Example
    * - :ref:`INTERSECTS <intersects-operator>`
      - Returns true when ranges overlap by at least one base pair
-     - ``position INTERSECTS 'chr1:1000-2000'``
+     - ``interval INTERSECTS 'chr1:1000-2000'``
    * - :ref:`CONTAINS <contains-operator>`
      - Returns true when one range fully contains another
-     - ``position CONTAINS 'chr1:1500'``
+     - ``interval CONTAINS 'chr1:1500'``
    * - :ref:`WITHIN <within-operator>`
      - Returns true when one range is fully within another
-     - ``position WITHIN 'chr1:1000-5000'``
+     - ``interval WITHIN 'chr1:1000-5000'``
 
 See :doc:`spatial-operators` for detailed documentation.
 
@@ -49,10 +49,10 @@ Calculate distances and find nearest features.
      - Example
    * - :ref:`DISTANCE <distance-operator>`
      - Calculate genomic distance between two intervals
-     - ``DISTANCE(a.position, b.position)``
+     - ``DISTANCE(a.interval, b.interval)``
    * - :ref:`NEAREST <nearest-operator>`
      - Find k-nearest genomic features
-     - ``NEAREST(genes, reference=peaks.position, k=5)``
+     - ``NEAREST(genes, reference=peaks.interval, k=5)``
 
 See :doc:`distance-operators` for detailed documentation.
 
@@ -70,10 +70,10 @@ Combine and cluster genomic intervals.
      - Example
    * - :ref:`CLUSTER <cluster-operator>`
      - Assign cluster IDs to overlapping intervals
-     - ``CLUSTER(position) AS cluster_id``
+     - ``CLUSTER(interval) AS cluster_id``
    * - :ref:`MERGE <merge-operator>`
      - Combine overlapping intervals into unified regions
-     - ``SELECT MERGE(position) FROM features``
+     - ``SELECT MERGE(interval) FROM features``
 
 See :doc:`aggregation-operators` for detailed documentation.
 
@@ -91,10 +91,10 @@ Apply operators to multiple ranges simultaneously.
      - Example
    * - :ref:`ANY <any-quantifier>`
      - Match if condition holds for any of the specified ranges
-     - ``position INTERSECTS ANY('chr1:1000-2000', 'chr2:5000-6000')``
+     - ``interval INTERSECTS ANY('chr1:1000-2000', 'chr2:5000-6000')``
    * - :ref:`ALL <all-quantifier>`
      - Match if condition holds for all of the specified ranges
-     - ``position CONTAINS ALL('chr1:1500', 'chr1:1600')``
+     - ``interval CONTAINS ALL('chr1:1500', 'chr1:1600')``
 
 See :doc:`quantifiers` for detailed documentation.
 

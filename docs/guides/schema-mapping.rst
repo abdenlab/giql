@@ -19,11 +19,11 @@ in your database tables.
 The Core Concept
 ~~~~~~~~~~~~~~~~
 
-In GIQL queries, you use a logical genomic column name like ``position``:
+In GIQL queries, you use a logical genomic column name like ``interval``:
 
 .. code-block:: sql
 
-   SELECT * FROM variants WHERE position INTERSECTS 'chr1:1000-2000'
+   SELECT * FROM variants WHERE interval INTERSECTS 'chr1:1000-2000'
 
 Behind the scenes, GIQL expands this to actual column comparisons:
 
@@ -33,7 +33,7 @@ Behind the scenes, GIQL expands this to actual column comparisons:
    WHERE chromosome = 'chr1' AND start_pos < 2000 AND end_pos > 1000
 
 Schema registration tells GIQL which physical columns (``chromosome``,
-``start_pos``, ``end_pos``) correspond to the logical ``position`` column.
+``start_pos``, ``end_pos``) correspond to the logical ``interval`` column.
 
 Registering Table Schemas
 -------------------------
@@ -62,13 +62,13 @@ Register a table schema using ``register_table_schema()``:
                "name": "VARCHAR",
                "quality": "FLOAT",
            },
-           genomic_column="position",     # Logical column name for queries
+           genomic_column="interval",     # Logical column name for queries
        )
 
-       # Now you can use 'position' in queries
+       # Now you can use 'interval' in queries
        cursor = engine.execute("""
            SELECT * FROM variants
-           WHERE position INTERSECTS 'chr1:1000-2000'
+           WHERE interval INTERSECTS 'chr1:1000-2000'
        """)
 
 Required Columns
@@ -99,7 +99,7 @@ If your data includes strand information, include it in the schema:
            "strand": "VARCHAR",       # '+', '-', or '.'
            "name": "VARCHAR",
        },
-       genomic_column="position",
+       genomic_column="interval",
    )
 
 The strand column enables strand-specific operations in operators like
@@ -123,7 +123,7 @@ the mapping explicitly:
            "chromEnd": "BIGINT",      # Your end column
            "name": "VARCHAR",
        },
-       genomic_column="position",
+       genomic_column="interval",
        chromosome_column="chrom",      # Map to your column name
        start_column="chromStart",      # Map to your column name
        end_column="chromEnd",          # Map to your column name
@@ -160,14 +160,14 @@ Register all tables that will participate in genomic queries:
            engine.register_table_schema(
                table,
                bed_schema,
-               genomic_column="position",
+               genomic_column="interval",
            )
 
        # Now you can join tables using genomic operators
        cursor = engine.execute("""
            SELECT v.*, g.name AS gene_name
            FROM variants v
-           JOIN genes g ON v.position INTERSECTS g.position
+           JOIN genes g ON v.interval INTERSECTS g.interval
        """)
 
 Different Schemas Per Table
@@ -187,7 +187,7 @@ Tables can have different schemas and even different genomic column names:
            "ID": "VARCHAR",
            "QUAL": "FLOAT",
        },
-       genomic_column="var_position",
+       genomic_column="var_interval",
        chromosome_column="CHROM",
        start_column="POS",
        end_column="END",
@@ -203,14 +203,14 @@ Tables can have different schemas and even different genomic column names:
            "gene_name": "VARCHAR",
            "strand": "VARCHAR",
        },
-       genomic_column="gene_position",
+       genomic_column="gene_interval",
    )
 
    # Query using different genomic column names
    cursor = engine.execute("""
        SELECT v.ID, g.gene_name
        FROM variants v
-       JOIN genes g ON v.var_position INTERSECTS g.gene_position
+       JOIN genes g ON v.var_interval INTERSECTS g.gene_interval
    """)
 
 Coordinate Systems
@@ -255,7 +255,7 @@ If your data uses 1-based coordinates (like VCF or GFF), convert when loading:
            "end_pos": "BIGINT",
            # ... other columns
        },
-       genomic_column="position",
+       genomic_column="interval",
    )
 
 Working with Point Features
@@ -376,7 +376,7 @@ Load data from pandas:
            "end_pos": "BIGINT",
            "name": "VARCHAR",
        },
-       genomic_column="position",
+       genomic_column="interval",
    )
 
 From Existing Database Tables
@@ -397,13 +397,13 @@ If tables already exist in your database, just register their schemas:
                "end_pos": "BIGINT",
                "name": "VARCHAR",
            },
-           genomic_column="position",
+           genomic_column="interval",
        )
 
        # Query existing data
        cursor = engine.execute("""
            SELECT * FROM existing_table
-           WHERE position INTERSECTS 'chr1:1000-2000'
+           WHERE interval INTERSECTS 'chr1:1000-2000'
        """)
 
 Troubleshooting
@@ -439,7 +439,7 @@ Check that schemas are registered correctly:
    # After registration, test with a simple query
    sql = engine.transpile("""
        SELECT * FROM variants
-       WHERE position INTERSECTS 'chr1:1000-2000'
+       WHERE interval INTERSECTS 'chr1:1000-2000'
    """)
    print(sql)
    # Should show expanded SQL with chromosome, start_pos, end_pos comparisons

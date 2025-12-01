@@ -47,13 +47,13 @@ Test if ranges overlap.
 .. code-block:: sql
 
    -- Against literal
-   position INTERSECTS 'chr1:1000-2000'
+   interval INTERSECTS 'chr1:1000-2000'
 
    -- Column to column
-   a.position INTERSECTS b.position
+   a.interval INTERSECTS b.interval
 
    -- In JOIN
-   JOIN table ON a.position INTERSECTS b.position
+   JOIN table ON a.interval INTERSECTS b.interval
 
 CONTAINS
 ~~~~~~~~
@@ -63,13 +63,13 @@ Test if one range fully contains another.
 .. code-block:: sql
 
    -- Range contains point
-   position CONTAINS 'chr1:1500'
+   interval CONTAINS 'chr1:1500'
 
    -- Range contains range
-   position CONTAINS 'chr1:1200-1800'
+   interval CONTAINS 'chr1:1200-1800'
 
    -- Column to column
-   gene.position CONTAINS exon.position
+   gene.interval CONTAINS exon.interval
 
 WITHIN
 ~~~~~~
@@ -79,10 +79,10 @@ Test if one range is fully within another.
 .. code-block:: sql
 
    -- Range within literal
-   position WITHIN 'chr1:1000-5000'
+   interval WITHIN 'chr1:1000-5000'
 
    -- Column to column
-   exon.position WITHIN gene.position
+   exon.interval WITHIN gene.interval
 
 Distance Operators
 ------------------
@@ -94,7 +94,7 @@ Calculate distance between two positions.
 
 .. code-block:: sql
 
-   DISTANCE(a.position, b.position)
+   DISTANCE(a.interval, b.interval)
 
 Returns:
 
@@ -112,14 +112,14 @@ Find k-nearest neighbors.
    -- Basic syntax
    CROSS JOIN LATERAL NEAREST(
        target_table,
-       reference=source.position,
+       reference=source.interval,
        k=N
    ) AS alias
 
    -- With parameters
    NEAREST(
        target_table,
-       reference=position,
+       reference=interval,
        k=5,
        max_distance=100000,
        stranded=true,
@@ -147,16 +147,16 @@ Assign cluster IDs to overlapping intervals.
 .. code-block:: sql
 
    -- Basic
-   CLUSTER(position) AS cluster_id
+   CLUSTER(interval) AS cluster_id
 
    -- With distance
-   CLUSTER(position, 1000) AS cluster_id
+   CLUSTER(interval, 1000) AS cluster_id
 
    -- Strand-specific
-   CLUSTER(position, stranded=true) AS cluster_id
+   CLUSTER(interval, stranded=true) AS cluster_id
 
    -- Combined
-   CLUSTER(position, 1000, stranded=true) AS cluster_id
+   CLUSTER(interval, 1000, stranded=true) AS cluster_id
 
 MERGE
 ~~~~~
@@ -166,16 +166,16 @@ Combine overlapping intervals.
 .. code-block:: sql
 
    -- Basic
-   SELECT MERGE(position) FROM table
+   SELECT MERGE(interval) FROM table
 
    -- With distance
-   SELECT MERGE(position, 1000) FROM table
+   SELECT MERGE(interval, 1000) FROM table
 
    -- Strand-specific
-   SELECT MERGE(position, stranded=true) FROM table
+   SELECT MERGE(interval, stranded=true) FROM table
 
    -- With aggregations
-   SELECT MERGE(position), COUNT(*), AVG(score) FROM table
+   SELECT MERGE(interval), COUNT(*), AVG(score) FROM table
 
 Set Quantifiers
 ---------------
@@ -187,9 +187,9 @@ Match any of multiple ranges.
 
 .. code-block:: sql
 
-   position INTERSECTS ANY('chr1:1000-2000', 'chr2:5000-6000')
-   position CONTAINS ANY('chr1:1500', 'chr1:2500')
-   position WITHIN ANY('chr1:0-10000', 'chr2:0-10000')
+   interval INTERSECTS ANY('chr1:1000-2000', 'chr2:5000-6000')
+   interval CONTAINS ANY('chr1:1500', 'chr1:2500')
+   interval WITHIN ANY('chr1:0-10000', 'chr2:0-10000')
 
 ALL
 ~~~
@@ -198,8 +198,8 @@ Match all of multiple ranges.
 
 .. code-block:: sql
 
-   position CONTAINS ALL('chr1:1500', 'chr1:1600', 'chr1:1700')
-   position INTERSECTS ALL('chr1:1000-1100', 'chr1:1050-1150')
+   interval CONTAINS ALL('chr1:1500', 'chr1:1600', 'chr1:1700')
+   interval INTERSECTS ALL('chr1:1000-1100', 'chr1:1050-1150')
 
 Query Patterns
 --------------
@@ -210,7 +210,7 @@ Basic Filter
 .. code-block:: sql
 
    SELECT * FROM table
-   WHERE position INTERSECTS 'chr1:1000-2000'
+   WHERE interval INTERSECTS 'chr1:1000-2000'
 
 Join
 ~~~~
@@ -219,7 +219,7 @@ Join
 
    SELECT a.*, b.name
    FROM table_a a
-   JOIN table_b b ON a.position INTERSECTS b.position
+   JOIN table_b b ON a.interval INTERSECTS b.interval
 
 Left Outer Join
 ~~~~~~~~~~~~~~~
@@ -228,7 +228,7 @@ Left Outer Join
 
    SELECT a.*, b.name
    FROM table_a a
-   LEFT JOIN table_b b ON a.position INTERSECTS b.position
+   LEFT JOIN table_b b ON a.interval INTERSECTS b.interval
 
 Exclusion (NOT IN)
 ~~~~~~~~~~~~~~~~~~
@@ -237,7 +237,7 @@ Exclusion (NOT IN)
 
    SELECT a.*
    FROM table_a a
-   LEFT JOIN table_b b ON a.position INTERSECTS b.position
+   LEFT JOIN table_b b ON a.interval INTERSECTS b.interval
    WHERE b.chromosome IS NULL
 
 Count Overlaps
@@ -247,7 +247,7 @@ Count Overlaps
 
    SELECT a.*, COUNT(b.name) AS overlap_count
    FROM table_a a
-   LEFT JOIN table_b b ON a.position INTERSECTS b.position
+   LEFT JOIN table_b b ON a.interval INTERSECTS b.interval
    GROUP BY a.chromosome, a.start_pos, a.end_pos, ...
 
 K-Nearest Neighbors
@@ -257,14 +257,14 @@ K-Nearest Neighbors
 
    SELECT source.*, nearest.name, nearest.distance
    FROM source
-   CROSS JOIN LATERAL NEAREST(target, reference=source.position, k=5) AS nearest
+   CROSS JOIN LATERAL NEAREST(target, reference=source.interval, k=5) AS nearest
 
 Clustering
 ~~~~~~~~~~
 
 .. code-block:: sql
 
-   SELECT *, CLUSTER(position) AS cluster_id
+   SELECT *, CLUSTER(interval) AS cluster_id
    FROM table
    ORDER BY chromosome, start_pos
 
@@ -273,7 +273,7 @@ Merging
 
 .. code-block:: sql
 
-   SELECT MERGE(position), COUNT(*) AS count
+   SELECT MERGE(interval), COUNT(*) AS count
    FROM table
 
 Engine Methods
@@ -286,7 +286,7 @@ Execute a GIQL query and return a cursor.
 
 .. code-block:: python
 
-   cursor = engine.execute("SELECT * FROM table WHERE position INTERSECTS 'chr1:1000-2000'")
+   cursor = engine.execute("SELECT * FROM table WHERE interval INTERSECTS 'chr1:1000-2000'")
 
 transpile()
 ~~~~~~~~~~~
@@ -295,7 +295,7 @@ Convert GIQL to SQL without executing.
 
 .. code-block:: python
 
-   sql = engine.transpile("SELECT * FROM table WHERE position INTERSECTS 'chr1:1000-2000'")
+   sql = engine.transpile("SELECT * FROM table WHERE interval INTERSECTS 'chr1:1000-2000'")
 
 register_table_schema()
 ~~~~~~~~~~~~~~~~~~~~~~~
@@ -312,7 +312,7 @@ Register a table's schema for genomic operations.
            "end_pos": "BIGINT",
            "name": "VARCHAR",
        },
-       genomic_column="position",
+       genomic_column="interval",
        chromosome_column="chromosome",  # optional, default: "chromosome"
        start_column="start_pos",        # optional, default: "start_pos"
        end_column="end_pos",            # optional, default: "end_pos"
