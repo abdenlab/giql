@@ -51,10 +51,12 @@ uv.lock
 # pixi
 pixi.lock
 
+# specify
+specs/
+
 # hidden
 .*
 
 # except for...
 !.gitignore
 !.coveragerc
-!.specify/
