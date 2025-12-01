@@ -8,11 +8,36 @@ to standard SQL that works across multiple database backends including DuckDB an
 
 .. toctree::
    :maxdepth: 2
-   :caption: Contents:
+   :caption: Getting Started
 
    quickstart
+
+.. toctree::
+   :maxdepth: 2
+   :caption: Operator Reference
+
+   operators/index
+
+.. toctree::
+   :maxdepth: 2
+   :caption: Guides
+
+   guides/index
+
+.. toctree::
+   :maxdepth: 2
+   :caption: Recipes
+
+   recipes/index
+
+.. toctree::
+   :maxdepth: 2
+   :caption: Reference
+
+   reference/operator-matrix
+   reference/syntax-reference
+   reference/changelog
    api/index
-   examples
 
 Quick Start
 -----------
@@ -66,10 +91,53 @@ Features
 
 * **SQL-based**: Familiar SQL syntax with genomic extensions
 * **Multi-backend**: Works with DuckDB, SQLite, and more
-* **Spatial operators**: INTERSECTS, CONTAINS, WITHIN
+* **Spatial operators**: INTERSECTS, CONTAINS, WITHIN, DISTANCE, NEAREST
+* **Aggregation operators**: CLUSTER, MERGE for combining intervals
 * **Set quantifiers**: ANY, ALL for multi-range queries
 * **Column-to-column joins**: Join tables on genomic position
 * **Transpilation**: Convert GIQL to standard SQL for debugging or external use
+
+Operators at a Glance
+---------------------
+
+**Spatial Relationships:**
+
+.. code-block:: sql
+
+   -- Find overlapping features
+   WHERE position INTERSECTS 'chr1:1000-2000'
+
+   -- Find containing/contained features
+   WHERE gene.position CONTAINS variant.position
+
+**Distance and Proximity:**
+
+.. code-block:: sql
+
+   -- Calculate distance between intervals
+   SELECT DISTANCE(a.position, b.position) AS dist
+
+   -- Find k-nearest neighbors
+   FROM peaks CROSS JOIN LATERAL NEAREST(genes, reference=peaks.position, k=5)
+
+**Aggregation:**
+
+.. code-block:: sql
+
+   -- Cluster overlapping intervals
+   SELECT *, CLUSTER(position) AS cluster_id FROM features
+
+   -- Merge overlapping intervals
+   SELECT MERGE(position) FROM features
+
+**Set Quantifiers:**
+
+.. code-block:: sql
+
+   -- Match any of multiple regions
+   WHERE position INTERSECTS ANY('chr1:1000-2000', 'chr2:5000-6000')
+
+See :doc:`operators/index` for complete operator documentation.
 
 Indices and tables
 ==================
