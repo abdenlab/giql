@@ -44,10 +44,10 @@ You must register the table schema with GIQL, mapping the logical genomic column
            "strand": "VARCHAR",        # Optional
            # ... other columns ...
        },
-       genomic_column="position",      # Logical name used in queries
+       genomic_column="interval",      # Logical name used in queries
    )
 
-After registration, you can use ``position`` in your GIQL queries, and the engine
+After registration, you can use ``interval`` in your GIQL queries, and the engine
 will automatically map it to the ``chromosome``, ``start_pos``, and ``end_pos``
 columns.
 
@@ -71,13 +71,13 @@ Query with DuckDB
                "start_pos": "BIGINT",
                "end_pos": "BIGINT",
            },
-           genomic_column="position",
+           genomic_column="interval",
        )
 
-       # Query using the logical 'position' column (returns cursor for streaming)
+       # Query using the logical 'interval' column (returns cursor for streaming)
        cursor = engine.execute("""
            SELECT * FROM variants
-           WHERE position INTERSECTS 'chr1:1000-2000'
+           WHERE interval INTERSECTS 'chr1:1000-2000'
        """)
 
        # Process results lazily
@@ -99,7 +99,7 @@ Query with SQLite
    with GIQLEngine(target_dialect="sqlite", db_path="data.db") as engine:
        cursor = engine.execute("""
            SELECT * FROM variants
-           WHERE position INTERSECTS 'chr1:1000-2000'
+           WHERE interval INTERSECTS 'chr1:1000-2000'
        """)
 
        # Iterate results
@@ -117,7 +117,7 @@ Check if genomic ranges overlap:
 .. code-block:: sql
 
    SELECT * FROM variants
-   WHERE position INTERSECTS 'chr1:1000-2000'
+   WHERE interval INTERSECTS 'chr1:1000-2000'
 
 CONTAINS
 ~~~~~~~~
@@ -127,7 +127,7 @@ Check if a range contains a point or another range:
 .. code-block:: sql
 
    SELECT * FROM variants
-   WHERE position CONTAINS 'chr1:1500'
+   WHERE interval CONTAINS 'chr1:1500'
 
 WITHIN
 ~~~~~~
@@ -137,7 +137,7 @@ Check if a range is within another range:
 .. code-block:: sql
 
    SELECT * FROM variants
-   WHERE position WITHIN 'chr1:1000-5000'
+   WHERE interval WITHIN 'chr1:1000-5000'
 
 Set Quantifiers
 ---------------
@@ -150,7 +150,7 @@ Match any of the specified ranges:
 .. code-block:: sql
 
    SELECT * FROM variants
-   WHERE position INTERSECTS ANY('chr1:1000-2000', 'chr1:5000-6000')
+   WHERE interval INTERSECTS ANY('chr1:1000-2000', 'chr1:5000-6000')
 
 ALL
 ~~~
@@ -160,7 +160,7 @@ Match all of the specified ranges:
 .. code-block:: sql
 
    SELECT * FROM variants
-   WHERE position CONTAINS ALL('chr1:1500', 'chr1:1600')
+   WHERE interval CONTAINS ALL('chr1:1500', 'chr1:1600')
 
 Column-to-Column Joins
 ----------------------
@@ -171,7 +171,7 @@ Join tables on genomic position:
 
    SELECT v.*, g.name
    FROM variants v
-   INNER JOIN genes g ON v.position INTERSECTS g.position
+   INNER JOIN genes g ON v.interval INTERSECTS g.interval
 
 Transpiling to SQL
 ------------------
@@ -192,13 +192,13 @@ This is useful for debugging, understanding the generated SQL, or integrating wi
                "start_pos": "BIGINT",
                "end_pos": "BIGINT",
            },
-           genomic_column="position",
+           genomic_column="interval",
        )
 
        # Transpile GIQL to SQL
        sql = engine.transpile("""
            SELECT * FROM variants
-           WHERE position INTERSECTS 'chr1:1000-2000'
+           WHERE interval INTERSECTS 'chr1:1000-2000'
        """)
 
        print(sql)
@@ -210,12 +210,12 @@ Different target dialects generate different SQL:
 
    # DuckDB dialect
    with GIQLEngine(target_dialect="duckdb") as engine:
-       sql = engine.transpile("SELECT * FROM variants WHERE position INTERSECTS 'chr1:1000-2000'")
+       sql = engine.transpile("SELECT * FROM variants WHERE interval INTERSECTS 'chr1:1000-2000'")
        # Generates DuckDB-optimized SQL
 
    # SQLite dialect
    with GIQLEngine(target_dialect="sqlite") as engine:
-       sql = engine.transpile("SELECT * FROM variants WHERE position INTERSECTS 'chr1:1000-2000'")
+       sql = engine.transpile("SELECT * FROM variants WHERE interval INTERSECTS 'chr1:1000-2000'")
        # Generates SQLite-compatible SQL
 
 The transpiled SQL can be executed directly on your database or used with other tools.
@@ -224,5 +224,5 @@ Use ``verbose=True`` when creating the engine to see detailed transpilation info
 .. code-block:: python
 
    with GIQLEngine(target_dialect="duckdb", verbose=True) as engine:
-       sql = engine.transpile("SELECT * FROM variants WHERE position INTERSECTS 'chr1:1000-2000'")
+       sql = engine.transpile("SELECT * FROM variants WHERE interval INTERSECTS 'chr1:1000-2000'")
        # Prints detailed information about the transpilation process

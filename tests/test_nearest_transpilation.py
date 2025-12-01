@@ -23,8 +23,8 @@ def schema_with_peaks_and_genes():
     # Register peaks table
     peaks_table = TableSchema(name="peaks", columns={})
     peaks_table.columns["peak_id"] = ColumnInfo(name="peak_id", type="INTEGER")
-    peaks_table.columns["position"] = ColumnInfo(
-        name="position",
+    peaks_table.columns["interval"] = ColumnInfo(
+        name="interval",
         type="VARCHAR",
         is_genomic=True,
         chrom_col="chromosome",
@@ -38,8 +38,8 @@ def schema_with_peaks_and_genes():
     genes_table = TableSchema(name="genes", columns={})
     genes_table.columns["gene_id"] = ColumnInfo(name="gene_id", type="INTEGER")
     genes_table.columns["name"] = ColumnInfo(name="name", type="VARCHAR")
-    genes_table.columns["position"] = ColumnInfo(
-        name="position",
+    genes_table.columns["interval"] = ColumnInfo(
+        name="interval",
         type="VARCHAR",
         is_genomic=True,
         chrom_col="chromosome",
@@ -64,7 +64,7 @@ class TestNearestTranspilationDuckDB:
         sql = """
         SELECT *
         FROM peaks
-        CROSS JOIN LATERAL NEAREST(genes, reference=peaks.position, k=3)
+        CROSS JOIN LATERAL NEAREST(genes, reference=peaks.interval, k=3)
         """
 
         ast = parse_one(sql, dialect=GIQLDialect)
@@ -92,7 +92,7 @@ class TestNearestTranspilationDuckDB:
         sql = """
         SELECT *
         FROM peaks
-        CROSS JOIN LATERAL NEAREST(genes, reference=peaks.position, k=5, max_distance=100000)
+        CROSS JOIN LATERAL NEAREST(genes, reference=peaks.interval, k=5, max_distance=100000)
         """
 
         ast = parse_one(sql, dialect=GIQLDialect)
@@ -140,7 +140,7 @@ class TestNearestTranspilationDuckDB:
         sql = """
         SELECT *
         FROM peaks
-        CROSS JOIN LATERAL NEAREST(genes, reference=peaks.position, k=3, stranded=true)
+        CROSS JOIN LATERAL NEAREST(genes, reference=peaks.interval, k=3, stranded=true)
         """
 
         ast = parse_one(sql, dialect=GIQLDialect)
@@ -175,7 +175,7 @@ class TestNearestTranspilationSQLite:
         sql = """
         SELECT *
         FROM peaks
-        CROSS JOIN LATERAL NEAREST(genes, reference=peaks.position, k=3)
+        CROSS JOIN LATERAL NEAREST(genes, reference=peaks.interval, k=3)
         """
 
         ast = parse_one(sql, dialect=GIQLDialect)
@@ -203,7 +203,7 @@ class TestNearestTranspilationSQLite:
         sql = """
         SELECT *
         FROM peaks
-        CROSS JOIN LATERAL NEAREST(genes, reference=peaks.position, k=5, max_distance=100000)
+        CROSS JOIN LATERAL NEAREST(genes, reference=peaks.interval, k=5, max_distance=100000)
         """
 
         ast = parse_one(sql, dialect=GIQLDialect)
@@ -251,7 +251,7 @@ class TestNearestTranspilationSQLite:
         sql = """
         SELECT *
         FROM peaks
-        CROSS JOIN LATERAL NEAREST(genes, reference=peaks.position, k=3, stranded=true)
+        CROSS JOIN LATERAL NEAREST(genes, reference=peaks.interval, k=3, stranded=true)
         """
 
         ast = parse_one(sql, dialect=GIQLDialect)

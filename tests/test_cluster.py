@@ -52,7 +52,7 @@ def duckdb_cluster_engine(cluster_test_data_csv):
             "end_pos": "BIGINT",
             "name": "VARCHAR",
         },
-        genomic_column="position",
+        genomic_column="interval",
     )
     yield engine
     engine.close()
@@ -73,7 +73,7 @@ def duckdb_stranded_engine(stranded_test_data_csv):
             "strand": "VARCHAR",
             "name": "VARCHAR",
         },
-        genomic_column="position",
+        genomic_column="interval",
         strand_col="strand",
     )
     yield engine
@@ -93,7 +93,7 @@ class TestCluster:
                 start_pos,
                 end_pos,
                 name,
-                CLUSTER(position) AS cluster_id
+                CLUSTER(interval) AS cluster_id
             FROM features
             ORDER BY chromosome, start_pos
         """)
@@ -127,7 +127,7 @@ class TestCluster:
                 start_pos,
                 end_pos,
                 name,
-                CLUSTER(position, 100) AS cluster_id
+                CLUSTER(interval, 100) AS cluster_id
             FROM features
             ORDER BY chromosome, start_pos
         """)
@@ -150,7 +150,7 @@ class TestCluster:
                 end_pos,
                 strand,
                 name,
-                CLUSTER(position, stranded=true) AS cluster_id
+                CLUSTER(interval, stranded=true) AS cluster_id
             FROM stranded_features
             ORDER BY chromosome, start_pos
         """)
@@ -189,7 +189,7 @@ class TestCluster:
             duckdb_stranded_engine.execute("""
             SELECT
                 id,
-                CLUSTER(position) AS cluster_id
+                CLUSTER(interval) AS cluster_id
             FROM stranded_features
             ORDER BY id
         """)
@@ -216,7 +216,7 @@ class TestCluster:
                     start_pos,
                     end_pos,
                     name,
-                    CLUSTER(position) AS cluster_id
+                    CLUSTER(interval) AS cluster_id
                 FROM features
             )
             SELECT *
@@ -239,7 +239,7 @@ class TestCluster:
                     chromosome,
                     start_pos,
                     end_pos,
-                    CLUSTER(position) AS cluster_id
+                    CLUSTER(interval) AS cluster_id
                 FROM features
             )
             SELECT
@@ -272,7 +272,7 @@ class TestMerge:
         """Test basic MERGE operation."""
         result = to_df(
             duckdb_cluster_engine.execute("""
-            SELECT MERGE(position)
+            SELECT MERGE(interval)
             FROM features
         """)
         )
@@ -305,7 +305,7 @@ class TestMerge:
         """Test MERGE with distance parameter."""
         result = to_df(
             duckdb_cluster_engine.execute("""
-            SELECT MERGE(position, 100)
+            SELECT MERGE(interval, 100)
             FROM features
         """)
         )
@@ -320,7 +320,7 @@ class TestMerge:
         """Test MERGE with additional aggregation columns."""
         result = to_df(
             duckdb_cluster_engine.execute("""
-            SELECT MERGE(position), COUNT(*) as feature_count
+            SELECT MERGE(interval), COUNT(*) as feature_count
             FROM features
         """)
         )
@@ -335,7 +335,7 @@ class TestMerge:
         """Test MERGE with stranded=true."""
         result = to_df(
             duckdb_stranded_engine.execute("""
-            SELECT MERGE(position, stranded=true)
+            SELECT MERGE(interval, stranded=true)
             FROM stranded_features
         """)
         )
@@ -361,7 +361,7 @@ class TestMerge:
         result = to_df(
             duckdb_cluster_engine.execute("""
             WITH merged_intervals AS (
-                SELECT MERGE(position)
+                SELECT MERGE(interval)
                 FROM features
             )
             SELECT *
@@ -386,7 +386,7 @@ class TestMerge:
             duckdb_cluster_engine.execute("""
             WITH merged_intervals AS (
                 SELECT
-                    MERGE(position),
+                    MERGE(interval),
                     COUNT(*) as interval_count
                 FROM features
             )
@@ -412,7 +412,7 @@ class TestMerge:
             duckdb_cluster_engine.execute("""
             WITH merged_intervals AS (
                 SELECT
-                    MERGE(position, 100),
+                    MERGE(interval, 100),
                     COUNT(*) as interval_count,
                     AVG(id) as avg_id
                 FROM features

@@ -14,7 +14,7 @@ class TestParser:
         WHEN parsing the query
         THEN should create an Intersects AST node
         """
-        sql = "SELECT * FROM variants WHERE position INTERSECTS 'chr1:1000-2000'"
+        sql = "SELECT * FROM variants WHERE interval INTERSECTS 'chr1:1000-2000'"
         ast = parse_one(sql, dialect=GIQLDialect)
 
         # Find the INTERSECTS node
@@ -32,7 +32,7 @@ class TestParser:
         WHEN parsing the query
         THEN should create a Contains AST node
         """
-        sql = "SELECT * FROM variants WHERE position CONTAINS 'chr1:1500'"
+        sql = "SELECT * FROM variants WHERE interval CONTAINS 'chr1:1500'"
         ast = parse_one(sql, dialect=GIQLDialect)
 
         contains_node = None
@@ -49,7 +49,7 @@ class TestParser:
         WHEN parsing the query
         THEN should create a Within AST node
         """
-        sql = "SELECT * FROM variants WHERE position WITHIN 'chr1:1000-5000'"
+        sql = "SELECT * FROM variants WHERE interval WITHIN 'chr1:1000-5000'"
         ast = parse_one(sql, dialect=GIQLDialect)
 
         within_node = None
@@ -68,7 +68,7 @@ class TestParser:
         """
         sql = (
             "SELECT * FROM v "
-            "WHERE position INTERSECTS ANY('chr1:1000-2000', 'chr1:5000-6000')"
+            "WHERE interval INTERSECTS ANY('chr1:1000-2000', 'chr1:5000-6000')"
         )
         ast = parse_one(sql, dialect=GIQLDialect)
 
@@ -90,7 +90,7 @@ class TestParser:
         """
         sql = (
             "SELECT * FROM v "
-            "WHERE position INTERSECTS ALL('chr1:1000-2000', 'chr1:1500-1800')"
+            "WHERE interval INTERSECTS ALL('chr1:1000-2000', 'chr1:1500-1800')"
         )
         ast = parse_one(sql, dialect=GIQLDialect)
 
@@ -110,7 +110,7 @@ class TestParser:
         WHEN parsing the query
         THEN should create a SpatialSetPredicate with CONTAINS operator
         """
-        sql = "SELECT * FROM v WHERE position CONTAINS ANY('chr1:1500', 'chr1:1600')"
+        sql = "SELECT * FROM v WHERE interval CONTAINS ANY('chr1:1500', 'chr1:1600')"
         ast = parse_one(sql, dialect=GIQLDialect)
 
         spatial_set = None

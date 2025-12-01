@@ -19,7 +19,7 @@ When you write a GIQL query:
 
 .. code-block:: sql
 
-   SELECT * FROM variants WHERE position INTERSECTS 'chr1:1000-2000'
+   SELECT * FROM variants WHERE interval INTERSECTS 'chr1:1000-2000'
 
 GIQL performs these steps:
 
@@ -44,7 +44,7 @@ Each GIQL operator expands to specific SQL patterns:
 .. code-block:: sql
 
    -- GIQL
-   a.position INTERSECTS b.position
+   a.interval INTERSECTS b.interval
 
    -- SQL (same chromosome, overlapping ranges)
    a.chromosome = b.chromosome
@@ -56,7 +56,7 @@ Each GIQL operator expands to specific SQL patterns:
 .. code-block:: sql
 
    -- GIQL
-   a.position CONTAINS b.position
+   a.interval CONTAINS b.interval
 
    -- SQL
    a.chromosome = b.chromosome
@@ -68,7 +68,7 @@ Each GIQL operator expands to specific SQL patterns:
 .. code-block:: sql
 
    -- GIQL
-   DISTANCE(a.position, b.position)
+   DISTANCE(a.interval, b.interval)
 
    -- SQL (simplified)
    CASE
@@ -98,12 +98,12 @@ Use ``transpile()`` to see generated SQL without executing:
                "start_pos": "BIGINT",
                "end_pos": "BIGINT",
            },
-           genomic_column="position",
+           genomic_column="interval",
        )
 
        sql = engine.transpile("""
            SELECT * FROM variants
-           WHERE position INTERSECTS 'chr1:1000-2000'
+           WHERE interval INTERSECTS 'chr1:1000-2000'
        """)
 
        print(sql)
@@ -121,7 +121,7 @@ Transpilation works with all GIQL features:
    sql = engine.transpile("""
        SELECT v.*, g.name AS gene_name
        FROM variants v
-       JOIN genes g ON v.position INTERSECTS g.position
+       JOIN genes g ON v.interval INTERSECTS g.interval
        WHERE v.quality >= 30
    """)
    print(sql)
@@ -130,13 +130,13 @@ Transpilation works with all GIQL features:
    sql = engine.transpile("""
        SELECT peaks.name, nearest.name, nearest.distance
        FROM peaks
-       CROSS JOIN LATERAL NEAREST(genes, reference=peaks.position, k=5) AS nearest
+       CROSS JOIN LATERAL NEAREST(genes, reference=peaks.interval, k=5) AS nearest
    """)
    print(sql)
 
    # Aggregation query
    sql = engine.transpile("""
-       SELECT MERGE(position), COUNT(*) AS count
+       SELECT MERGE(interval), COUNT(*) AS count
        FROM features
    """)
    print(sql)
@@ -154,7 +154,7 @@ Use transpilation to understand what GIQL does:
    # See how ANY quantifier expands
    sql = engine.transpile("""
        SELECT * FROM variants
-       WHERE position INTERSECTS ANY('chr1:1000-2000', 'chr2:5000-6000')
+       WHERE interval INTERSECTS ANY('chr1:1000-2000', 'chr2:5000-6000')
    """)
    print(sql)
    # Shows the OR conditions for each range
@@ -163,7 +163,7 @@ Use transpilation to understand what GIQL does:
    sql = engine.transpile("""
        SELECT a.*, b.name
        FROM features_a a
-       JOIN features_b b ON a.position INTERSECTS b.position
+       JOIN features_b b ON a.interval INTERSECTS b.interval
    """)
    print(sql)
    # Shows the full range comparison predicates
@@ -176,18 +176,18 @@ Enable verbose mode for detailed transpilation information:
 .. code-block:: python
 
    with GIQLEngine(target_dialect="duckdb", verbose=True) as engine:
-       engine.register_table_schema("variants", {...}, genomic_column="position")
+       engine.register_table_schema("variants", {...}, genomic_column="interval")
 
        # Transpilation will print detailed information
        sql = engine.transpile("""
            SELECT * FROM variants
-           WHERE position INTERSECTS 'chr1:1000-2000'
+           WHERE interval INTERSECTS 'chr1:1000-2000'
        """)
 
        # Execution also shows transpilation details
        cursor = engine.execute("""
            SELECT * FROM variants
-           WHERE position INTERSECTS 'chr1:1000-2000'
+           WHERE interval INTERSECTS 'chr1:1000-2000'
        """)
 
 Troubleshooting Transpilation
@@ -198,8 +198,8 @@ Troubleshooting Transpilation
 .. code-block:: python
 
    # Check that schema is registered
-   sql = engine.transpile("SELECT * FROM variants WHERE position INTERSECTS 'chr1:1000-2000'")
-   if "position INTERSECTS" in sql:
+   sql = engine.transpile("SELECT * FROM variants WHERE interval INTERSECTS 'chr1:1000-2000'")
+   if "interval INTERSECTS" in sql:
        print("Schema not registered for 'variants' table")
 
 **Wrong column names in output:**
@@ -210,7 +210,7 @@ Troubleshooting Transpilation
    engine.register_table_schema(
        "variants",
        {...},
-       genomic_column="position",
+       genomic_column="interval",
        chromosome_column="chrom",      # Check these match your table
        start_column="start",
        end_column="end",
@@ -228,7 +228,7 @@ See how the same query translates for different backends:
 
    query = """
        SELECT * FROM variants
-       WHERE position INTERSECTS 'chr1:1000-2000'
+       WHERE interval INTERSECTS 'chr1:1000-2000'
    """
 
    schema = {
@@ -239,14 +239,14 @@ See how the same query translates for different backends:
 
    # DuckDB
    with GIQLEngine(target_dialect="duckdb") as engine:
-       engine.register_table_schema("variants", schema, genomic_column="position")
+       engine.register_table_schema("variants", schema, genomic_column="interval")
        print("DuckDB SQL:")
        print(engine.transpile(query))
        print()
 
    # SQLite
    with GIQLEngine(target_dialect="sqlite") as engine:
-       engine.register_table_schema("variants", schema, genomic_column="position")
+       engine.register_table_schema("variants", schema, genomic_column="interval")
        print("SQLite SQL:")
        print(engine.transpile(query))
 
@@ -276,10 +276,10 @@ Use transpiled SQL with your own database connections:
 
    # Generate SQL using GIQL
    with GIQLEngine(target_dialect="duckdb") as giql_engine:
-       giql_engine.register_table_schema("variants", {...}, genomic_column="position")
+       giql_engine.register_table_schema("variants", {...}, genomic_column="interval")
        sql = giql_engine.transpile("""
            SELECT * FROM variants
-           WHERE position INTERSECTS 'chr1:1000-2000'
+           WHERE interval INTERSECTS 'chr1:1000-2000'
        """)
 
    # Execute with external connection
@@ -298,10 +298,10 @@ Integrate transpiled SQL with SQLAlchemy or other ORMs:
 
    # Generate SQL
    with GIQLEngine(target_dialect="duckdb") as giql_engine:
-       giql_engine.register_table_schema("variants", {...}, genomic_column="position")
+       giql_engine.register_table_schema("variants", {...}, genomic_column="interval")
        sql = giql_engine.transpile("""
            SELECT * FROM variants
-           WHERE position INTERSECTS 'chr1:1000-2000'
+           WHERE interval INTERSECTS 'chr1:1000-2000'
        """)
 
    # Execute with SQLAlchemy
@@ -321,14 +321,14 @@ Use transpilation in data pipelines:
    def build_intersection_query(table_a, table_b, region):
        """Generate SQL for intersection query."""
        with GIQLEngine(target_dialect="duckdb") as engine:
-           engine.register_table_schema(table_a, {...}, genomic_column="position")
-           engine.register_table_schema(table_b, {...}, genomic_column="position")
+           engine.register_table_schema(table_a, {...}, genomic_column="interval")
+           engine.register_table_schema(table_b, {...}, genomic_column="interval")
 
            return engine.transpile(f"""
                SELECT a.*, b.name
                FROM {table_a} a
-               JOIN {table_b} b ON a.position INTERSECTS b.position
-               WHERE a.position INTERSECTS '{region}'
+               JOIN {table_b} b ON a.interval INTERSECTS b.interval
+               WHERE a.interval INTERSECTS '{region}'
            """)
 
    # Use in pipeline
@@ -344,11 +344,11 @@ Save transpiled SQL for documentation or reuse:
 
    # Generate and save SQL
    with GIQLEngine(target_dialect="duckdb") as engine:
-       engine.register_table_schema("variants", {...}, genomic_column="position")
+       engine.register_table_schema("variants", {...}, genomic_column="interval")
 
        sql = engine.transpile("""
            SELECT * FROM variants
-           WHERE position INTERSECTS 'chr1:1000-2000'
+           WHERE interval INTERSECTS 'chr1:1000-2000'
        """)
 
        with open("query.sql", "w") as f:
@@ -376,7 +376,7 @@ Build queries with parameters:
        region = f"{chrom}:{start}-{end}"
        return engine.execute(f"""
            SELECT * FROM variants
-           WHERE position INTERSECTS '{region}'
+           WHERE interval INTERSECTS '{region}'
        """)
 
    # Use with different regions
@@ -396,7 +396,7 @@ Build queries programmatically:
        for table in tables:
            union_parts.append(f"""
                SELECT *, '{table}' AS source FROM {table}
-               WHERE position INTERSECTS '{target_region}'
+               WHERE interval INTERSECTS '{target_region}'
            """)
 
        query = " UNION ALL ".join(union_parts)
@@ -411,7 +411,7 @@ For advanced debugging, you can inspect the parsed query:
 
    # GIQL uses sqlglot internally
    # The transpiled SQL shows the final result
-   sql = engine.transpile("SELECT * FROM variants WHERE position INTERSECTS 'chr1:1000-2000'")
+   sql = engine.transpile("SELECT * FROM variants WHERE interval INTERSECTS 'chr1:1000-2000'")
 
    # For deep debugging, examine the generated SQL structure
    print(sql)

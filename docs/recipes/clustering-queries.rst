@@ -21,7 +21,7 @@ Assign unique cluster IDs to groups of overlapping intervals:
    cursor = engine.execute("""
        SELECT
            *,
-           CLUSTER(position) AS cluster_id
+           CLUSTER(interval) AS cluster_id
        FROM features
        ORDER BY chromosome, start_pos
    """)
@@ -43,7 +43,7 @@ See which features belong to which cluster:
            start_pos,
            end_pos
        FROM (
-           SELECT *, CLUSTER(position) AS cluster_id
+           SELECT *, CLUSTER(interval) AS cluster_id
            FROM features
        )
        ORDER BY cluster_id, start_pos
@@ -64,7 +64,7 @@ Cluster intervals that are within a specified distance of each other:
    cursor = engine.execute("""
        SELECT
            *,
-           CLUSTER(position, 1000) AS cluster_id
+           CLUSTER(interval, 1000) AS cluster_id
        FROM features
        ORDER BY chromosome, start_pos
    """)
@@ -81,17 +81,17 @@ Experiment with different clustering distances:
 
    # Tight clustering (overlapping only)
    cursor = engine.execute("""
-       SELECT *, CLUSTER(position, 0) AS tight_cluster FROM features
+       SELECT *, CLUSTER(interval, 0) AS tight_cluster FROM features
    """)
 
    # Medium clustering (within 500bp)
    cursor = engine.execute("""
-       SELECT *, CLUSTER(position, 500) AS medium_cluster FROM features
+       SELECT *, CLUSTER(interval, 500) AS medium_cluster FROM features
    """)
 
    # Loose clustering (within 5kb)
    cursor = engine.execute("""
-       SELECT *, CLUSTER(position, 5000) AS loose_cluster FROM features
+       SELECT *, CLUSTER(interval, 5000) AS loose_cluster FROM features
    """)
 
 **Use case:** Compare clustering at different resolutions for sensitivity analysis.
@@ -109,7 +109,7 @@ Cluster intervals separately for each strand:
    cursor = engine.execute("""
        SELECT
            *,
-           CLUSTER(position, stranded=true) AS cluster_id
+           CLUSTER(interval, stranded=true) AS cluster_id
        FROM features
        ORDER BY chromosome, strand, start_pos
    """)
@@ -127,7 +127,7 @@ Combine strand awareness with distance tolerance:
    cursor = engine.execute("""
        SELECT
            *,
-           CLUSTER(position, 1000, stranded=true) AS cluster_id
+           CLUSTER(interval, 1000, stranded=true) AS cluster_id
        FROM features
        ORDER BY chromosome, strand, start_pos
    """)
@@ -147,7 +147,7 @@ Calculate how many features are in each cluster:
 
    cursor = engine.execute("""
        WITH clustered AS (
-           SELECT *, CLUSTER(position) AS cluster_id
+           SELECT *, CLUSTER(interval) AS cluster_id
            FROM features
        )
        SELECT
@@ -172,7 +172,7 @@ Find clusters with a minimum number of features:
 
    cursor = engine.execute("""
        WITH clustered AS (
-           SELECT *, CLUSTER(position) AS cluster_id
+           SELECT *, CLUSTER(interval) AS cluster_id
            FROM features
        ),
        cluster_sizes AS (
@@ -198,7 +198,7 @@ Calculate statistics for each cluster:
 
    cursor = engine.execute("""
        WITH clustered AS (
-           SELECT *, CLUSTER(position) AS cluster_id
+           SELECT *, CLUSTER(interval) AS cluster_id
            FROM features
        )
        SELECT
@@ -228,7 +228,7 @@ Combine overlapping intervals into unified regions:
 .. code-block:: python
 
    cursor = engine.execute("""
-       SELECT MERGE(position)
+       SELECT MERGE(interval)
        FROM features
    """)
 
@@ -242,7 +242,7 @@ Merge intervals within a specified distance:
 .. code-block:: python
 
    cursor = engine.execute("""
-       SELECT MERGE(position, 1000)
+       SELECT MERGE(interval, 1000)
        FROM features
    """)
 
@@ -256,7 +256,7 @@ Merge intervals separately by strand:
 .. code-block:: python
 
    cursor = engine.execute("""
-       SELECT MERGE(position, stranded=true)
+       SELECT MERGE(interval, stranded=true)
        FROM features
    """)
 
@@ -274,7 +274,7 @@ Track how many features were merged into each region:
 
    cursor = engine.execute("""
        SELECT
-           MERGE(position),
+           MERGE(interval),
            COUNT(*) AS feature_count
        FROM features
    """)
@@ -290,7 +290,7 @@ Calculate statistics for merged regions:
 
    cursor = engine.execute("""
        SELECT
-           MERGE(position),
+           MERGE(interval),
            COUNT(*) AS feature_count,
            AVG(score) AS avg_score,
            MAX(score) AS max_score,
@@ -309,7 +309,7 @@ List the names of features that were merged:
 
    cursor = engine.execute("""
        SELECT
-           MERGE(position),
+           MERGE(interval),
            STRING_AGG(name, ',') AS merged_features
        FROM features
    """)
@@ -328,7 +328,7 @@ Calculate total genomic coverage after merging:
 
    cursor = engine.execute("""
        WITH merged AS (
-           SELECT MERGE(position)
+           SELECT MERGE(interval)
            FROM features
        )
        SELECT SUM(end_pos - start_pos) AS total_coverage_bp
@@ -346,7 +346,7 @@ Calculate coverage for each chromosome:
 
    cursor = engine.execute("""
        WITH merged AS (
-           SELECT MERGE(position)
+           SELECT MERGE(interval)
            FROM features
        )
        SELECT
@@ -378,7 +378,7 @@ Compare raw vs merged coverage:
            SELECT
                COUNT(*) AS merged_count,
                SUM(end_pos - start_pos) AS merged_bp
-           FROM (SELECT MERGE(position) FROM features)
+           FROM (SELECT MERGE(interval) FROM features)
        )
        SELECT
            raw_count,
@@ -403,7 +403,7 @@ First cluster features, then analyze each cluster:
 
    cursor = engine.execute("""
        WITH clustered AS (
-           SELECT *, CLUSTER(position) AS cluster_id
+           SELECT *, CLUSTER(interval) AS cluster_id
            FROM features
        )
        SELECT
@@ -429,11 +429,11 @@ Apply multiple clustering levels:
 
    cursor = engine.execute("""
        WITH level1 AS (
-           SELECT *, CLUSTER(position, 0) AS cluster_l1
+           SELECT *, CLUSTER(interval, 0) AS cluster_l1
            FROM features
        ),
        level2 AS (
-           SELECT *, CLUSTER(position, 1000) AS cluster_l2
+           SELECT *, CLUSTER(interval, 1000) AS cluster_l2
            FROM level1
        )
        SELECT

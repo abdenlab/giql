@@ -430,10 +430,10 @@ class BaseGIQLGenerator(Generator):
 
         # Check if right side is a column reference or a literal range string
         if "." in right_raw and not right_raw.startswith("'"):
-            # Column-to-column join (e.g., a.position INTERSECTS b.position)
+            # Column-to-column join (e.g., a.interval INTERSECTS b.interval)
             return self._generate_column_join(left, right_raw, op_type)
         else:
-            # Literal range string (e.g., position INTERSECTS 'chr1:1000-2000')
+            # Literal range string (e.g., interval INTERSECTS 'chr1:1000-2000')
             try:
                 range_str = right_raw.strip("'\"")
                 parsed_range = RangeParser.parse(range_str).to_zero_based_half_open()
@@ -452,7 +452,7 @@ class BaseGIQLGenerator(Generator):
         """Generate SQL predicate for a range operation.
 
         :param column_ref:
-            Column reference (e.g., 'v.position' or 'position')
+            Column reference (e.g., 'v.interval' or 'interval')
         :param parsed_range:
             Parsed genomic range
         :param op_type:
@@ -507,9 +507,9 @@ class BaseGIQLGenerator(Generator):
         """Generate SQL for column-to-column spatial joins.
 
         :param left_col:
-            Left column reference (e.g., 'a.position')
+            Left column reference (e.g., 'a.interval')
         :param right_col:
-            Right column reference (e.g., 'b.position')
+            Right column reference (e.g., 'b.interval')
         :param op_type:
             'intersects', 'contains', or 'within'
         :return:
@@ -704,7 +704,7 @@ class BaseGIQLGenerator(Generator):
 
         else:  # correlated mode
             if reference:
-                # Explicit reference in correlated mode (e.g., peaks.position)
+                # Explicit reference in correlated mode (e.g., peaks.interval)
                 reference_sql = self.sql(reference)
                 return self._get_column_refs(reference_sql, None)
             else:
@@ -809,7 +809,7 @@ class BaseGIQLGenerator(Generator):
         """Get physical column names for genomic data.
 
         :param column_ref:
-            Logical column reference (e.g., 'v.position' or 'position')
+            Logical column reference (e.g., 'v.interval' or 'interval')
         :param table_name:
             Table name to look up schema (optional, overrides extraction from column_ref)
         :param include_strand:

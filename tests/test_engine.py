@@ -60,7 +60,7 @@ class TestGIQLEngine:
 
             # Query using INTERSECTS
             cursor = engine.execute(
-                "SELECT * FROM variants WHERE position INTERSECTS 'chr1:1000-2000'"
+                "SELECT * FROM variants WHERE interval INTERSECTS 'chr1:1000-2000'"
             )
             result = to_df(cursor)
 
@@ -88,7 +88,7 @@ class TestGIQLEngine:
             # Query using INTERSECTS
             result = to_df(
                 engine.execute(
-                    "SELECT * FROM variants WHERE position INTERSECTS 'chr1:1000-2000'"
+                    "SELECT * FROM variants WHERE interval INTERSECTS 'chr1:1000-2000'"
                 )
             )
 
@@ -115,7 +115,7 @@ class TestGIQLEngine:
             result = to_df(
                 engine.execute(
                     "SELECT * FROM variants "
-                    "WHERE position INTERSECTS ANY('chr1:1000-2000', 'chr2:400-700')"
+                    "WHERE interval INTERSECTS ANY('chr1:1000-2000', 'chr2:400-700')"
                 )
             )
 
@@ -140,7 +140,7 @@ class TestGIQLEngine:
 
             result = to_df(
                 engine.execute(
-                    "SELECT * FROM variants WHERE position CONTAINS 'chr1:1550'"
+                    "SELECT * FROM variants WHERE interval CONTAINS 'chr1:1550'"
                 )
             )
 
@@ -166,7 +166,7 @@ class TestGIQLEngine:
 
             result = to_df(
                 engine.execute(
-                    "SELECT * FROM variants WHERE position WITHIN 'chr1:1000-11000'"
+                    "SELECT * FROM variants WHERE interval WITHIN 'chr1:1000-11000'"
                 )
             )
 
@@ -189,7 +189,7 @@ class TestGIQLEngine:
             engine.load_csv("variants", str(csv_path))
             result = to_df(
                 engine.execute(
-                    "SELECT * FROM variants WHERE position INTERSECTS 'chr1:1000-2000'"
+                    "SELECT * FROM variants WHERE interval INTERSECTS 'chr1:1000-2000'"
                 )
             )
             assert len(result) == 1
@@ -234,7 +234,7 @@ class TestGIQLEngine:
                         strand_col: "VARCHAR",
                         "name": "VARCHAR",
                     },
-                    genomic_column="position",
+                    genomic_column="interval",
                     chrom_col=chrom_col,
                     start_col=start_col,
                     end_col=end_col,
@@ -244,7 +244,7 @@ class TestGIQLEngine:
                 # Test INTERSECTS query
                 result = to_df(
                     engine.execute(
-                        "SELECT * FROM variants WHERE position INTERSECTS 'chr1:1000-2000'"
+                        "SELECT * FROM variants WHERE interval INTERSECTS 'chr1:1000-2000'"
                     )
                 )
                 assert len(result) == 2
@@ -253,7 +253,7 @@ class TestGIQLEngine:
                 # Test CLUSTER query (uses genomic columns internally)
                 result = to_df(
                     engine.execute(
-                        "SELECT *, CLUSTER(position) AS cluster_id FROM variants ORDER BY id"
+                        "SELECT *, CLUSTER(interval) AS cluster_id FROM variants ORDER BY id"
                     )
                 )
                 assert len(result) == 4
@@ -264,7 +264,7 @@ class TestGIQLEngine:
 
                 # Test stranded CLUSTER query
                 result = to_df(
-                    engine.execute("""SELECT *, CLUSTER(position, stranded=TRUE) AS cluster_id
+                    engine.execute("""SELECT *, CLUSTER(interval, stranded=TRUE) AS cluster_id
                        FROM variants ORDER BY id""")
                 )
                 assert len(result) == 4
@@ -275,7 +275,7 @@ class TestGIQLEngine:
                 assert "cluster_id" in result.columns
 
                 # Test MERGE query
-                result = to_df(engine.execute("SELECT MERGE(position) FROM variants"))
+                result = to_df(engine.execute("SELECT MERGE(interval) FROM variants"))
                 # Should merge overlapping intervals
                 assert len(result) >= 1
 
@@ -341,7 +341,7 @@ class TestGIQLEngine:
                         v_end_col: "BIGINT",
                         "name": "VARCHAR",
                     },
-                    genomic_column="position",
+                    genomic_column="interval",
                     chrom_col=v_chrom_col,
                     start_col=v_start_col,
                     end_col=v_end_col,
@@ -367,7 +367,7 @@ class TestGIQLEngine:
                     engine.execute("""
                     SELECT v.name, f.type
                     FROM variants v
-                    JOIN features f ON v.position INTERSECTS f.region
+                    JOIN features f ON v.interval INTERSECTS f.region
                     ORDER BY v.id
                     """)
                 )
@@ -384,7 +384,7 @@ class TestGIQLEngine:
                     engine.execute("""
                     SELECT v.id, v.name, f.type
                     FROM variants v
-                    LEFT JOIN features f ON v.position INTERSECTS f.region
+                    LEFT JOIN features f ON v.interval INTERSECTS f.region
                     WHERE v.id = 1
                     """)
                 )
@@ -397,8 +397,8 @@ class TestGIQLEngine:
                     engine.execute("""
                     SELECT v.id, v.name
                     FROM variants v, features f
-                    WHERE v.position INTERSECTS f.region
-                    AND v.position INTERSECTS 'chr1:1000-2000'
+                    WHERE v.interval INTERSECTS f.region
+                    AND v.interval INTERSECTS 'chr1:1000-2000'
                     """)
                 )
                 # Only variant 1 intersects both feature and the specified range
@@ -413,7 +413,7 @@ class TestGIQLEngine:
         """
         with GIQLEngine(target_dialect="duckdb") as engine:
             sql = engine.transpile(
-                "SELECT * FROM variants WHERE position INTERSECTS 'chr1:1000-2000'"
+                "SELECT * FROM variants WHERE interval INTERSECTS 'chr1:1000-2000'"
             )
 
             assert isinstance(sql, str)
@@ -428,7 +428,7 @@ class TestGIQLEngine:
         WHEN calling transpile()
         THEN should return SQL appropriate for each dialect
         """
-        query = "SELECT * FROM variants WHERE position INTERSECTS 'chr1:1000-2000'"
+        query = "SELECT * FROM variants WHERE interval INTERSECTS 'chr1:1000-2000'"
 
         for dialect in ["duckdb", "sqlite"]:
             with GIQLEngine(target_dialect=dialect) as engine:
@@ -445,7 +445,7 @@ class TestGIQLEngine:
         """
         with GIQLEngine(target_dialect="duckdb", verbose=True) as engine:
             sql = engine.transpile(
-                "SELECT * FROM variants WHERE position INTERSECTS 'chr1:1000-2000'"
+                "SELECT * FROM variants WHERE interval INTERSECTS 'chr1:1000-2000'"
             )
 
             captured = capsys.readouterr()
@@ -472,7 +472,7 @@ class TestGIQLEngine:
 
             # execute() should internally call transpile()
             cursor = engine.execute(
-                "SELECT * FROM variants WHERE position INTERSECTS 'chr1:1000-2000'"
+                "SELECT * FROM variants WHERE interval INTERSECTS 'chr1:1000-2000'"
             )
             result = to_df(cursor)
 

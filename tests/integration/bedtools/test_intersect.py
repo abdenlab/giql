@@ -26,8 +26,8 @@ def _setup_giql_engine(duckdb_connection):
         "strand": "VARCHAR",
     }
 
-    engine.register_table_schema("intervals_a", schema, genomic_column="position")
-    engine.register_table_schema("intervals_b", schema, genomic_column="position")
+    engine.register_table_schema("intervals_a", schema, genomic_column="interval")
+    engine.register_table_schema("intervals_b", schema, genomic_column="interval")
 
     return engine
 
@@ -76,7 +76,7 @@ def test_intersect_basic_overlap(duckdb_connection, interval_generator):
     giql_query = """
         SELECT DISTINCT a.*
         FROM intervals_a a, intervals_b b
-        WHERE a.position INTERSECTS b.position
+        WHERE a.interval INTERSECTS b.interval
     """
     sql = engine.transpile(giql_query)
     giql_result = duckdb_connection.execute(sql).fetchall()
@@ -132,7 +132,7 @@ def test_intersect_partial_overlap(duckdb_connection, interval_generator):
     giql_query = """
         SELECT DISTINCT a.*
         FROM intervals_a a, intervals_b b
-        WHERE a.position INTERSECTS b.position
+        WHERE a.interval INTERSECTS b.interval
     """
     sql = engine.transpile(giql_query)
     giql_result = duckdb_connection.execute(sql).fetchall()
@@ -187,7 +187,7 @@ def test_intersect_no_overlap(duckdb_connection, interval_generator):
     giql_query = """
         SELECT DISTINCT a.*
         FROM intervals_a a, intervals_b b
-        WHERE a.position INTERSECTS b.position
+        WHERE a.interval INTERSECTS b.interval
     """
     sql = engine.transpile(giql_query)
     giql_result = duckdb_connection.execute(sql).fetchall()
@@ -242,7 +242,7 @@ def test_intersect_adjacent_intervals(duckdb_connection, interval_generator):
     giql_query = """
         SELECT DISTINCT a.*
         FROM intervals_a a, intervals_b b
-        WHERE a.position INTERSECTS b.position
+        WHERE a.interval INTERSECTS b.interval
     """
     sql = engine.transpile(giql_query)
     giql_result = duckdb_connection.execute(sql).fetchall()
@@ -299,7 +299,7 @@ def test_intersect_multiple_chromosomes(duckdb_connection, interval_generator):
     giql_query = """
         SELECT DISTINCT a.*
         FROM intervals_a a, intervals_b b
-        WHERE a.position INTERSECTS b.position
+        WHERE a.interval INTERSECTS b.interval
     """
     sql = engine.transpile(giql_query)
     giql_result = duckdb_connection.execute(sql).fetchall()

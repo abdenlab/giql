@@ -34,7 +34,7 @@ All recipes assume you have set up a GIQL engine and registered your table schem
                    "score": "FLOAT",
                    "strand": "VARCHAR",
                },
-               genomic_column="position",
+               genomic_column="interval",
            )
 
        # Now run queries from the recipes below
