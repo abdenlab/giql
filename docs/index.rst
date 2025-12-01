@@ -66,13 +66,13 @@ Basic usage:
                "start_pos": "BIGINT",
                "end_pos": "BIGINT",
            },
-           genomic_column="position",
+           genomic_column="interval",
        )
 
        # Query with genomic operators (returns cursor for streaming)
        cursor = engine.execute("""
            SELECT * FROM variants
-           WHERE position INTERSECTS 'chr1:1000-2000'
+           WHERE interval INTERSECTS 'chr1:1000-2000'
        """)
 
        # Process results
@@ -82,7 +82,7 @@ Basic usage:
        # Or just transpile to SQL without executing
        sql = engine.transpile("""
            SELECT * FROM variants
-           WHERE position INTERSECTS 'chr1:1000-2000'
+           WHERE interval INTERSECTS 'chr1:1000-2000'
        """)
        print(sql)  # See the generated SQL
 
@@ -105,37 +105,37 @@ Operators at a Glance
 .. code-block:: sql
 
    -- Find overlapping features
-   WHERE position INTERSECTS 'chr1:1000-2000'
+   WHERE interval INTERSECTS 'chr1:1000-2000'
 
    -- Find containing/contained features
-   WHERE gene.position CONTAINS variant.position
+   WHERE gene.interval CONTAINS variant.interval
 
 **Distance and Proximity:**
 
 .. code-block:: sql
 
    -- Calculate distance between intervals
-   SELECT DISTANCE(a.position, b.position) AS dist
+   SELECT DISTANCE(a.interval, b.interval) AS dist
 
    -- Find k-nearest neighbors
-   FROM peaks CROSS JOIN LATERAL NEAREST(genes, reference=peaks.position, k=5)
+   FROM peaks CROSS JOIN LATERAL NEAREST(genes, reference=peaks.interval, k=5)
 
 **Aggregation:**
 
 .. code-block:: sql
 
    -- Cluster overlapping intervals
-   SELECT *, CLUSTER(position) AS cluster_id FROM features
+   SELECT *, CLUSTER(interval) AS cluster_id FROM features
 
    -- Merge overlapping intervals
-   SELECT MERGE(position) FROM features
+   SELECT MERGE(interval) FROM features
 
 **Set Quantifiers:**
 
 .. code-block:: sql
 
    -- Match any of multiple regions
-   WHERE position INTERSECTS ANY('chr1:1000-2000', 'chr2:5000-6000')
+   WHERE interval INTERSECTS ANY('chr1:1000-2000', 'chr2:5000-6000')
 
 See :doc:`operators/index` for complete operator documentation.
 

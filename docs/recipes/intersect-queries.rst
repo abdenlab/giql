@@ -21,7 +21,7 @@ Find all features in table A that overlap with any feature in table B:
    cursor = engine.execute("""
        SELECT DISTINCT a.*
        FROM features_a a, features_b b
-       WHERE a.position INTERSECTS b.position
+       WHERE a.interval INTERSECTS b.interval
    """)
 
 **Use case:** Identify variants that fall within gene regions.
@@ -37,7 +37,7 @@ feature overlaps multiple others):
    cursor = engine.execute("""
        SELECT a.*, b.*
        FROM features_a a, features_b b
-       WHERE a.position INTERSECTS b.position
+       WHERE a.interval INTERSECTS b.interval
    """)
 
 **Use case:** Generate a full overlap matrix for downstream analysis.
@@ -51,7 +51,7 @@ Find features overlapping a literal genomic range:
 
    cursor = engine.execute("""
        SELECT * FROM variants
-       WHERE position INTERSECTS 'chr1:1000000-2000000'
+       WHERE interval INTERSECTS 'chr1:1000000-2000000'
    """)
 
 **Use case:** Extract all data for a specific chromosomal region.
@@ -69,7 +69,7 @@ Find features in A that do NOT overlap with any feature in B:
    cursor = engine.execute("""
        SELECT a.*
        FROM features_a a
-       LEFT JOIN features_b b ON a.position INTERSECTS b.position
+       LEFT JOIN features_b b ON a.interval INTERSECTS b.interval
        WHERE b.chromosome IS NULL
    """)
 
@@ -86,7 +86,7 @@ Return each feature from A only once, regardless of how many B features it overl
    cursor = engine.execute("""
        SELECT DISTINCT a.*
        FROM features_a a
-       INNER JOIN features_b b ON a.position INTERSECTS b.position
+       INNER JOIN features_b b ON a.interval INTERSECTS b.interval
    """)
 
 **Use case:** Get a deduplicated list of features that have at least one overlap.
@@ -104,7 +104,7 @@ Count how many B features each A feature overlaps:
    cursor = engine.execute("""
        SELECT a.*, COUNT(b.name) AS overlap_count
        FROM features_a a
-       LEFT JOIN features_b b ON a.position INTERSECTS b.position
+       LEFT JOIN features_b b ON a.interval INTERSECTS b.interval
        GROUP BY a.chromosome, a.start_pos, a.end_pos, a.name, a.score, a.strand
    """)
 
@@ -121,7 +121,7 @@ Find features that overlap at least N other features:
    cursor = engine.execute("""
        SELECT a.*
        FROM features_a a
-       INNER JOIN features_b b ON a.position INTERSECTS b.position
+       INNER JOIN features_b b ON a.interval INTERSECTS b.interval
        GROUP BY a.chromosome, a.start_pos, a.end_pos, a.name, a.score, a.strand
        HAVING COUNT(*) >= 3
    """)
@@ -141,7 +141,7 @@ Find overlapping features on the same strand:
    cursor = engine.execute("""
        SELECT a.*, b.name AS b_name
        FROM features_a a, features_b b
-       WHERE a.position INTERSECTS b.position
+       WHERE a.interval INTERSECTS b.interval
          AND a.strand = b.strand
    """)
 
@@ -157,7 +157,7 @@ Find overlapping features on opposite strands:
    cursor = engine.execute("""
        SELECT a.*, b.name AS b_name
        FROM features_a a, features_b b
-       WHERE a.position INTERSECTS b.position
+       WHERE a.interval INTERSECTS b.interval
          AND a.strand != b.strand
          AND a.strand IN ('+', '-')
          AND b.strand IN ('+', '-')
@@ -178,7 +178,7 @@ Find overlaps where at least 50% of feature A is covered:
    cursor = engine.execute("""
        SELECT a.*
        FROM features_a a, features_b b
-       WHERE a.position INTERSECTS b.position
+       WHERE a.interval INTERSECTS b.interval
          AND (
              LEAST(a.end_pos, b.end_pos) - GREATEST(a.start_pos, b.start_pos)
          ) >= 0.5 * (a.end_pos - a.start_pos)
@@ -196,7 +196,7 @@ Find overlaps where at least 50% of feature B is covered:
    cursor = engine.execute("""
        SELECT a.*
        FROM features_a a, features_b b
-       WHERE a.position INTERSECTS b.position
+       WHERE a.interval INTERSECTS b.interval
          AND (
              LEAST(a.end_pos, b.end_pos) - GREATEST(a.start_pos, b.start_pos)
          ) >= 0.5 * (b.end_pos - b.start_pos)
@@ -220,7 +220,7 @@ Require both features to have at least 50% mutual overlap:
                (a.end_pos - a.start_pos) AS a_length,
                (b.end_pos - b.start_pos) AS b_length
            FROM features_a a, features_b b
-           WHERE a.position INTERSECTS b.position
+           WHERE a.interval INTERSECTS b.interval
        )
        SELECT *
        FROM overlap_calcs
@@ -243,7 +243,7 @@ Report all features from A, with B information where available:
    cursor = engine.execute("""
        SELECT a.*, b.name AS overlapping_feature
        FROM features_a a
-       LEFT JOIN features_b b ON a.position INTERSECTS b.position
+       LEFT JOIN features_b b ON a.interval INTERSECTS b.interval
    """)
 
 **Use case:** Annotate features with overlap information while keeping all records.
@@ -261,7 +261,7 @@ Return the overlap size in base pairs:
            b.name AS b_name,
            (LEAST(a.end_pos, b.end_pos) - GREATEST(a.start_pos, b.start_pos)) AS overlap_bp
        FROM features_a a, features_b b
-       WHERE a.position INTERSECTS b.position
+       WHERE a.interval INTERSECTS b.interval
    """)
 
 **Use case:** Quantify the extent of each overlap.
@@ -282,7 +282,7 @@ Report overlap amount for all A features, with 0 for non-overlapping:
                ELSE LEAST(a.end_pos, b.end_pos) - GREATEST(a.start_pos, b.start_pos)
            END AS overlap_bp
        FROM features_a a
-       LEFT JOIN features_b b ON a.position INTERSECTS b.position
+       LEFT JOIN features_b b ON a.interval INTERSECTS b.interval
    """)
 
 **Use case:** Create a complete overlap report including non-overlapping features.
@@ -313,7 +313,7 @@ Intersect A with features from multiple B tables:
        )
        SELECT DISTINCT a.*
        FROM features_a a
-       INNER JOIN all_b_features b ON a.position INTERSECTS b.position
+       INNER JOIN all_b_features b ON a.interval INTERSECTS b.interval
    """)
 
 **Use case:** Find features overlapping any region from multiple annotation sources.
@@ -335,7 +335,7 @@ Know which source table each overlap came from:
        )
        SELECT a.*, b.name AS overlap_name, b.source
        FROM features_a a
-       INNER JOIN all_b_features b ON a.position INTERSECTS b.position
+       INNER JOIN all_b_features b ON a.interval INTERSECTS b.interval
    """)
 
 **Use case:** Track which annotation database each overlap originated from.
@@ -353,7 +353,7 @@ Combine spatial and attribute filters:
    cursor = engine.execute("""
        SELECT v.*, g.name AS gene_name
        FROM variants v
-       INNER JOIN genes g ON v.position INTERSECTS g.position
+       INNER JOIN genes g ON v.interval INTERSECTS g.interval
        WHERE v.quality >= 30
          AND g.biotype = 'protein_coding'
        ORDER BY v.chromosome, v.start_pos
@@ -371,7 +371,7 @@ Find overlaps with a specific set of genes:
    cursor = engine.execute("""
        SELECT v.*, g.name AS gene_name
        FROM variants v
-       INNER JOIN genes g ON v.position INTERSECTS g.position
+       INNER JOIN genes g ON v.interval INTERSECTS g.interval
        WHERE g.name IN ('BRCA1', 'BRCA2', 'TP53', 'EGFR')
        ORDER BY g.name, v.start_pos
    """)

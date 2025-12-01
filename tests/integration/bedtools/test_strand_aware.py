@@ -32,7 +32,7 @@ def _setup_giql_engine(duckdb_connection):
         engine.register_table_schema(
             table_name,
             schema,
-            genomic_column="position",
+            genomic_column="interval",
             interval_type="closed",  # Match bedtools distance calculation
         )
 
@@ -84,7 +84,7 @@ def test_intersect_same_strand(duckdb_connection):
     giql_query = """
         SELECT DISTINCT a.*
         FROM intervals_a a, intervals_b b
-        WHERE a.position INTERSECTS b.position
+        WHERE a.interval INTERSECTS b.interval
           AND a.strand = b.strand
     """
     sql = engine.transpile(giql_query)
@@ -143,7 +143,7 @@ def test_intersect_opposite_strand(duckdb_connection):
     giql_query = """
         SELECT DISTINCT a.*
         FROM intervals_a a, intervals_b b
-        WHERE a.position INTERSECTS b.position
+        WHERE a.interval INTERSECTS b.interval
           AND a.strand != b.strand
     """
     sql = engine.transpile(giql_query)
@@ -200,7 +200,7 @@ def test_intersect_ignore_strand(duckdb_connection):
     giql_query = """
         SELECT DISTINCT a.*
         FROM intervals_a a, intervals_b b
-        WHERE a.position INTERSECTS b.position
+        WHERE a.interval INTERSECTS b.interval
     """
     sql = engine.transpile(giql_query)
     giql_result = duckdb_connection.execute(sql).fetchall()
@@ -260,7 +260,7 @@ def test_intersect_mixed_strands(duckdb_connection):
     giql_query = """
         SELECT DISTINCT a.*
         FROM intervals_a a, intervals_b b
-        WHERE a.position INTERSECTS b.position
+        WHERE a.interval INTERSECTS b.interval
             AND a.strand = b.strand
             AND a.strand != '.'
             AND b.strand != '.'

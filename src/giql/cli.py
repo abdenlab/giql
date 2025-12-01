@@ -428,7 +428,7 @@ def intersect(
         engine.register_table_schema(
             table_a,
             columns_a,
-            genomic_column="position",
+            genomic_column="interval",
             chrom_col=genomic_cols_a["chrom_col"],
             start_col=genomic_cols_a["start_col"],
             end_col=genomic_cols_a["end_col"],
@@ -607,7 +607,7 @@ def _build_intersect_query(
 
     if invert:
         # Only features in A with no overlap in B
-        where_clause = f"a.position INTERSECTS b.region{strand_filter}{fraction_filter}"
+        where_clause = f"a.interval INTERSECTS b.region{strand_filter}{fraction_filter}"
         return f"""
             SELECT a.*
             FROM {table_a} a
@@ -620,7 +620,7 @@ def _build_intersect_query(
     if count:
         # Count overlaps
         # Get all columns from table A for GROUP BY
-        on_clause = f"a.position INTERSECTS b.region{strand_filter}{fraction_filter}"
+        on_clause = f"a.interval INTERSECTS b.region{strand_filter}{fraction_filter}"
         return f"""
             SELECT a.*, COUNT(b.\"{chrom_b}\") as overlap_count
             FROM {table_a} a
@@ -630,7 +630,7 @@ def _build_intersect_query(
 
     if unique:
         # Report each A feature only once if overlaps exist
-        on_clause = f"a.position INTERSECTS b.region{strand_filter}{fraction_filter}"
+        on_clause = f"a.interval INTERSECTS b.region{strand_filter}{fraction_filter}"
         return f"""
             SELECT DISTINCT a.*
             FROM {table_a} a
@@ -667,7 +667,7 @@ def _build_intersect_query(
         select_clause = f"{select_clause}, {overlap_expr}"
 
     # Build ON clause
-    on_clause = f"a.position INTERSECTS b.region{strand_filter}{fraction_filter}"
+    on_clause = f"a.interval INTERSECTS b.region{strand_filter}{fraction_filter}"
 
     # Build base query
     query = f"""

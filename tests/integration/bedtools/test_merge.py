@@ -29,7 +29,7 @@ def _setup_giql_engine(duckdb_connection):
     engine.register_table_schema(
         "intervals",
         schema,
-        genomic_column="position",
+        genomic_column="interval",
     )
 
     return engine
@@ -67,7 +67,7 @@ def test_merge_adjacent_intervals(duckdb_connection):
     # Act: Execute GIQL query
     engine = _setup_giql_engine(duckdb_connection)
     giql_query = """
-        SELECT MERGE(position)
+        SELECT MERGE(interval)
         FROM intervals
     """
     sql = engine.transpile(giql_query)
@@ -114,7 +114,7 @@ def test_merge_overlapping_intervals(duckdb_connection):
     # Act: Execute GIQL query
     engine = _setup_giql_engine(duckdb_connection)
     giql_query = """
-        SELECT MERGE(position)
+        SELECT MERGE(interval)
         FROM intervals
     """
     sql = engine.transpile(giql_query)
@@ -161,7 +161,7 @@ def test_merge_separated_intervals(duckdb_connection):
     # Act: Execute GIQL query
     engine = _setup_giql_engine(duckdb_connection)
     giql_query = """
-        SELECT MERGE(position)
+        SELECT MERGE(interval)
         FROM intervals
     """
     sql = engine.transpile(giql_query)
@@ -209,7 +209,7 @@ def test_merge_multiple_chromosomes(duckdb_connection):
     # Act: Execute GIQL query
     engine = _setup_giql_engine(duckdb_connection)
     giql_query = """
-        SELECT MERGE(position)
+        SELECT MERGE(interval)
         FROM intervals
     """
     sql = engine.transpile(giql_query)

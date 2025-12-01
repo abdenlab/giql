@@ -20,7 +20,7 @@ Find features overlapping any of several regions of interest:
 
    cursor = engine.execute("""
        SELECT * FROM variants
-       WHERE position INTERSECTS ANY(
+       WHERE interval INTERSECTS ANY(
            'chr1:1000000-2000000',
            'chr1:5000000-6000000',
            'chr2:1000000-3000000'
@@ -38,7 +38,7 @@ Find features containing all specified positions:
 
    cursor = engine.execute("""
        SELECT * FROM genes
-       WHERE position CONTAINS ALL(
+       WHERE interval CONTAINS ALL(
            'chr1:1500',
            'chr1:1600',
            'chr1:1700'
@@ -56,7 +56,7 @@ Find features that don't overlap any blacklisted region:
 
    cursor = engine.execute("""
        SELECT * FROM peaks
-       WHERE NOT position INTERSECTS ANY(
+       WHERE NOT interval INTERSECTS ANY(
            'chr1:120000000-125000000',   -- Centromere region
            'chr1:140000000-142000000',   -- Known artifact
            'chrM:1-16569'                -- Mitochondrial
@@ -74,8 +74,8 @@ Complex multi-range logic:
 
    cursor = engine.execute("""
        SELECT * FROM features
-       WHERE position INTERSECTS ANY('chr1:1000-2000', 'chr1:5000-6000')
-         AND position CONTAINS ALL('chr1:1100', 'chr1:1200')
+       WHERE interval INTERSECTS ANY('chr1:1000-2000', 'chr1:5000-6000')
+         AND interval CONTAINS ALL('chr1:1100', 'chr1:1200')
    """)
 
 **Use case:** Find features matching complex spatial criteria.
@@ -93,7 +93,7 @@ Combine spatial and attribute filters:
    cursor = engine.execute("""
        SELECT v.*, g.name AS gene_name, g.biotype
        FROM variants v
-       INNER JOIN genes g ON v.position INTERSECTS g.position
+       INNER JOIN genes g ON v.interval INTERSECTS g.interval
        WHERE v.quality >= 30
          AND v.filter = 'PASS'
          AND v.allele_frequency > 0.01
@@ -113,7 +113,7 @@ Filter to specific genes of interest:
    cursor = engine.execute("""
        SELECT v.*, g.name AS gene_name
        FROM variants v
-       INNER JOIN genes g ON v.position INTERSECTS g.position
+       INNER JOIN genes g ON v.interval INTERSECTS g.interval
        WHERE g.name IN (
            'BRCA1', 'BRCA2', 'TP53', 'EGFR', 'KRAS',
            'BRAF', 'PIK3CA', 'PTEN', 'APC', 'ATM'
@@ -138,7 +138,7 @@ Apply different criteria based on feature type:
                ELSE 'other'
            END AS gene_category
        FROM variants v
-       INNER JOIN genes g ON v.position INTERSECTS g.position
+       INNER JOIN genes g ON v.interval INTERSECTS g.interval
        WHERE CASE
            WHEN g.biotype = 'protein_coding' THEN v.quality >= 30
            ELSE v.quality >= 20
@@ -164,7 +164,7 @@ Calculate summary statistics by chromosome:
            COUNT(b.name) AS total_overlaps,
            COUNT(DISTINCT CASE WHEN b.name IS NOT NULL THEN a.name END) AS features_with_overlap
        FROM features_a a
-       LEFT JOIN features_b b ON a.position INTERSECTS b.position
+       LEFT JOIN features_b b ON a.interval INTERSECTS b.interval
        GROUP BY a.chromosome
        ORDER BY a.chromosome
    """)
@@ -185,7 +185,7 @@ Calculate overlap metrics:
            AVG(LEAST(a.end_pos, b.end_pos) - GREATEST(a.start_pos, b.start_pos)) AS avg_overlap_bp,
            SUM(LEAST(a.end_pos, b.end_pos) - GREATEST(a.start_pos, b.start_pos)) AS total_overlap_bp
        FROM features_a a
-       INNER JOIN features_b b ON a.position INTERSECTS b.position
+       INNER JOIN features_b b ON a.interval INTERSECTS b.interval
        GROUP BY a.chromosome
        ORDER BY a.chromosome
    """)
@@ -226,8 +226,8 @@ Find features overlapping in all three tables:
    cursor = engine.execute("""
        SELECT DISTINCT a.*
        FROM features_a a
-       INNER JOIN features_b b ON a.position INTERSECTS b.position
-       INNER JOIN features_c c ON a.position INTERSECTS c.position
+       INNER JOIN features_b b ON a.interval INTERSECTS b.interval
+       INNER JOIN features_c c ON a.interval INTERSECTS c.interval
    """)
 
 **Use case:** Find consensus regions across multiple datasets.
@@ -246,9 +246,9 @@ Join multiple annotation levels:
            t.name AS transcript,
            g.name AS gene
        FROM variants v
-       INNER JOIN exons e ON v.position INTERSECTS e.position
-       INNER JOIN transcripts t ON e.position WITHIN t.position
-       INNER JOIN genes g ON t.position WITHIN g.position
+       INNER JOIN exons e ON v.interval INTERSECTS e.interval
+       INNER JOIN transcripts t ON e.interval WITHIN t.interval
+       INNER JOIN genes g ON t.interval WITHIN g.interval
    """)
 
 **Use case:** Build hierarchical annotations for variants.
@@ -294,7 +294,7 @@ Use subqueries to pre-filter data:
    cursor = engine.execute("""
        SELECT v.*
        FROM variants v
-       WHERE v.position INTERSECTS ANY(
+       WHERE v.interval INTERSECTS ANY(
            SELECT position FROM genes WHERE biotype = 'protein_coding'
        )
    """)
@@ -323,7 +323,7 @@ Build complex analyses with Common Table Expressions:
        annotated AS (
            SELECT v.*, g.name AS gene_name, g.biotype
            FROM hq_variants v
-           LEFT JOIN genes g ON v.position INTERSECTS g.position
+           LEFT JOIN genes g ON v.interval INTERSECTS g.interval
        ),
        -- Step 3: Summarize by gene
        gene_summary AS (
@@ -362,7 +362,7 @@ Rank features by their overlap characteristics:
        FROM (
            SELECT a.*, COUNT(b.name) AS overlap_count
            FROM features_a a
-           LEFT JOIN features_b b ON a.position INTERSECTS b.position
+           LEFT JOIN features_b b ON a.interval INTERSECTS b.interval
            GROUP BY a.chromosome, a.start_pos, a.end_pos, a.name, a.score, a.strand
        ) a
    """)
@@ -404,7 +404,7 @@ Use transpile() to see the SQL GIQL generates:
 
    sql = engine.transpile("""
        SELECT * FROM variants
-       WHERE position INTERSECTS 'chr1:1000-2000'
+       WHERE interval INTERSECTS 'chr1:1000-2000'
    """)
    print(sql)
    # See the actual SQL that will be executed
@@ -422,7 +422,7 @@ Enable detailed logging:
        # All queries will print transpilation details
        cursor = engine.execute("""
            SELECT * FROM variants
-           WHERE position INTERSECTS 'chr1:1000-2000'
+           WHERE interval INTERSECTS 'chr1:1000-2000'
        """)
 
 **Use case:** Diagnose query translation issues.
@@ -438,7 +438,7 @@ Analyze query execution:
    sql = engine.transpile("""
        SELECT v.*, g.name
        FROM variants v
-       JOIN genes g ON v.position INTERSECTS g.position
+       JOIN genes g ON v.interval INTERSECTS g.interval
    """)
 
    # Then use database-native EXPLAIN

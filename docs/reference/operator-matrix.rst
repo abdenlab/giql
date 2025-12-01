@@ -192,7 +192,7 @@ Verify operator support at runtime:
        try:
            sql = engine.transpile("""
                SELECT * FROM features
-               WHERE position INTERSECTS 'chr1:1000-2000'
+               WHERE interval INTERSECTS 'chr1:1000-2000'
            """)
            print("INTERSECTS supported")
        except Exception as e:

@@ -34,24 +34,24 @@ Syntax
 .. code-block:: sql
 
    -- Compare against a literal range
-   position INTERSECTS 'chr1:1000-2000'
+   interval INTERSECTS 'chr1:1000-2000'
 
    -- Compare against another genomic column (joins)
-   a.position INTERSECTS b.position
+   a.interval INTERSECTS b.interval
 
    -- With set quantifiers
-   position INTERSECTS ANY('chr1:1000-2000', 'chr2:5000-6000')
+   interval INTERSECTS ANY('chr1:1000-2000', 'chr2:5000-6000')
 
 Parameters
 ~~~~~~~~~~
 
-**position**
+**interval**
    A genomic column registered with the engine via ``register_table_schema()``.
 
 **literal_range**
    A string literal specifying a genomic range in the format ``'chromosome:start-end'``.
 
-**other_position**
+**other_interval**
    Another genomic column from the same or different table (for joins).
 
 Return Value
@@ -70,7 +70,7 @@ Find all variants that overlap a specific genomic region:
 
    cursor = engine.execute("""
        SELECT * FROM variants
-       WHERE position INTERSECTS 'chr1:1000-2000'
+       WHERE interval INTERSECTS 'chr1:1000-2000'
    """)
 
 **Column-to-Column Joins:**
@@ -82,7 +82,7 @@ Find variants that overlap with any gene:
    cursor = engine.execute("""
        SELECT v.*, g.name AS gene_name
        FROM variants v
-       INNER JOIN genes g ON v.position INTERSECTS g.position
+       INNER JOIN genes g ON v.interval INTERSECTS g.interval
    """)
 
 **With WHERE Clause:**
@@ -94,7 +94,7 @@ Find overlapping features with additional filtering:
    cursor = engine.execute("""
        SELECT v.*, g.name
        FROM variants v
-       INNER JOIN genes g ON v.position INTERSECTS g.position
+       INNER JOIN genes g ON v.interval INTERSECTS g.interval
        WHERE v.quality >= 30
          AND g.biotype = 'protein_coding'
    """)
@@ -108,7 +108,7 @@ Find all variants, with gene information where available:
    cursor = engine.execute("""
        SELECT v.*, g.name AS gene_name
        FROM variants v
-       LEFT JOIN genes g ON v.position INTERSECTS g.position
+       LEFT JOIN genes g ON v.interval INTERSECTS g.interval
    """)
 
 Backend Compatibility
@@ -170,25 +170,25 @@ Syntax
 
 .. code-block:: sql
 
-   -- Check if position contains a point
-   position CONTAINS 'chr1:1500'
+   -- Check if interval contains a point
+   interval CONTAINS 'chr1:1500'
 
-   -- Check if position contains a range
-   position CONTAINS 'chr1:1200-1800'
+   -- Check if interval contains a range
+   interval CONTAINS 'chr1:1200-1800'
 
    -- Column-to-column comparison
-   gene.position CONTAINS variant.position
+   gene.interval CONTAINS variant.interval
 
 Parameters
 ~~~~~~~~~~
 
-**position**
+**interval**
    A genomic column registered with the engine.
 
 **literal_range**
    A string literal specifying a genomic point or range.
 
-**other_position**
+**other_interval**
    Another genomic column for comparisons.
 
 Return Value
@@ -207,7 +207,7 @@ Find genes that contain a specific position:
 
    cursor = engine.execute("""
        SELECT * FROM genes
-       WHERE position CONTAINS 'chr1:1500'
+       WHERE interval CONTAINS 'chr1:1500'
    """)
 
 **Range Containment:**
@@ -219,7 +219,7 @@ Find large features that fully contain smaller features:
    cursor = engine.execute("""
        SELECT g.name AS gene_name, e.name AS exon_name
        FROM genes g
-       INNER JOIN exons e ON g.position CONTAINS e.position
+       INNER JOIN exons e ON g.interval CONTAINS e.interval
    """)
 
 **Filtering Fully Contained Variants:**
@@ -231,7 +231,7 @@ Find variants that are completely within gene boundaries:
    cursor = engine.execute("""
        SELECT v.*
        FROM variants v
-       INNER JOIN genes g ON g.position CONTAINS v.position
+       INNER JOIN genes g ON g.interval CONTAINS v.interval
    """)
 
 Backend Compatibility
@@ -285,22 +285,22 @@ Syntax
 
 .. code-block:: sql
 
-   -- Check if position is within a range
-   position WITHIN 'chr1:1000-5000'
+   -- Check if interval is within a range
+   interval WITHIN 'chr1:1000-5000'
 
    -- Column-to-column comparison
-   variant.position WITHIN gene.position
+   variant.interval WITHIN gene.interval
 
 Parameters
 ~~~~~~~~~~
 
-**position**
+**interval**
    A genomic column registered with the engine.
 
 **literal_range**
    A string literal specifying the containing range.
 
-**other_position**
+**other_interval**
    Another genomic column for comparisons.
 
 Return Value
@@ -319,7 +319,7 @@ Find all features within a specific genomic window:
 
    cursor = engine.execute("""
        SELECT * FROM features
-       WHERE position WITHIN 'chr1:1000000-2000000'
+       WHERE interval WITHIN 'chr1:1000000-2000000'
    """)
 
 **Find Nested Features:**
@@ -331,7 +331,7 @@ Find exons that are completely within their parent gene:
    cursor = engine.execute("""
        SELECT e.*, g.name AS gene_name
        FROM exons e
-       INNER JOIN genes g ON e.position WITHIN g.position
+       INNER JOIN genes g ON e.interval WITHIN g.interval
    """)
 
 Backend Compatibility

@@ -31,15 +31,15 @@ Syntax
 
 .. code-block:: sql
 
-   DISTANCE(position_a, position_b)
+   DISTANCE(interval_a, interval_b)
 
 Parameters
 ~~~~~~~~~~
 
-**position_a**
+**interval_a**
    A genomic column registered with the engine.
 
-**position_b**
+**interval_b**
    Another genomic column to measure distance to.
 
 Return Value
@@ -62,7 +62,7 @@ Calculate distance between peaks and genes:
        SELECT
            p.name AS peak,
            g.name AS gene,
-           DISTANCE(p.position, g.position) AS distance
+           DISTANCE(p.interval, g.interval) AS distance
        FROM peaks p
        CROSS JOIN genes g
        WHERE p.chromosome = g.chromosome
@@ -76,11 +76,11 @@ Find features within 10kb of each other:
 .. code-block:: python
 
    cursor = engine.execute("""
-       SELECT a.name, b.name, DISTANCE(a.position, b.position) AS dist
+       SELECT a.name, b.name, DISTANCE(a.interval, b.interval) AS dist
        FROM features_a a
        CROSS JOIN features_b b
        WHERE a.chromosome = b.chromosome
-         AND DISTANCE(a.position, b.position) <= 10000
+         AND DISTANCE(a.interval, b.interval) <= 10000
    """)
 
 **Identify Overlapping vs. Proximal:**
@@ -94,8 +94,8 @@ Distinguish between overlapping and nearby features:
            p.name,
            g.name,
            CASE
-               WHEN DISTANCE(p.position, g.position) = 0 THEN 'overlapping'
-               WHEN DISTANCE(p.position, g.position) <= 1000 THEN 'proximal'
+               WHEN DISTANCE(p.interval, g.interval) = 0 THEN 'overlapping'
+               WHEN DISTANCE(p.interval, g.interval) <= 1000 THEN 'proximal'
                ELSE 'distant'
            END AS relationship
        FROM peaks p
@@ -166,14 +166,14 @@ Syntax
    FROM source_table
    CROSS JOIN LATERAL NEAREST(
        target_table,
-       reference=source_table.position,
+       reference=source_table.interval,
        k=5
    ) AS nearest
 
    -- With additional parameters
    NEAREST(
        target_table,
-       reference=position,
+       reference=interval,
        k=5,
        max_distance=100000,
        stranded=true,
@@ -191,7 +191,7 @@ Parameters
 
 **reference**
    The reference position to measure distances from. Can be a column reference
-   (e.g., ``peaks.position``) or a literal range (e.g., ``'chr1:1000-2000'``).
+   (e.g., ``peaks.interval``) or a literal range (e.g., ``'chr1:1000-2000'``).
 
 **k**
    The number of nearest neighbors to return. Default: ``1``.
@@ -227,7 +227,7 @@ Find the 3 nearest genes for each peak:
            nearest.name AS gene,
            nearest.distance
        FROM peaks
-       CROSS JOIN LATERAL NEAREST(genes, reference=peaks.position, k=3) AS nearest
+       CROSS JOIN LATERAL NEAREST(genes, reference=peaks.interval, k=3) AS nearest
        ORDER BY peaks.name, nearest.distance
    """)
 
@@ -257,7 +257,7 @@ Find nearest features within 100kb:
        FROM peaks
        CROSS JOIN LATERAL NEAREST(
            genes,
-           reference=peaks.position,
+           reference=peaks.interval,
            k=5,
            max_distance=100000
        ) AS nearest
@@ -279,7 +279,7 @@ Find nearest same-strand features:
        FROM peaks
        CROSS JOIN LATERAL NEAREST(
            genes,
-           reference=peaks.position,
+           reference=peaks.interval,
            k=3,
            stranded=true
        ) AS nearest
@@ -301,7 +301,7 @@ Find upstream features using signed distances:
        FROM peaks
        CROSS JOIN LATERAL NEAREST(
            genes,
-           reference=peaks.position,
+           reference=peaks.interval,
            k=10,
            signed=true
        ) AS nearest
@@ -318,7 +318,7 @@ Find upstream features using signed distances:
        FROM peaks
        CROSS JOIN LATERAL NEAREST(
            genes,
-           reference=peaks.position,
+           reference=peaks.interval,
            k=10,
            signed=true
        ) AS nearest
@@ -340,7 +340,7 @@ Find nearby same-strand features within distance constraints:
        FROM peaks
        CROSS JOIN LATERAL NEAREST(
            genes,
-           reference=peaks.position,
+           reference=peaks.interval,
            k=5,
            max_distance=50000,
            stranded=true,

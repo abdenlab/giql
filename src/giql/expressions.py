@@ -79,10 +79,10 @@ class GIQLCluster(exp.Func):
     Implicitly partitions by chromosome and orders by start position.
 
     Examples:
-        CLUSTER(position)
-        CLUSTER(position, 1000)
-        CLUSTER(position, stranded=true)
-        CLUSTER(position, 1000, stranded=true)
+        CLUSTER(interval)
+        CLUSTER(interval, 1000)
+        CLUSTER(interval, stranded=true)
+        CLUSTER(interval, 1000, stranded=true)
     """
 
     arg_types = {
@@ -130,9 +130,9 @@ class GIQLMerge(exp.Func):
     Built on top of CLUSTER operation.
 
     Examples:
-        MERGE(position)
-        MERGE(position, 1000)
-        MERGE(position, stranded=true)
+        MERGE(interval)
+        MERGE(interval, 1000)
+        MERGE(interval, stranded=true)
     """
 
     arg_types = {
@@ -178,11 +178,11 @@ class GIQLDistance(exp.Func):
     intervals, with optional strand-specific and signed (directional) modes.
 
     Examples:
-        DISTANCE(a.position, b.position)
-        DISTANCE(a.position, 'chr1:1000-2000')
-        DISTANCE(a.position, b.position, stranded=true)
-        DISTANCE(a.position, b.position, signed=true)
-        DISTANCE(a.position, b.position, stranded=true, signed=true)
+        DISTANCE(a.interval, b.interval)
+        DISTANCE(a.interval, 'chr1:1000-2000')
+        DISTANCE(a.interval, b.interval, stranded=true)
+        DISTANCE(a.interval, b.interval, signed=true)
+        DISTANCE(a.interval, b.interval, stranded=true, signed=true)
     """
 
     arg_types = {
@@ -232,7 +232,7 @@ class GIQLNearest(exp.Func):
 
     Examples:
         NEAREST(genes, k=3)
-        NEAREST(genes, reference=peaks.position, k=5)
+        NEAREST(genes, reference=peaks.interval, k=5)
         NEAREST(genes, reference='chr1:1000-2000', k=3)
         NEAREST(genes, k=5, max_distance=100000, stranded=true)
     """

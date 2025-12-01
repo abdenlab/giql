@@ -22,7 +22,7 @@ Calculate the distance between features in two tables:
        SELECT
            a.name AS feature_a,
            b.name AS feature_b,
-           DISTANCE(a.position, b.position) AS distance
+           DISTANCE(a.interval, b.interval) AS distance
        FROM features_a a
        CROSS JOIN features_b b
        WHERE a.chromosome = b.chromosome
@@ -47,11 +47,11 @@ Classify relationships based on distance:
        SELECT
            p.name AS peak,
            g.name AS gene,
-           DISTANCE(p.position, g.position) AS dist,
+           DISTANCE(p.interval, g.interval) AS dist,
            CASE
-               WHEN DISTANCE(p.position, g.position) = 0 THEN 'overlapping'
-               WHEN DISTANCE(p.position, g.position) <= 1000 THEN 'proximal (<1kb)'
-               WHEN DISTANCE(p.position, g.position) <= 10000 THEN 'nearby (<10kb)'
+               WHEN DISTANCE(p.interval, g.interval) = 0 THEN 'overlapping'
+               WHEN DISTANCE(p.interval, g.interval) <= 1000 THEN 'proximal (<1kb)'
+               WHEN DISTANCE(p.interval, g.interval) <= 10000 THEN 'nearby (<10kb)'
                ELSE 'distant'
            END AS relationship
        FROM peaks p
@@ -72,11 +72,11 @@ Find feature pairs within a distance threshold:
        SELECT
            a.name,
            b.name,
-           DISTANCE(a.position, b.position) AS dist
+           DISTANCE(a.interval, b.interval) AS dist
        FROM features_a a
        CROSS JOIN features_b b
        WHERE a.chromosome = b.chromosome
-         AND DISTANCE(a.position, b.position) <= 50000
+         AND DISTANCE(a.interval, b.interval) <= 50000
        ORDER BY dist
    """)
 
@@ -98,7 +98,7 @@ For each peak, find the 3 nearest genes:
            nearest.name AS gene,
            nearest.distance
        FROM peaks
-       CROSS JOIN LATERAL NEAREST(genes, reference=peaks.position, k=3) AS nearest
+       CROSS JOIN LATERAL NEAREST(genes, reference=peaks.interval, k=3) AS nearest
        ORDER BY peaks.name, nearest.distance
    """)
 
@@ -134,7 +134,7 @@ Find nearest features within a maximum distance:
        FROM peaks
        CROSS JOIN LATERAL NEAREST(
            genes,
-           reference=peaks.position,
+           reference=peaks.interval,
            k=5,
            max_distance=100000
        ) AS nearest
@@ -162,7 +162,7 @@ Find nearest features on the same strand only:
        FROM peaks
        CROSS JOIN LATERAL NEAREST(
            genes,
-           reference=peaks.position,
+           reference=peaks.interval,
            k=3,
            stranded=true
        ) AS nearest
@@ -189,7 +189,7 @@ Find features upstream (5') of reference positions using signed distances:
        FROM peaks
        CROSS JOIN LATERAL NEAREST(
            genes,
-           reference=peaks.position,
+           reference=peaks.interval,
            k=10,
            signed=true
        ) AS nearest
@@ -219,7 +219,7 @@ Find features downstream (3') of reference positions:
        FROM peaks
        CROSS JOIN LATERAL NEAREST(
            genes,
-           reference=peaks.position,
+           reference=peaks.interval,
            k=10,
            signed=true
        ) AS nearest
@@ -244,7 +244,7 @@ Find features within a specific distance window around the reference:
        FROM peaks
        CROSS JOIN LATERAL NEAREST(
            genes,
-           reference=peaks.position,
+           reference=peaks.interval,
            k=10,
            signed=true
        ) AS nearest
@@ -272,7 +272,7 @@ Find nearby same-strand features:
        FROM peaks
        CROSS JOIN LATERAL NEAREST(
            genes,
-           reference=peaks.position,
+           reference=peaks.interval,
            k=5,
            max_distance=50000,
            stranded=true,
@@ -300,7 +300,7 @@ Calculate the average distance from peaks to their nearest gene:
                peaks.name AS peak,
                nearest.distance
            FROM peaks
-           CROSS JOIN LATERAL NEAREST(genes, reference=peaks.position, k=1) AS nearest
+           CROSS JOIN LATERAL NEAREST(genes, reference=peaks.interval, k=1) AS nearest
        )
        SELECT
            COUNT(*) AS peak_count,
@@ -326,7 +326,7 @@ Analyze distance patterns per chromosome:
                peaks.name AS peak,
                nearest.distance
            FROM peaks
-           CROSS JOIN LATERAL NEAREST(genes, reference=peaks.position, k=1) AS nearest
+           CROSS JOIN LATERAL NEAREST(genes, reference=peaks.interval, k=1) AS nearest
        )
        SELECT
            chromosome,

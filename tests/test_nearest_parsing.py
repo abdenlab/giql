@@ -140,7 +140,7 @@ class TestNearestParsing:
         SELECT * FROM peaks
         CROSS JOIN LATERAL NEAREST(
             genes,
-            reference=peaks.position,
+            reference=peaks.interval,
             k=5,
             max_distance=50000,
             stranded=true

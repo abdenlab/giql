@@ -29,13 +29,13 @@ def _setup_giql_engine(duckdb_connection):
     engine.register_table_schema(
         "intervals_a",
         schema,
-        genomic_column="position",
+        genomic_column="interval",
         interval_type="closed",  # Match bedtools distance calculation
     )
     engine.register_table_schema(
         "intervals_b",
         schema,
-        genomic_column="position",
+        genomic_column="interval",
         interval_type="closed",  # Match bedtools distance calculation
     )
 

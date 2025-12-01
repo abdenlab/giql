@@ -35,18 +35,18 @@ Syntax
 .. code-block:: sql
 
    -- With INTERSECTS
-   position INTERSECTS ANY('chr1:1000-2000', 'chr1:5000-6000', 'chr2:1000-3000')
+   interval INTERSECTS ANY('chr1:1000-2000', 'chr1:5000-6000', 'chr2:1000-3000')
 
    -- With CONTAINS
-   position CONTAINS ANY('chr1:1500', 'chr1:2500')
+   interval CONTAINS ANY('chr1:1500', 'chr1:2500')
 
    -- With WITHIN
-   position WITHIN ANY('chr1:0-10000', 'chr2:0-10000')
+   interval WITHIN ANY('chr1:0-10000', 'chr2:0-10000')
 
 Parameters
 ~~~~~~~~~~
 
-**position**
+**interval**
    A genomic column registered with the engine.
 
 **ranges**
@@ -69,7 +69,7 @@ Find variants in any of several regions of interest:
 
    cursor = engine.execute("""
        SELECT * FROM variants
-       WHERE position INTERSECTS ANY(
+       WHERE interval INTERSECTS ANY(
            'chr1:1000-2000',
            'chr1:5000-6000',
            'chr2:1000-3000'
@@ -84,7 +84,7 @@ Find features overlapping any of a set of promoter regions:
 
    cursor = engine.execute("""
        SELECT * FROM peaks
-       WHERE position INTERSECTS ANY(
+       WHERE interval INTERSECTS ANY(
            'chr1:11869-12869',   -- Gene A promoter
            'chr1:29554-30554',   -- Gene B promoter
            'chr1:69091-70091'    -- Gene C promoter
@@ -99,7 +99,7 @@ Filter by multiple regions and additional criteria:
 
    cursor = engine.execute("""
        SELECT * FROM variants
-       WHERE position INTERSECTS ANY('chr1:1000-2000', 'chr2:5000-6000')
+       WHERE interval INTERSECTS ANY('chr1:1000-2000', 'chr2:5000-6000')
          AND quality >= 30
          AND filter = 'PASS'
    """)
@@ -112,7 +112,7 @@ Query across different chromosomes efficiently:
 
    cursor = engine.execute("""
        SELECT * FROM features
-       WHERE position INTERSECTS ANY(
+       WHERE interval INTERSECTS ANY(
            'chr1:100000-200000',
            'chr2:100000-200000',
            'chr3:100000-200000',
@@ -181,15 +181,15 @@ Syntax
 .. code-block:: sql
 
    -- With CONTAINS
-   position CONTAINS ALL('chr1:1500', 'chr1:1600', 'chr1:1700')
+   interval CONTAINS ALL('chr1:1500', 'chr1:1600', 'chr1:1700')
 
    -- With INTERSECTS (less common, but valid)
-   position INTERSECTS ALL('chr1:1000-1100', 'chr1:1050-1150')
+   interval INTERSECTS ALL('chr1:1000-1100', 'chr1:1050-1150')
 
 Parameters
 ~~~~~~~~~~
 
-**position**
+**interval**
    A genomic column registered with the engine.
 
 **ranges**
@@ -212,7 +212,7 @@ Find genes that contain all specified SNP positions:
 
    cursor = engine.execute("""
        SELECT * FROM genes
-       WHERE position CONTAINS ALL(
+       WHERE interval CONTAINS ALL(
            'chr1:1500',
            'chr1:1600',
            'chr1:1700'
@@ -227,7 +227,7 @@ Find intervals that span a set of required positions:
 
    cursor = engine.execute("""
        SELECT * FROM features
-       WHERE position CONTAINS ALL(
+       WHERE interval CONTAINS ALL(
            'chr1:10000',
            'chr1:15000',
            'chr1:20000'
@@ -243,7 +243,7 @@ features in the intersection of multiple regions):
 
    cursor = engine.execute("""
        SELECT * FROM features
-       WHERE position INTERSECTS ALL(
+       WHERE interval INTERSECTS ALL(
            'chr1:1000-2000',
            'chr1:1500-2500'
        )
@@ -293,14 +293,14 @@ Use **ANY** when you want to find features that match at least one of several cr
 .. code-block:: python
 
    # Find variants in gene A OR gene B OR gene C
-   WHERE position INTERSECTS ANY('gene_a_region', 'gene_b_region', 'gene_c_region')
+   WHERE interval INTERSECTS ANY('gene_a_region', 'gene_b_region', 'gene_c_region')
 
 Use **ALL** when you want to find features that satisfy all criteria simultaneously:
 
 .. code-block:: python
 
    # Find features that contain ALL of these positions
-   WHERE position CONTAINS ALL('pos1', 'pos2', 'pos3')
+   WHERE interval CONTAINS ALL('pos1', 'pos2', 'pos3')
 
 Common Patterns
 ---------------
@@ -313,7 +313,7 @@ Find features that don't overlap any blacklisted region:
 
    cursor = engine.execute("""
        SELECT * FROM peaks
-       WHERE NOT position INTERSECTS ANY(
+       WHERE NOT interval INTERSECTS ANY(
            'chr1:1000000-2000000',  -- Centromere
            'chr1:5000000-5500000'   -- Known artifact region
        )
@@ -327,6 +327,6 @@ Complex queries can combine both quantifiers:
 
    cursor = engine.execute("""
        SELECT * FROM features
-       WHERE position INTERSECTS ANY('chr1:1000-2000', 'chr1:5000-6000')
-         AND position CONTAINS ALL('chr1:1100', 'chr1:1200')
+       WHERE interval INTERSECTS ANY('chr1:1000-2000', 'chr1:5000-6000')
+         AND interval CONTAINS ALL('chr1:1100', 'chr1:1200')
    """)

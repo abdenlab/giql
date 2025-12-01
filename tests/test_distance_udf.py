@@ -24,7 +24,7 @@ class TestDistanceCalculation:
         # Create a test query with DISTANCE()
         sql = """
         SELECT
-            DISTANCE(a.position, b.position) as distance
+            DISTANCE(a.interval, b.interval) as distance
         FROM
             (SELECT 'chr1' as chromosome, 100 as start_pos, 200 as end_pos) a
         CROSS JOIN
@@ -62,7 +62,7 @@ class TestDistanceCalculation:
         # Gap: 300 - 200 = 100 base pairs
         sql = """
         SELECT
-            DISTANCE(a.position, b.position) as distance
+            DISTANCE(a.interval, b.interval) as distance
         FROM
             (SELECT 'chr1' as chromosome, 100 as start_pos, 200 as end_pos) a
         CROSS JOIN
@@ -89,7 +89,7 @@ class TestDistanceCalculation:
         """
         sql = """
         SELECT
-            DISTANCE(a.position, b.position) as distance
+            DISTANCE(a.interval, b.interval) as distance
         FROM
             (SELECT 'chr1' as chromosome, 100 as start_pos, 200 as end_pos) a
         CROSS JOIN
@@ -120,7 +120,7 @@ class TestDistanceCalculation:
         # Interval B: chr1:200-300 (starts exactly where A ends)
         sql = """
         SELECT
-            DISTANCE(a.position, b.position) as distance
+            DISTANCE(a.interval, b.interval) as distance
         FROM
             (SELECT 'chr1' as chromosome, 100 as start_pos, 200 as end_pos) a
         CROSS JOIN
@@ -152,7 +152,7 @@ class TestDistanceCalculation:
         # Distance: 300 - 150 = 150
         sql = """
         SELECT
-            DISTANCE(a.position, b.position) as distance
+            DISTANCE(a.interval, b.interval) as distance
         FROM
             (SELECT 'chr1' as chromosome, 150 as start_pos, 150 as end_pos) a
         CROSS JOIN
@@ -183,7 +183,7 @@ class TestStrandedDistance:
         """
         sql = """
         SELECT
-            DISTANCE(a.position, b.position, stranded=true) as distance
+            DISTANCE(a.interval, b.interval, stranded=true) as distance
         FROM
             (SELECT 'chr1' as chromosome, 100 as start_pos, 200 as end_pos, '+' as strand) a
         CROSS JOIN
@@ -210,7 +210,7 @@ class TestStrandedDistance:
         """
         sql = """
         SELECT
-            DISTANCE(a.position, b.position, stranded=true) as distance
+            DISTANCE(a.interval, b.interval, stranded=true) as distance
         FROM
             (SELECT 'chr1' as chromosome, 100 as start_pos, 200 as end_pos, '-' as strand) a
         CROSS JOIN
@@ -237,7 +237,7 @@ class TestStrandedDistance:
         """
         sql = """
         SELECT
-            DISTANCE(a.position, b.position, stranded=true) as distance
+            DISTANCE(a.interval, b.interval, stranded=true) as distance
         FROM
             (SELECT 'chr1' as chromosome, 100 as start_pos, 200 as end_pos, '+' as strand) a
         CROSS JOIN
@@ -264,7 +264,7 @@ class TestStrandedDistance:
         """
         sql = """
         SELECT
-            DISTANCE(a.position, b.position, stranded=true) as distance
+            DISTANCE(a.interval, b.interval, stranded=true) as distance
         FROM
             (SELECT 'chr1' as chromosome, 100 as start_pos, 200 as end_pos, '-' as strand) a
         CROSS JOIN
@@ -291,7 +291,7 @@ class TestStrandedDistance:
         """
         sql = """
         SELECT
-            DISTANCE(a.position, b.position, stranded=true) as distance
+            DISTANCE(a.interval, b.interval, stranded=true) as distance
         FROM
             (SELECT 'chr1' as chromosome, 100 as start_pos, 200 as end_pos, '.' as strand) a
         CROSS JOIN
@@ -318,7 +318,7 @@ class TestStrandedDistance:
         """
         sql = """
         SELECT
-            DISTANCE(a.position, b.position, stranded=true) as distance
+            DISTANCE(a.interval, b.interval, stranded=true) as distance
         FROM
             (SELECT 'chr1' as chromosome, 100 as start_pos, 200 as end_pos, '?' as strand) a
         CROSS JOIN
@@ -345,7 +345,7 @@ class TestStrandedDistance:
         """
         sql = """
         SELECT
-            DISTANCE(a.position, b.position, stranded=true) as distance
+            DISTANCE(a.interval, b.interval, stranded=true) as distance
         FROM
             (SELECT 'chr1' as chromosome, 100 as start_pos, 200 as end_pos, NULL as strand) a
         CROSS JOIN
@@ -372,7 +372,7 @@ class TestStrandedDistance:
         """
         sql = """
         SELECT
-            DISTANCE(a.position, b.position, stranded=true) as distance
+            DISTANCE(a.interval, b.interval, stranded=true) as distance
         FROM
             (SELECT 'chr1' as chromosome, 100 as start_pos, 200 as end_pos, '-' as strand) a
         CROSS JOIN

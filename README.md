@@ -63,13 +63,13 @@ with GIQLEngine(target_dialect="duckdb") as engine:
             "start_pos": "BIGINT",
             "end_pos": "BIGINT",
         },
-        genomic_column="position",
+        genomic_column="interval",
     )
 
     # Query with genomic operators (returns cursor for streaming)
     cursor = engine.execute("""
         SELECT * FROM variants
-        WHERE position INTERSECTS 'chr1:1000-2000'
+        WHERE interval INTERSECTS 'chr1:1000-2000'
     """)
 
     # Process results lazily
@@ -79,7 +79,7 @@ with GIQLEngine(target_dialect="duckdb") as engine:
     # Or just transpile to SQL without executing
     sql = engine.transpile("""
         SELECT * FROM variants
-        WHERE position INTERSECTS 'chr1:1000-2000'
+        WHERE interval INTERSECTS 'chr1:1000-2000'
     """)
     print(sql)  # See the generated SQL
 ```
@@ -110,7 +110,7 @@ for table in ["features_a", "features_b"]:
             "score": "FLOAT",
             "strand": "VARCHAR",
         },
-        genomic_column="position",
+        genomic_column="interval",
     )
 ```
 
@@ -142,7 +142,7 @@ bedtools intersect -a file_a.bed -b file_b.bed
 cursor = engine.execute("""
     SELECT DISTINCT a.*
     FROM features_a a, features_b b
-    WHERE a.position INTERSECTS b.position
+    WHERE a.interval INTERSECTS b.interval
 """)
 ```
 
@@ -158,7 +158,7 @@ bedtools intersect -a file_a.bed -b file_b.bed -wa
 cursor = engine.execute("""
     SELECT a.*
     FROM features_a a, features_b b
-    WHERE a.position INTERSECTS b.position
+    WHERE a.interval INTERSECTS b.interval
 """)
 ```
 
@@ -174,7 +174,7 @@ bedtools intersect -a file_a.bed -b file_b.bed -wb
 cursor = engine.execute("""
     SELECT b.*
     FROM features_a a, features_b b
-    WHERE a.position INTERSECTS b.position
+    WHERE a.interval INTERSECTS b.interval
 """)
 ```
 
@@ -190,7 +190,7 @@ bedtools intersect -a file_a.bed -b file_b.bed -wa -wb
 cursor = engine.execute("""
     SELECT a.*, b.*
     FROM features_a a, features_b b
-    WHERE a.position INTERSECTS b.position
+    WHERE a.interval INTERSECTS b.interval
 """)
 ```
 
@@ -208,7 +208,7 @@ bedtools intersect -a file_a.bed -b file_b.bed -v
 cursor = engine.execute("""
     SELECT a.*
     FROM features_a a
-    LEFT JOIN features_b b ON a.position INTERSECTS b.position
+    LEFT JOIN features_b b ON a.interval INTERSECTS b.interval
     WHERE b.chromosome IS NULL
 """)
 ```
@@ -225,7 +225,7 @@ bedtools intersect -a file_a.bed -b file_b.bed -u
 cursor = engine.execute("""
     SELECT DISTINCT a.*
     FROM features_a a
-    INNER JOIN features_b b ON a.position INTERSECTS b.position
+    INNER JOIN features_b b ON a.interval INTERSECTS b.interval
 """)
 ```
 
@@ -243,7 +243,7 @@ bedtools intersect -a file_a.bed -b file_b.bed -c
 cursor = engine.execute("""
     SELECT a.*, COUNT(b.name) as overlap_count
     FROM features_a a
-    LEFT JOIN features_b b ON a.position INTERSECTS b.position
+    LEFT JOIN features_b b ON a.interval INTERSECTS b.interval
     GROUP BY a.chromosome, a.start_pos, a.end_pos, a.name, a.score, a.strand
 """)
 ```
@@ -262,7 +262,7 @@ bedtools intersect -a file_a.bed -b file_b.bed -s
 cursor = engine.execute("""
     SELECT a.*
     FROM features_a a, features_b b
-    WHERE a.position INTERSECTS b.position
+    WHERE a.interval INTERSECTS b.interval
       AND a.strand = b.strand
 """)
 ```
@@ -279,7 +279,7 @@ bedtools intersect -a file_a.bed -b file_b.bed -S
 cursor = engine.execute("""
     SELECT a.*
     FROM features_a a, features_b b
-    WHERE a.position INTERSECTS b.position
+    WHERE a.interval INTERSECTS b.interval
       AND a.strand != b.strand
       AND a.strand IN ('+', '-')
       AND b.strand IN ('+', '-')
@@ -300,7 +300,7 @@ bedtools intersect -a file_a.bed -b file_b.bed -f 0.5
 cursor = engine.execute("""
     SELECT a.*
     FROM features_a a, features_b b
-    WHERE a.position INTERSECTS b.position
+    WHERE a.interval INTERSECTS b.interval
       AND (
           LEAST(a.end_pos, b.end_pos) - GREATEST(a.start_pos, b.start_pos)
       ) >= 0.5 * (a.end_pos - a.start_pos)
@@ -319,7 +319,7 @@ bedtools intersect -a file_a.bed -b file_b.bed -F 0.5
 cursor = engine.execute("""
     SELECT a.*
     FROM features_a a, features_b b
-    WHERE a.position INTERSECTS b.position
+    WHERE a.interval INTERSECTS b.interval
       AND (
           LEAST(a.end_pos, b.end_pos) - GREATEST(a.start_pos, b.start_pos)
       ) >= 0.5 * (b.end_pos - b.start_pos)
@@ -343,7 +343,7 @@ cursor = engine.execute("""
             (a.end_pos - a.start_pos) as a_length,
             (b.end_pos - b.start_pos) as b_length
         FROM features_a a, features_b b
-        WHERE a.position INTERSECTS b.position
+        WHERE a.interval INTERSECTS b.interval
     )
     SELECT chromosome, start_pos, end_pos, name, score, strand
     FROM overlap_calcs
@@ -366,7 +366,7 @@ bedtools intersect -a file_a.bed -b file_b.bed -loj
 cursor = engine.execute("""
     SELECT a.*, b.*
     FROM features_a a
-    LEFT JOIN features_b b ON a.position INTERSECTS b.position
+    LEFT JOIN features_b b ON a.interval INTERSECTS b.interval
 """)
 ```
 
@@ -385,7 +385,7 @@ cursor = engine.execute("""
         b.*,
         (LEAST(a.end_pos, b.end_pos) - GREATEST(a.start_pos, b.start_pos)) as overlap_bp
     FROM features_a a, features_b b
-    WHERE a.position INTERSECTS b.position
+    WHERE a.interval INTERSECTS b.interval
 """)
 ```
 
@@ -407,7 +407,7 @@ cursor = engine.execute("""
             ELSE LEAST(a.end_pos, b.end_pos) - GREATEST(a.start_pos, b.start_pos)
         END as overlap_bp
     FROM features_a a
-    LEFT JOIN features_b b ON a.position INTERSECTS b.position
+    LEFT JOIN features_b b ON a.interval INTERSECTS b.interval
 """)
 ```
 
@@ -440,7 +440,7 @@ cursor = engine.execute("""
     )
     SELECT DISTINCT a.*
     FROM features_a a
-    INNER JOIN all_b_features b ON a.position INTERSECTS b.position
+    INNER JOIN all_b_features b ON a.interval INTERSECTS b.interval
 """)
 ```
 
@@ -458,7 +458,7 @@ bedtools intersect -a file_a.bed -b file_b.bed -c | awk '$NF >= 2'
 cursor = engine.execute("""
     SELECT a.*
     FROM features_a a
-    INNER JOIN features_b b ON a.position INTERSECTS b.position
+    INNER JOIN features_b b ON a.interval INTERSECTS b.interval
     GROUP BY a.chromosome, a.start_pos, a.end_pos, a.name, a.score, a.strand
     HAVING COUNT(*) >= 2
 """)
@@ -471,7 +471,7 @@ cursor = engine.execute("""
 cursor = engine.execute("""
     SELECT v.*, g.name as gene_name
     FROM variants v
-    INNER JOIN genes g ON v.position INTERSECTS g.position
+    INNER JOIN genes g ON v.interval INTERSECTS g.interval
     WHERE v.quality >= 30
       AND g.name IN ('BRCA1', 'BRCA2', 'TP53')
       AND v.chromosome = g.chromosome
@@ -490,7 +490,7 @@ cursor = engine.execute("""
         COUNT(b.name) as total_overlaps,
         AVG(LEAST(a.end_pos, b.end_pos) - GREATEST(a.start_pos, b.start_pos)) as avg_overlap_bp
     FROM features_a a
-    LEFT JOIN features_b b ON a.position INTERSECTS b.position
+    LEFT JOIN features_b b ON a.interval INTERSECTS b.interval
     GROUP BY a.chromosome
     ORDER BY a.chromosome
 """)
@@ -514,7 +514,7 @@ bedtools cluster -i features.bed
 cursor = engine.execute("""
     SELECT
         *,
-        CLUSTER(position) AS cluster_id
+        CLUSTER(interval) AS cluster_id
     FROM features
     ORDER BY chromosome, start_pos
 """)
@@ -532,7 +532,7 @@ bedtools cluster -i features.bed -d 1000
 cursor = engine.execute("""
     SELECT
         *,
-        CLUSTER(position, 1000) AS cluster_id
+        CLUSTER(interval, 1000) AS cluster_id
     FROM features
     ORDER BY chromosome, start_pos
 """)
@@ -550,7 +550,7 @@ bedtools cluster -i features.bed -s
 cursor = engine.execute("""
     SELECT
         *,
-        CLUSTER(position, stranded=true) AS cluster_id
+        CLUSTER(interval, stranded=true) AS cluster_id
     FROM features
     ORDER BY chromosome, start_pos
 """)
@@ -568,7 +568,7 @@ bedtools merge -i features.bed
 **GIQL:**
 ```python
 cursor = engine.execute("""
-    SELECT MERGE(position)
+    SELECT MERGE(interval)
     FROM features
 """)
 ```
@@ -585,7 +585,7 @@ bedtools merge -i features.bed -d 1000
 **GIQL:**
 ```python
 cursor = engine.execute("""
-    SELECT MERGE(position, 1000)
+    SELECT MERGE(interval, 1000)
     FROM features
 """)
 ```
@@ -600,7 +600,7 @@ bedtools merge -i features.bed -s
 **GIQL:**
 ```python
 cursor = engine.execute("""
-    SELECT MERGE(position, stranded=true)
+    SELECT MERGE(interval, stranded=true)
     FROM features
 """)
 ```
@@ -616,7 +616,7 @@ bedtools merge -i features.bed -c 1 -o count
 ```python
 cursor = engine.execute("""
     SELECT
-        MERGE(position),
+        MERGE(interval),
         COUNT(*) as feature_count
     FROM features
 """)
@@ -633,7 +633,7 @@ bedtools merge -i features.bed -c 5 -o mean
 ```python
 cursor = engine.execute("""
     SELECT
-        MERGE(position),
+        MERGE(interval),
         AVG(score) as avg_score
     FROM features
 """)
@@ -650,7 +650,7 @@ bedtools merge -i features.bed -c 4 -o collapse
 ```python
 cursor = engine.execute("""
     SELECT
-        MERGE(position),
+        MERGE(interval),
         STRING_AGG(name, ',') as feature_names
     FROM features
 """)
@@ -673,7 +673,7 @@ cursor = engine.execute("""
     SELECT
         a.name AS peak,
         b.name AS gene,
-        DISTANCE(a.position, b.position) AS distance
+        DISTANCE(a.interval, b.interval) AS distance
     FROM peaks a
     CROSS JOIN genes b
     WHERE a.chromosome = b.chromosome
@@ -707,7 +707,7 @@ cursor = engine.execute("""
         nearest.name AS gene,
         nearest.distance
     FROM peaks
-    CROSS JOIN LATERAL NEAREST(genes, reference=peaks.position, k=3) AS nearest
+    CROSS JOIN LATERAL NEAREST(genes, reference=peaks.interval, k=3) AS nearest
     ORDER BY peaks.name, nearest.distance
 """)
 ```
@@ -738,7 +738,7 @@ cursor = engine.execute("""
     FROM peaks
     CROSS JOIN LATERAL NEAREST(
         genes,
-        reference=peaks.position,
+        reference=peaks.interval,
         k=5,
         max_distance=100000
     ) AS nearest
@@ -769,7 +769,7 @@ cursor = engine.execute("""
     FROM peaks
     CROSS JOIN LATERAL NEAREST(
         genes,
-        reference=peaks.position,
+        reference=peaks.interval,
         k=3,
         stranded=true
     ) AS nearest
@@ -794,7 +794,7 @@ cursor = engine.execute("""
     FROM peaks
     CROSS JOIN LATERAL NEAREST(
         genes,
-        reference=peaks.position,
+        reference=peaks.interval,
         k=10,
         signed=true
     ) AS nearest
@@ -811,7 +811,7 @@ cursor = engine.execute("""
     FROM peaks
     CROSS JOIN LATERAL NEAREST(
         genes,
-        reference=peaks.position,
+        reference=peaks.interval,
         k=10,
         signed=true
     ) AS nearest
@@ -836,7 +836,7 @@ cursor = engine.execute("""
     FROM peaks
     CROSS JOIN LATERAL NEAREST(
         genes,
-        reference=peaks.position,
+        reference=peaks.interval,
         k=5,
         max_distance=50000,
         stranded=true,
@@ -875,7 +875,7 @@ with GIQLEngine(target_dialect="duckdb") as engine:
     # Transpile GIQL to target SQL dialect
     sql = engine.transpile("""
         SELECT * FROM variants
-        WHERE position INTERSECTS 'chr1:1000-2000'
+        WHERE interval INTERSECTS 'chr1:1000-2000'
     """)
 
     print(sql)
@@ -883,7 +883,7 @@ with GIQLEngine(target_dialect="duckdb") as engine:
 
 # Different dialects generate different SQL
 with GIQLEngine(target_dialect="sqlite") as engine:
-    sql = engine.transpile("SELECT * FROM variants WHERE position INTERSECTS 'chr1:1000-2000'")
+    sql = engine.transpile("SELECT * FROM variants WHERE interval INTERSECTS 'chr1:1000-2000'")
     # Generates SQLite-compatible SQL
 ```
 
