@@ -54,9 +54,13 @@ pixi.lock
 # specify
 specs/
 
+# claude
+CLAUDE.md
+
 # hidden
 .*
 
 # except for...
-!.gitignore
 !.coveragerc
+!.github
+!.gitignore
