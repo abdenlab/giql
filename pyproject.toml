@@ -10,7 +10,10 @@ requires = [
 ]
 
 [project]
-authors = [{ name = "Conrad Bzura", email = "conradbzura@gmail.com" }]
+authors = [
+    { name = "Nezar Abdennur", email = "nabdennur@gmail.com " },
+    { name = "Conrad Bzura", email = "conradbzura@gmail.com" },
+]
 dependencies = [
     "click>=8.3.0",
     "duckdb>=1.4.0",
@@ -22,6 +25,10 @@ dependencies = [
 ]
 description = "Genomic Interval Query Language - SQL dialect for genomic range queries"
 dynamic = ["version"]
+maintainers = [
+    { name = "Nezar Abdennur", email = "nabdennur@gmail.com " },
+    { name = "Conrad Bzura", email = "conradbzura@gmail.com" },
+]
 name = "giql"
 readme = "README.md"
 requires-python = ">=3.11"
