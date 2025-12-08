@@ -2,9 +2,6 @@
 
 A SQL dialect for genomic range queries with multi-database support.
 
-## Status
-
-WIP
 
 ## Overview
 
@@ -24,13 +21,27 @@ GIQL provides a familiar SQL syntax for bioinformatics workflows, allowing you t
 
 ## Installation
 
+### From PyPI
+
+Install the latest stable release:
+
+```bash
+pip install giql
+```
+
+Or the latest release candidate:
+
+```bash
+pip install --pre giql
+```
+
 ### From Source
 
 Clone the repository and install locally:
 
 ```bash
 # Clone the repository
-git clone https://github.com/abdennlab/giql.git
+git clone https://github.com/abdenlab/giql.git
 cd giql
 
 # Install in development mode
