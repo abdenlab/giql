@@ -1,0 +1,124 @@
+name: Publish release
+description: Tag, build, and publish a release or release-candidate on PR merge.
+
+on:
+  pull_request:
+    branches:
+      - master
+      - release
+    types:
+      - closed
+    paths:
+      - src/**
+      - pyproject.toml
+
+jobs:
+  bump-version:
+    name: Bump version
+    runs-on: ubuntu-latest
+    if: ${{ github.event.pull_request.merged == true }}
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.bump-version.outputs.version }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.MY_TOKEN }}
+          ref: ${{ github.head_ref }}
+      - name: Determine version segment to bump
+        id: determine-version-segment
+        run: |
+          case ${{ github.base_ref }} in
+            master)
+              case ${{ github.head_ref }} in
+                release)
+                  echo "segment=minor" >> $GITHUB_OUTPUT
+                  ;;
+                *)
+                  echo "segment=patch" >> $GITHUB_OUTPUT
+                  ;;
+              esac
+              ;;
+            release)
+              echo "segment=patch" >> $GITHUB_OUTPUT
+              ;;
+            *)
+              echo "Error: Unsupported base branch ${{ github.base_ref }}" >&2
+              exit 1
+              ;;
+          esac
+      - name: Bump version
+        id: bump-version
+        run: |
+          git fetch --unshallow
+          old_version=$(git describe --tags --abbrev=0)
+          new_version=$(.github/scripts/bump-version.sh ${{ steps.determine-version-segment.outputs.segment }} $old_version)
+          echo "Bumping $old_version to $new_version"
+          echo "version=$new_version" >> $GITHUB_OUTPUT
+
+  tag-version:
+    name: Tag version
+    needs: bump-version
+    runs-on: ubuntu-latest
+    if: ${{ github.event.pull_request.merged == true }}
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.MY_TOKEN }}
+      - name: Create tag
+        id: create-tag
+        run: |
+          new_version=${{ needs.bump-version.outputs.version }}
+          echo "Tagging $new_version"
+          git tag $new_version
+          git push origin $new_version
+          echo "version=$new_version" >> $GITHUB_OUTPUT
+
+  build-release:
+    name: Build release
+    needs: 
+      - bump-version
+      - tag-version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/build-release
+        with:
+          version: ${{ needs.bump-version.outputs.version }}
+      
+  publish-github-release:
+    name: Publish release to GitHub
+    needs:
+      - bump-version
+      - tag-version
+      - build-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/publish-github-release
+        with:
+          version: ${{ needs.bump-version.outputs.version }}
+
+  publish-pypi-release:
+    name: Publish release to PyPI
+    needs:
+      - bump-version
+      - tag-version
+      - build-release
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/publish-pypi-release
+        with:
+          version: ${{ needs.bump-version.outputs.version }}
+          pypi-token: ${{ secrets.PYPI_TOKEN }}
