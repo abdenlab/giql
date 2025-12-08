@@ -23,5 +23,7 @@ jobs:
         uses: prefix-dev/setup-pixi@v0.8.1
       - name: Install pixi dependencies
         run: pixi install
+      - name: Install package in development mode
+        run: pixi run pip install -e .
       - name: Run tests
         run: pixi run pytest tests
