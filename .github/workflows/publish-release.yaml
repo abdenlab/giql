@@ -122,3 +122,24 @@ jobs:
         with:
           version: ${{ needs.bump-version.outputs.version }}
           pypi-token: ${{ secrets.PYPI_TOKEN }}
+
+  drop-release:
+    name: Drop release
+    needs: build-release
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.merged == true && github.head_ref == 'release' && github.base_ref == 'master'
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.MY_TOKEN }}
+      - name: Drop release branch
+        run: |
+          git fetch --unshallow
+          if [[ -n $(git ls-remote --heads origin release) ]]; then
+            git push origin --delete release
+          else
+            echo "Release branch not found, skipping."
+          fi
