@@ -53,7 +53,7 @@ jobs:
         id: bump-version
         run: |
           git fetch --unshallow
-          old_version=$(git describe --tags --abbrev=0)
+          old_version=$(git describe --tags $(git rev-list --tags --max-count=1))
           new_version=$(.github/scripts/bump-version.sh ${{ steps.determine-version-segment.outputs.segment }} $old_version)
           echo "Bumping $old_version to $new_version"
           echo "version=$new_version" >> $GITHUB_OUTPUT
