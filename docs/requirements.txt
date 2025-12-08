@@ -1,0 +1,8 @@
+# Sphinx and extensions
+sphinx>=7.0.0
+sphinx-rtd-theme>=2.0.0
+sphinx-autodoc-typehints>=1.25.0
+
+# Project dependencies needed for autodoc
+sqlglot>=23.0.0
+pandas>=2.0.0
