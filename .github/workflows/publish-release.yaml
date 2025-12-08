@@ -13,14 +13,14 @@ on:
       - pyproject.toml
 
 jobs:
-  tag-version:
-    name: Tag version
+  bump-version:
+    name: Bump version
     runs-on: ubuntu-latest
     if: ${{ github.event.pull_request.merged == true }}
     permissions:
       contents: write
     outputs:
-      version: ${{ steps.create-tag.outputs.version }}
+      version: ${{ steps.bump-version.outputs.version }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -49,30 +49,52 @@ jobs:
               exit 1
               ;;
           esac
-      - name: Create tag
-        id: create-tag
+      - name: Bump version
+        id: bump-version
         run: |
           git fetch --unshallow
           old_version=$(git describe --tags --abbrev=0)
           new_version=$(.github/scripts/bump-version.sh ${{ steps.determine-version-segment.outputs.segment }} $old_version)
           echo "Bumping $old_version to $new_version"
+          echo "version=$new_version" >> $GITHUB_OUTPUT
+
+  tag-version:
+    name: Tag version
+    needs: bump-version
+    runs-on: ubuntu-latest
+    if: ${{ github.event.pull_request.merged == true }}
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.MY_TOKEN }}
+      - name: Create tag
+        id: create-tag
+        run: |
+          new_version=${{ needs.bump-version.outputs.version }}
+          echo "Tagging $new_version"
           git tag $new_version
           git push origin $new_version
           echo "version=$new_version" >> $GITHUB_OUTPUT
 
   build-release:
     name: Build release
-    needs: tag-version
+    needs: 
+      - bump-version
+      - tag-version
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/build-release
         with:
-          version: ${{ needs.tag-version.outputs.version }}
+          version: ${{ needs.bump-version.outputs.version }}
       
   publish-github-release:
     name: Publish release to GitHub
     needs:
+      - bump-version
       - tag-version
       - build-release
     runs-on: ubuntu-latest
@@ -83,11 +105,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/publish-github-release
         with:
-          version: ${{ needs.tag-version.outputs.version }}
+          version: ${{ needs.bump-version.outputs.version }}
 
   publish-pypi-release:
     name: Publish release to PyPI
     needs:
+      - bump-version
       - tag-version
       - build-release
     runs-on: ubuntu-latest
@@ -97,5 +120,5 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/publish-pypi-release
         with:
-          version: ${{ needs.tag-version.outputs.version }}
+          version: ${{ needs.bump-version.outputs.version }}
           pypi-token: ${{ secrets.PYPI_TOKEN }}
