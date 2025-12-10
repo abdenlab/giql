@@ -64,3 +64,4 @@ CLAUDE.md
 !.coveragerc
 !.github
 !.gitignore
+!.readthedocs.yaml
