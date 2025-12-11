@@ -3,8 +3,7 @@ GIQL - Genomic Interval Query Language
 
 **GIQL** is a SQL dialect for genomic range queries with multi-database support.
 
-GIQL extends SQL with spatial operators for genomic interval queries. It transpiles
-to standard SQL that works across multiple database backends including DuckDB and SQLite.
+Genomic analysis often requires repetitive, complex SQL patterns to express simple operations like finding overlapping intervals or merging features. GIQL extends SQL with dedicated operators for these common tasks, so you can declaratively express _what_ you want to compute without getting lost in SQL boilerplate. GIQL queries read naturally, even without SQL expertise - this clarity makes your analysis code easier to review and share. Best of all, GIQL queries work across DuckDB, SQLite, PostgreSQL, and other databases, so you're never locked into a specific engine and can choose the tool that fits your use case. Finally, GIQL operators follow established conventions from tools like bedtools, so the semantics are familiar and predictable.
 
 .. toctree::
    :maxdepth: 2
@@ -34,7 +33,6 @@ to standard SQL that works across multiple database backends including DuckDB an
    :maxdepth: 2
    :caption: Reference
 
-   reference/operator-matrix
    reference/syntax-reference
    reference/changelog
    api/index
