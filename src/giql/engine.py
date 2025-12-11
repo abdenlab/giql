@@ -40,6 +40,7 @@ class GIQLEngine:
     Query a pandas DataFrame with DuckDB::
 
         import pandas as pd
+        from giql import GIQLEngine
 
         df = pd.DataFrame(
             {
