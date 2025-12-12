@@ -34,7 +34,6 @@ Genomic analysis often requires repetitive, complex SQL patterns to express simp
    :caption: Reference
 
    reference/syntax-reference
-   reference/changelog
    api/index
 
 Quick Start
