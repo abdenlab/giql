@@ -151,6 +151,9 @@ class BaseGIQLGenerator(Generator):
         stranded = expression.args.get("stranded")
         is_stranded = stranded and str(stranded).lower() in ("true", "1")
 
+        signed = expression.args.get("signed")
+        is_signed = signed and str(signed).lower() in ("true", "1")
+
         # Resolve strand columns if stranded mode
         ref_strand = None
         target_strand = None
@@ -227,6 +230,7 @@ class BaseGIQLGenerator(Generator):
             target_strand,
             stranded=is_stranded,
             add_one_for_gap=add_one,
+            signed=is_signed,
         )
 
         # Use absolute distance for ordering and filtering
@@ -305,6 +309,17 @@ class BaseGIQLGenerator(Generator):
             else:
                 stranded = str(stranded_expr).upper() in ("TRUE", "1", "YES")
 
+        # Extract signed parameter
+        signed_expr = expression.args.get("signed")
+        signed = False
+        if signed_expr:
+            if isinstance(signed_expr, exp.Boolean):
+                signed = signed_expr.this
+            elif isinstance(signed_expr, exp.Literal):
+                signed = str(signed_expr.this).upper() == "TRUE"
+            else:
+                signed = str(signed_expr).upper() in ("TRUE", "1", "YES")
+
         # Get SQL representations
         interval_a_sql = self.sql(interval_a)
         interval_b_sql = self.sql(interval_b)
@@ -374,6 +389,7 @@ class BaseGIQLGenerator(Generator):
             strand_b,
             stranded=stranded,
             add_one_for_gap=add_one,
+            signed=signed,
         )
 
     def _generate_distance_case(
@@ -388,6 +404,7 @@ class BaseGIQLGenerator(Generator):
         strand_b: str | None,
         stranded: bool = False,
         add_one_for_gap: bool = False,
+        signed: bool = False,
     ) -> str:
         """Generate SQL CASE expression for distance calculation.
 
@@ -401,6 +418,7 @@ class BaseGIQLGenerator(Generator):
         :param strand_b: Strand column for interval B (None if not stranded)
         :param stranded: Whether to use strand-aware distance calculation
         :param add_one_for_gap: Whether to add 1 to non-overlapping distance (bedtools compatibility)
+        :param signed: Whether to return signed distance (negative for upstream, positive for downstream)
         :return: SQL CASE expression
         """
         # Distance adjustment for non-overlapping intervals
@@ -408,12 +426,55 @@ class BaseGIQLGenerator(Generator):
 
         if not stranded or strand_a is None or strand_b is None:
             # Basic distance calculation without strand awareness
-            return f"""CASE WHEN {chrom_a} != {chrom_b} THEN NULL WHEN {start_a} < {end_b} AND {end_a} > {start_b} THEN 0 WHEN {end_a} <= {start_b} THEN ({start_b} - {end_a}{gap_adj}) ELSE ({start_a} - {end_b}{gap_adj}) END"""
+            if signed:
+                # Signed distance: negative for upstream (B before A),
+                # positive for downstream (B after A)
+                return (
+                    f"CASE WHEN {chrom_a} != {chrom_b} THEN NULL "
+                    f"WHEN {start_a} < {end_b} AND {end_a} > {start_b} THEN 0 "
+                    f"WHEN {end_a} <= {start_b} THEN ({start_b} - {end_a}{gap_adj}) "
+                    f"ELSE -({start_a} - {end_b}{gap_adj}) END"
+                )
+            # Unsigned (absolute) distance
+            return (
+                f"CASE WHEN {chrom_a} != {chrom_b} THEN NULL "
+                f"WHEN {start_a} < {end_b} AND {end_a} > {start_b} THEN 0 "
+                f"WHEN {end_a} <= {start_b} THEN ({start_b} - {end_a}{gap_adj}) "
+                f"ELSE ({start_a} - {end_b}{gap_adj}) END"
+            )
 
         # Stranded distance calculation
         # Return NULL if either strand is '.', '?', or NULL
         # Calculate distance and multiply by -1 if first interval is on '-' strand
-        return f"""CASE WHEN {chrom_a} != {chrom_b} THEN NULL WHEN {strand_a} IS NULL OR {strand_b} IS NULL THEN NULL WHEN {strand_a} = '.' OR {strand_a} = '?' THEN NULL WHEN {strand_b} = '.' OR {strand_b} = '?' THEN NULL WHEN {start_a} < {end_b} AND {end_a} > {start_b} THEN 0 WHEN {end_a} <= {start_b} THEN CASE WHEN {strand_a} = '-' THEN -({start_b} - {end_a}{gap_adj}) ELSE ({start_b} - {end_a}{gap_adj}) END ELSE CASE WHEN {strand_a} = '-' THEN -({start_a} - {end_b}{gap_adj}) ELSE ({start_a} - {end_b}{gap_adj}) END END"""
+        if signed:
+            # Stranded + signed: apply strand flip AND directional sign
+            return (
+                f"CASE WHEN {chrom_a} != {chrom_b} THEN NULL "
+                f"WHEN {strand_a} IS NULL OR {strand_b} IS NULL THEN NULL "
+                f"WHEN {strand_a} = '.' OR {strand_a} = '?' THEN NULL "
+                f"WHEN {strand_b} = '.' OR {strand_b} = '?' THEN NULL "
+                f"WHEN {start_a} < {end_b} AND {end_a} > {start_b} THEN 0 "
+                f"WHEN {end_a} <= {start_b} THEN "
+                f"CASE WHEN {strand_a} = '-' THEN -({start_b} - {end_a}{gap_adj}) "
+                f"ELSE ({start_b} - {end_a}{gap_adj}) END "
+                f"ELSE "
+                f"CASE WHEN {strand_a} = '-' THEN ({start_a} - {end_b}{gap_adj}) "
+                f"ELSE -({start_a} - {end_b}{gap_adj}) END END"
+            )
+        # Stranded but not signed: apply strand flip only
+        return (
+            f"CASE WHEN {chrom_a} != {chrom_b} THEN NULL "
+            f"WHEN {strand_a} IS NULL OR {strand_b} IS NULL THEN NULL "
+            f"WHEN {strand_a} = '.' OR {strand_a} = '?' THEN NULL "
+            f"WHEN {strand_b} = '.' OR {strand_b} = '?' THEN NULL "
+            f"WHEN {start_a} < {end_b} AND {end_a} > {start_b} THEN 0 "
+            f"WHEN {end_a} <= {start_b} THEN "
+            f"CASE WHEN {strand_a} = '-' THEN -({start_b} - {end_a}{gap_adj}) "
+            f"ELSE ({start_b} - {end_a}{gap_adj}) END "
+            f"ELSE "
+            f"CASE WHEN {strand_a} = '-' THEN -({start_a} - {end_b}{gap_adj}) "
+            f"ELSE ({start_a} - {end_b}{gap_adj}) END END"
+        )
 
     def _generate_spatial_op(self, expression: exp.Binary, op_type: str) -> str:
         """Generate SQL for a spatial operation.

@@ -155,6 +155,35 @@ class TestNearestTranspilationDuckDB:
         assert "strand" in output.lower()
         assert "LIMIT 3" in output
 
+    def test_nearest_with_signed_duckdb(self, schema_with_peaks_and_genes):
+        """
+        GIVEN a GIQL query with NEAREST(genes, k=3, signed=true)
+        WHEN transpiling to DuckDB SQL
+        THEN should generate SQL with signed distance column
+            (negative for upstream, positive for downstream)
+        """
+        sql = """
+        SELECT *
+        FROM peaks
+        CROSS JOIN LATERAL NEAREST(genes, reference=peaks.interval, k=3, signed=true)
+        """
+
+        ast = parse_one(sql, dialect=GIQLDialect)
+        generator = GIQLDuckDBGenerator(schema_info=schema_with_peaks_and_genes)
+        output = generator.generate(ast)
+
+        # Expectations:
+        # - LATERAL subquery
+        # - Signed distance calculation (includes negation for upstream)
+        # - LIMIT 3
+        assert "LATERAL" in output.upper()
+        assert "LIMIT 3" in output
+        # Check for signed distance: the ELSE branch should have a negation
+        # for upstream features (B before A)
+        assert "ELSE -(" in output, (
+            f"Expected signed distance with negation for upstream, got:\n{output}"
+        )
+
 
 # PostgreSQL uses same generator as base for now
 # class TestNearestTranspilationPostgreSQL:
