@@ -70,3 +70,31 @@ class TestDistanceTranspilation:
         expected = """SELECT CASE WHEN a."chromosome" != b."chromosome" THEN NULL WHEN a."start_pos" < b."end_pos" AND a."end_pos" > b."start_pos" THEN 0 WHEN a."end_pos" <= b."start_pos" THEN (b."start_pos" - a."end_pos") ELSE (a."start_pos" - b."end_pos") END AS dist FROM features_a AS a CROSS JOIN features_b AS b"""
 
         assert output == expected, f"Expected:\n{expected}\n\nGot:\n{output}"
+
+    def test_distance_transpilation_signed_duckdb(self):
+        """
+        GIVEN a GIQL query with DISTANCE(..., signed=true)
+        WHEN transpiling to DuckDB SQL
+        THEN should generate CASE expression with signed distances
+            (negative for upstream, positive for downstream)
+        """
+        sql = """
+        SELECT DISTANCE(a.interval, b.interval, signed=true) as dist
+        FROM features_a a CROSS JOIN features_b b
+        """
+
+        ast = parse_one(sql, dialect=GIQLDialect)
+        generator = GIQLDuckDBGenerator()
+        output = generator.generate(ast)
+
+        # Signed distance: upstream (B before A) returns negative,
+        # downstream (B after A) returns positive
+        expected = (
+            'SELECT CASE WHEN a."chromosome" != b."chromosome" THEN NULL '
+            'WHEN a."start_pos" < b."end_pos" AND a."end_pos" > b."start_pos" THEN 0 '
+            'WHEN a."end_pos" <= b."start_pos" THEN (b."start_pos" - a."end_pos") '
+            'ELSE -(a."start_pos" - b."end_pos") END AS dist '
+            "FROM features_a AS a CROSS JOIN features_b AS b"
+        )
+
+        assert output == expected, f"Expected:\n{expected}\n\nGot:\n{output}"

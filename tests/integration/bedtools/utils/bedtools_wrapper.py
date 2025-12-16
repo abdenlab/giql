@@ -146,6 +146,7 @@ def closest(
     intervals_b: List[Tuple],
     strand_mode: str | None = None,
     k: int = 1,
+    signed: bool = False,
 ) -> List[Tuple]:
     """Find closest intervals using bedtools closest.
 
@@ -154,6 +155,8 @@ def closest(
         intervals_b: Database intervals to search
         strand_mode: Strand requirement ('same', 'opposite', or None for ignore)
         k: Number of closest intervals to report (default: 1)
+        signed: If True, return signed distances (negative for upstream B,
+                positive for downstream B). Uses bedtools -D ref mode.
 
     Returns:
         List of tuples with format: (a_fields..., b_fields..., distance)
@@ -173,7 +176,14 @@ def closest(
         bt_b = bt_b.sort()
 
         # Build kwargs for closest
-        kwargs = {"d": True, "t": "first"}  # Report distance, break ties by taking first
+        # -d reports unsigned distance, -D ref reports signed distance
+        if signed:
+            # Use -D ref for signed distance relative to reference (A)
+            # Negative = B is upstream of A, Positive = B is downstream of A
+            kwargs = {"D": "ref", "t": "first"}
+        else:
+            kwargs = {"d": True, "t": "first"}
+
         if k > 1:
             kwargs["k"] = k
         if strand_mode == "same":
