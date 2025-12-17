@@ -1,14 +1,3 @@
-"""Base generator that outputs standard SQL.
-
-Works with any SQL database that supports:
-- Basic comparison operators (<, >, =, AND, OR)
-- String literals
-- Numeric comparisons
-
-This generator uses only SQL-92 compatible constructs, ensuring compatibility
-with virtually all SQL databases.
-"""
-
 from typing import Optional
 
 from sqlglot import exp
@@ -30,15 +19,34 @@ from giql.schema import SchemaInfo
 
 
 class BaseGIQLGenerator(Generator):
-    """Base generator for standard SQL output.
+    """Base generator that outputs standard SQL.
 
-    This generator uses only SQL-92 compatible constructs,
-    ensuring compatibility with virtually all SQL databases.
+    Works with any SQL database that supports:
+
+    - Basic comparison operators (<, >, =, AND, OR)
+    - String literals
+    - Numeric comparisons
+
+    This generator uses only SQL-92 compatible constructs, ensuring
+    compatibility with virtually all SQL databases.
     """
 
     # Most databases support LATERAL joins (PostgreSQL 9.3+, DuckDB 0.7.0+)
     # SQLite does not support LATERAL, so it overrides this to False
     SUPPORTS_LATERAL = True
+
+    @staticmethod
+    def _extract_bool_param(param_expr: Optional[exp.Expression]) -> bool:
+        """Extract boolean value from a parameter expression.
+
+        Handles exp.Boolean, exp.Literal, and string representations.
+        """
+        if not param_expr:
+            return False
+        elif isinstance(param_expr, exp.Boolean):
+            return param_expr.this
+        else:
+            return str(param_expr).upper() in ("TRUE", "1", "YES")
 
     def __init__(self, schema_info: Optional[SchemaInfo] = None, **kwargs):
         super().__init__(**kwargs)
@@ -148,11 +156,8 @@ class BaseGIQLGenerator(Generator):
         max_distance = expression.args.get("max_distance")
         max_dist_value = int(str(max_distance)) if max_distance else None
 
-        stranded = expression.args.get("stranded")
-        is_stranded = stranded and str(stranded).lower() in ("true", "1")
-
-        signed = expression.args.get("signed")
-        is_signed = signed and str(signed).lower() in ("true", "1")
+        is_stranded = self._extract_bool_param(expression.args.get("stranded"))
+        is_signed = self._extract_bool_param(expression.args.get("signed"))
 
         # Resolve strand columns if stranded mode
         ref_strand = None
@@ -298,27 +303,8 @@ class BaseGIQLGenerator(Generator):
         interval_a = expression.this
         interval_b = expression.args.get("expression")
 
-        # Extract stranded parameter
-        stranded_expr = expression.args.get("stranded")
-        stranded = False
-        if stranded_expr:
-            if isinstance(stranded_expr, exp.Boolean):
-                stranded = stranded_expr.this
-            elif isinstance(stranded_expr, exp.Literal):
-                stranded = str(stranded_expr.this).upper() == "TRUE"
-            else:
-                stranded = str(stranded_expr).upper() in ("TRUE", "1", "YES")
-
-        # Extract signed parameter
-        signed_expr = expression.args.get("signed")
-        signed = False
-        if signed_expr:
-            if isinstance(signed_expr, exp.Boolean):
-                signed = signed_expr.this
-            elif isinstance(signed_expr, exp.Literal):
-                signed = str(signed_expr.this).upper() == "TRUE"
-            else:
-                signed = str(signed_expr).upper() in ("TRUE", "1", "YES")
+        stranded = self._extract_bool_param(expression.args.get("stranded"))
+        signed = self._extract_bool_param(expression.args.get("signed"))
 
         # Get SQL representations
         interval_a_sql = self.sql(interval_a)
@@ -408,18 +394,31 @@ class BaseGIQLGenerator(Generator):
     ) -> str:
         """Generate SQL CASE expression for distance calculation.
 
-        :param chrom_a: Chromosome column for interval A
-        :param start_a: Start column for interval A
-        :param end_a: End column for interval A
-        :param strand_a: Strand column for interval A (None if not stranded)
-        :param chrom_b: Chromosome column for interval B
-        :param start_b: Start column for interval B
-        :param end_b: End column for interval B
-        :param strand_b: Strand column for interval B (None if not stranded)
-        :param stranded: Whether to use strand-aware distance calculation
-        :param add_one_for_gap: Whether to add 1 to non-overlapping distance (bedtools compatibility)
-        :param signed: Whether to return signed distance (negative for upstream, positive for downstream)
-        :return: SQL CASE expression
+        :param chrom_a:
+            Chromosome column for interval A
+        :param start_a:
+            Start column for interval A
+        :param end_a:
+            End column for interval A
+        :param strand_a:
+            Strand column for interval A (None if not stranded)
+        :param chrom_b:
+            Chromosome column for interval B
+        :param start_b:
+            Start column for interval B
+        :param end_b:
+            End column for interval B
+        :param strand_b:
+            Strand column for interval B (None if not stranded)
+        :param stranded:
+            Whether to use strand-aware distance calculation
+        :param add_one_for_gap:
+            Whether to add 1 to non-overlapping distance (bedtools compatibility)
+        :param signed:
+            Whether to return signed distance (negative for upstream, positive for
+            downstream)
+        :return:
+            SQL CASE expression
         """
         # Distance adjustment for non-overlapping intervals
         gap_adj = " + 1" if add_one_for_gap else ""
@@ -828,12 +827,6 @@ class BaseGIQLGenerator(Generator):
         else:
             # Try to extract as string
             table_name = str(target)
-
-        # Look up table in schema
-        if not self.schema_info:
-            raise ValueError(
-                f"Cannot resolve target table '{table_name}': schema_info not available"
-            )
 
         table_schema = self.schema_info.get_table(table_name)
         if not table_schema:
