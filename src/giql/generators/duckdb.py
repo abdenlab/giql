@@ -18,5 +18,4 @@ class GIQLDuckDBGenerator(BaseGIQLGenerator, DuckDB.Generator):
     """
 
     def __init__(self, schema_info=None, **kwargs):
-        BaseGIQLGenerator.__init__(self, schema_info=schema_info, **kwargs)
-        DuckDB.Generator.__init__(self, **kwargs)
+        super().__init__(schema_info=schema_info, **kwargs)

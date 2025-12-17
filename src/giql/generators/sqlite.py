@@ -21,5 +21,4 @@ class GIQLSQLiteGenerator(BaseGIQLGenerator, SQLite.Generator):
     SUPPORTS_LATERAL = False
 
     def __init__(self, schema_info=None, **kwargs):
-        BaseGIQLGenerator.__init__(self, schema_info=schema_info, **kwargs)
-        SQLite.Generator.__init__(self, **kwargs)
+        super().__init__(schema_info=schema_info, **kwargs)
