@@ -327,7 +327,9 @@ def test_nearest_signed_distance(duckdb_connection):
 
     # Verify the distance is negative (upstream)
     assert giql_distance < 0, f"Expected negative distance, got {giql_distance}"
-    assert bedtools_distance < 0, f"Expected negative bedtools distance, got {bedtools_distance}"
+    assert bedtools_distance < 0, (
+        f"Expected negative bedtools distance, got {bedtools_distance}"
+    )
 
     # Verify distances match
     assert giql_distance == bedtools_distance, (
