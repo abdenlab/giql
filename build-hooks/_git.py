@@ -1,5 +1,6 @@
 import git
-from _version import PythonicVersion, parser
+from _version import PythonicVersion
+from _version import parser
 
 
 @parser("git")

@@ -1,8 +1,4 @@
-"""SQLite-specific generator.
-
-This module provides SQLite-specific SQL generation for GIQL queries.
-SQLite does not support LATERAL joins, so NEAREST uses window functions instead.
-"""
+from typing import Final
 
 from sqlglot.dialects.sqlite import SQLite
 
@@ -12,14 +8,17 @@ from giql.generators.base import BaseGIQLGenerator
 class GIQLSQLiteGenerator(BaseGIQLGenerator, SQLite.Generator):
     """SQLite-specific SQL generator.
 
-    Key differences from other dialects:
-    - No LATERAL join support - uses window functions for NEAREST
-    - Window functions available since SQLite 3.25.0 (2018-09-15)
+    SQLite does not support LATERAL joins, so correlated NEAREST queries
+    (without explicit reference) will raise an error. Use standalone mode
+    with an explicit reference parameter instead.
+
+    Example::
+
+        -- This works (standalone mode with explicit reference):
+        SELECT * FROM NEAREST(genes, reference='chr1:1000-2000', k=3)
+
+        -- This fails (correlated mode requires LATERAL):
+        SELECT * FROM peaks CROSS JOIN LATERAL NEAREST(genes, k=3)
     """
 
-    # SQLite does not support LATERAL joins
-    SUPPORTS_LATERAL = False
-
-    def __init__(self, schema_info=None, **kwargs):
-        BaseGIQLGenerator.__init__(self, schema_info=schema_info, **kwargs)
-        SQLite.Generator.__init__(self, **kwargs)
+    SUPPORTS_LATERAL: Final = False
