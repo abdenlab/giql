@@ -11,125 +11,45 @@ from hypothesis import strategies as st
 from sqlglot import exp
 from sqlglot import parse_one
 
+from giql import Table
 from giql.dialect import GIQLDialect
 from giql.expressions import GIQLNearest
 from giql.generators import BaseGIQLGenerator
-from giql.range_parser import IntervalType
-from giql.schema import ColumnInfo
-from giql.schema import SchemaInfo
-from giql.schema import TableSchema
+from giql.table import Tables
 
 
 @pytest.fixture
-def schema_info():
-    """Basic SchemaInfo with a single table containing genomic columns."""
-    schema = SchemaInfo()
-    table = TableSchema(name="variants", columns={})
-    table.columns["id"] = ColumnInfo(name="id", type="INTEGER")
-    table.columns["interval"] = ColumnInfo(
-        name="interval",
-        type="VARCHAR",
-        is_genomic=True,
-        chrom_col="chromosome",
-        start_col="start_pos",
-        end_col="end_pos",
-        strand_col="strand",
-    )
-    schema.tables["variants"] = table
-    return schema
+def tables_info():
+    """Basic Tables with a single table containing genomic columns."""
+    tables = Tables()
+    tables.register("variants", Table())
+    return tables
 
 
 @pytest.fixture
-def schema_with_two_tables():
-    """SchemaInfo with two tables for column-to-column tests."""
-    schema = SchemaInfo()
-
-    # Table A
-    table_a = TableSchema(name="features_a", columns={})
-    table_a.columns["id"] = ColumnInfo(name="id", type="INTEGER")
-    table_a.columns["interval"] = ColumnInfo(
-        name="interval",
-        type="VARCHAR",
-        is_genomic=True,
-        chrom_col="chromosome",
-        start_col="start_pos",
-        end_col="end_pos",
-        strand_col="strand",
-    )
-    schema.tables["features_a"] = table_a
-
-    # Table B
-    table_b = TableSchema(name="features_b", columns={})
-    table_b.columns["id"] = ColumnInfo(name="id", type="INTEGER")
-    table_b.columns["interval"] = ColumnInfo(
-        name="interval",
-        type="VARCHAR",
-        is_genomic=True,
-        chrom_col="chromosome",
-        start_col="start_pos",
-        end_col="end_pos",
-        strand_col="strand",
-    )
-    schema.tables["features_b"] = table_b
-
-    return schema
+def tables_with_two_tables():
+    """Tables with two tables for column-to-column tests."""
+    tables = Tables()
+    tables.register("features_a", Table())
+    tables.register("features_b", Table())
+    return tables
 
 
 @pytest.fixture
-def schema_with_closed_intervals():
-    """SchemaInfo with CLOSED interval type for bedtools compatibility tests."""
-    schema = SchemaInfo()
-    table = TableSchema(name="bed_features", columns={})
-    table.columns["id"] = ColumnInfo(name="id", type="INTEGER")
-    table.columns["interval"] = ColumnInfo(
-        name="interval",
-        type="VARCHAR",
-        is_genomic=True,
-        chrom_col="chromosome",
-        start_col="start_pos",
-        end_col="end_pos",
-        strand_col="strand",
-        interval_type=IntervalType.CLOSED,
-    )
-    schema.tables["bed_features"] = table
-    return schema
+def tables_with_closed_intervals():
+    """Tables with CLOSED interval type for bedtools compatibility tests."""
+    tables = Tables()
+    tables.register("bed_features", Table(interval_type="closed"))
+    return tables
 
 
 @pytest.fixture
-def schema_with_peaks_and_genes():
-    """Schema info with peaks and genes tables for NEAREST tests."""
-    schema = SchemaInfo()
-
-    # Register peaks table
-    peaks_table = TableSchema(name="peaks", columns={})
-    peaks_table.columns["peak_id"] = ColumnInfo(name="peak_id", type="INTEGER")
-    peaks_table.columns["interval"] = ColumnInfo(
-        name="interval",
-        type="VARCHAR",
-        is_genomic=True,
-        chrom_col="chromosome",
-        start_col="start_pos",
-        end_col="end_pos",
-        strand_col="strand",
-    )
-    schema.tables["peaks"] = peaks_table
-
-    # Register genes table
-    genes_table = TableSchema(name="genes", columns={})
-    genes_table.columns["gene_id"] = ColumnInfo(name="gene_id", type="INTEGER")
-    genes_table.columns["name"] = ColumnInfo(name="name", type="VARCHAR")
-    genes_table.columns["interval"] = ColumnInfo(
-        name="interval",
-        type="VARCHAR",
-        is_genomic=True,
-        chrom_col="chromosome",
-        start_col="start_pos",
-        end_col="end_pos",
-        strand_col="strand",
-    )
-    schema.tables["genes"] = genes_table
-
-    return schema
+def tables_with_peaks_and_genes():
+    """Tables with peaks and genes tables for NEAREST tests."""
+    tables = Tables()
+    tables.register("peaks", Table())
+    tables.register("genes", Table())
+    return tables
 
 
 class TestBaseGIQLGenerator:
@@ -137,26 +57,26 @@ class TestBaseGIQLGenerator:
 
     def test_instantiation_defaults(self):
         """
-        GIVEN no schema_info provided
+        GIVEN no tables provided
         WHEN Generator is instantiated with defaults
-        THEN Generator has empty SchemaInfo and SUPPORTS_LATERAL is True.
+        THEN Generator has empty Tables and SUPPORTS_LATERAL is True.
         """
         generator = BaseGIQLGenerator()
 
-        assert generator.schema_info is not None
-        assert generator.schema_info.tables == {}
+        assert generator.tables is not None
+        assert "variants" not in generator.tables
         assert generator.SUPPORTS_LATERAL is True
 
-    def test_instantiation_with_schema(self, schema_info):
+    def test_instantiation_with_tables(self, tables_info):
         """
-        GIVEN a valid SchemaInfo object with table definitions
-        WHEN Generator is instantiated with schema_info
-        THEN Generator stores schema_info and can resolve column references.
+        GIVEN a valid Tables object with table definitions
+        WHEN Generator is instantiated with tables
+        THEN Generator stores tables and can resolve column references.
         """
-        generator = BaseGIQLGenerator(schema_info=schema_info)
+        generator = BaseGIQLGenerator(tables=tables_info)
 
-        assert generator.schema_info is schema_info
-        assert "variants" in generator.schema_info.tables
+        assert generator.tables is tables_info
+        assert "variants" in generator.tables
 
     def test_instantiation_kwargs_forwarding(self):
         """
@@ -170,7 +90,7 @@ class TestBaseGIQLGenerator:
         # If kwargs forwarding works, generator should have pretty attribute
         assert generator.pretty is True
 
-    def test_select_sql_basic(self, schema_info):
+    def test_select_sql_basic(self, tables_info):
         """
         GIVEN a SELECT expression with FROM clause containing a table
         WHEN select_sql is called
@@ -179,13 +99,13 @@ class TestBaseGIQLGenerator:
         sql = "SELECT * FROM variants"
         ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(schema_info=schema_info)
+        generator = BaseGIQLGenerator(tables=tables_info)
         output = generator.generate(ast)
 
         expected = "SELECT * FROM variants"
         assert output == expected
 
-    def test_select_sql_with_alias(self, schema_info):
+    def test_select_sql_with_alias(self, tables_info):
         """
         GIVEN a SELECT with aliased table (e.g., FROM table AS t)
         WHEN select_sql is called
@@ -194,7 +114,7 @@ class TestBaseGIQLGenerator:
         sql = "SELECT * FROM variants AS v WHERE v.interval INTERSECTS 'chr1:1000-2000'"
         ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(schema_info=schema_info)
+        generator = BaseGIQLGenerator(tables=tables_info)
         output = generator.generate(ast)
 
         expected = (
@@ -204,7 +124,7 @@ class TestBaseGIQLGenerator:
         )
         assert output == expected
 
-    def test_select_sql_with_joins(self, schema_with_two_tables):
+    def test_select_sql_with_joins(self, tables_with_two_tables):
         """
         GIVEN a SELECT with JOINs
         WHEN select_sql is called
@@ -213,7 +133,7 @@ class TestBaseGIQLGenerator:
         sql = "SELECT * FROM features_a AS a JOIN features_b AS b ON a.id = b.id"
         ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(schema_info=schema_with_two_tables)
+        generator = BaseGIQLGenerator(tables=tables_with_two_tables)
         output = generator.generate(ast)
 
         expected = "SELECT * FROM features_a AS a JOIN features_b AS b ON a.id = b.id"
@@ -237,7 +157,7 @@ class TestBaseGIQLGenerator:
         )
         assert output == expected
 
-    def test_intersects_sql_column_join(self, schema_with_two_tables):
+    def test_intersects_sql_column_join(self, tables_with_two_tables):
         """
         GIVEN an Intersects expression with column-to-column
             (a.interval INTERSECTS b.interval)
@@ -250,7 +170,7 @@ class TestBaseGIQLGenerator:
         )
         ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(schema_info=schema_with_two_tables)
+        generator = BaseGIQLGenerator(tables=tables_with_two_tables)
         output = generator.generate(ast)
 
         expected = (
@@ -320,7 +240,7 @@ class TestBaseGIQLGenerator:
         )
         assert output == expected
 
-    def test_contains_sql_column_join(self, schema_with_two_tables):
+    def test_contains_sql_column_join(self, tables_with_two_tables):
         """
         GIVEN a Contains expression with column-to-column join
         WHEN contains_sql is called
@@ -332,7 +252,7 @@ class TestBaseGIQLGenerator:
         )
         ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(schema_info=schema_with_two_tables)
+        generator = BaseGIQLGenerator(tables=tables_with_two_tables)
         output = generator.generate(ast)
 
         expected = (
@@ -386,7 +306,7 @@ class TestBaseGIQLGenerator:
         )
         assert output == expected
 
-    def test_within_sql_column_join(self, schema_with_two_tables):
+    def test_within_sql_column_join(self, tables_with_two_tables):
         """
         GIVEN a Within expression with column-to-column join
         WHEN within_sql is called
@@ -398,7 +318,7 @@ class TestBaseGIQLGenerator:
         )
         ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(schema_info=schema_with_two_tables)
+        generator = BaseGIQLGenerator(tables=tables_with_two_tables)
         output = generator.generate(ast)
 
         expected = (
@@ -452,7 +372,7 @@ class TestBaseGIQLGenerator:
         )
         assert output == expected
 
-    def test_giqlnearest_sql_standalone(self, schema_with_peaks_and_genes):
+    def test_giqlnearest_sql_standalone(self, tables_with_peaks_and_genes):
         """
         GIVEN a GIQLNearest in standalone mode with literal reference
         WHEN giqlnearest_sql is called
@@ -461,7 +381,7 @@ class TestBaseGIQLGenerator:
         sql = "SELECT * FROM NEAREST(genes, reference='chr1:1000-2000', k=3)"
         ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(schema_info=schema_with_peaks_and_genes)
+        generator = BaseGIQLGenerator(tables=tables_with_peaks_and_genes)
         output = generator.generate(ast)
 
         expected = (
@@ -485,7 +405,7 @@ class TestBaseGIQLGenerator:
         )
         assert output == expected
 
-    def test_giqlnearest_sql_correlated(self, schema_with_peaks_and_genes):
+    def test_giqlnearest_sql_correlated(self, tables_with_peaks_and_genes):
         """
         GIVEN a GIQLNearest in correlated mode (LATERAL join context)
         WHEN giqlnearest_sql is called
@@ -497,7 +417,7 @@ class TestBaseGIQLGenerator:
         )
         ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(schema_info=schema_with_peaks_and_genes)
+        generator = BaseGIQLGenerator(tables=tables_with_peaks_and_genes)
         output = generator.generate(ast)
 
         expected = (
@@ -523,7 +443,7 @@ class TestBaseGIQLGenerator:
         )
         assert output == expected
 
-    def test_giqlnearest_sql_with_max_distance(self, schema_with_peaks_and_genes):
+    def test_giqlnearest_sql_with_max_distance(self, tables_with_peaks_and_genes):
         """
         GIVEN a GIQLNearest with max_distance parameter
         WHEN giqlnearest_sql is called
@@ -536,7 +456,7 @@ class TestBaseGIQLGenerator:
         )
         ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(schema_info=schema_with_peaks_and_genes)
+        generator = BaseGIQLGenerator(tables=tables_with_peaks_and_genes)
         output = generator.generate(ast)
 
         expected = (
@@ -569,7 +489,7 @@ class TestBaseGIQLGenerator:
         )
         assert output == expected
 
-    def test_giqlnearest_sql_stranded(self, schema_with_peaks_and_genes):
+    def test_giqlnearest_sql_stranded(self, tables_with_peaks_and_genes):
         """
         GIVEN a GIQLNearest with stranded=True
         WHEN giqlnearest_sql is called
@@ -582,7 +502,7 @@ class TestBaseGIQLGenerator:
         )
         ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(schema_info=schema_with_peaks_and_genes)
+        generator = BaseGIQLGenerator(tables=tables_with_peaks_and_genes)
         output = generator.generate(ast)
 
         expected = (
@@ -623,7 +543,7 @@ class TestBaseGIQLGenerator:
         )
         assert output == expected
 
-    def test_giqlnearest_sql_signed(self, schema_with_peaks_and_genes):
+    def test_giqlnearest_sql_signed(self, tables_with_peaks_and_genes):
         """
         GIVEN a GIQLNearest with signed=True
         WHEN giqlnearest_sql is called
@@ -636,7 +556,7 @@ class TestBaseGIQLGenerator:
         )
         ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(schema_info=schema_with_peaks_and_genes)
+        generator = BaseGIQLGenerator(tables=tables_with_peaks_and_genes)
         output = generator.generate(ast)
 
         expected = (
@@ -662,7 +582,7 @@ class TestBaseGIQLGenerator:
         )
         assert output == expected
 
-    def test_giqlnearest_sql_no_lateral_support(self, schema_with_peaks_and_genes):
+    def test_giqlnearest_sql_no_lateral_support(self, tables_with_peaks_and_genes):
         """
         GIVEN a GIQLNearest on a generator with SUPPORTS_LATERAL=False
         WHEN giqlnearest_sql is called in correlated mode
@@ -677,7 +597,7 @@ class TestBaseGIQLGenerator:
         sql = "SELECT * FROM peaks CROSS JOIN LATERAL NEAREST(genes, k=3)"
         ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = NoLateralGenerator(schema_info=schema_with_peaks_and_genes)
+        generator = NoLateralGenerator(tables=tables_with_peaks_and_genes)
 
         with pytest.raises(ValueError, match="LATERAL"):
             generator.generate(ast)
@@ -688,7 +608,7 @@ class TestBaseGIQLGenerator:
         max_distance=st.integers(min_value=1, max_value=10_000_000),
     )
     def test_giqlnearest_sql_parameter_handling_property(
-        self, schema_with_peaks_and_genes, k, max_distance
+        self, tables_with_peaks_and_genes, k, max_distance
     ):
         """
         GIVEN any valid k value (positive integer) and max_distance
@@ -701,7 +621,7 @@ class TestBaseGIQLGenerator:
         )
         ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(schema_info=schema_with_peaks_and_genes)
+        generator = BaseGIQLGenerator(tables=tables_with_peaks_and_genes)
         output = generator.generate(ast)
 
         # k should appear in LIMIT
@@ -709,7 +629,7 @@ class TestBaseGIQLGenerator:
         # max_distance should appear in WHERE
         assert str(max_distance) in output
 
-    def test_giqldistance_sql_basic(self, schema_with_two_tables):
+    def test_giqldistance_sql_basic(self, tables_with_two_tables):
         """
         GIVEN a GIQLDistance with two column references
         WHEN giqldistance_sql is called
@@ -721,7 +641,7 @@ class TestBaseGIQLGenerator:
         )
         ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(schema_info=schema_with_two_tables)
+        generator = BaseGIQLGenerator(tables=tables_with_two_tables)
         output = generator.generate(ast)
 
         expected = (
@@ -734,7 +654,7 @@ class TestBaseGIQLGenerator:
         )
         assert output == expected
 
-    def test_giqldistance_sql_stranded(self, schema_with_two_tables):
+    def test_giqldistance_sql_stranded(self, tables_with_two_tables):
         """
         GIVEN a GIQLDistance with stranded=True
         WHEN giqldistance_sql is called
@@ -746,7 +666,7 @@ class TestBaseGIQLGenerator:
         )
         ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(schema_info=schema_with_two_tables)
+        generator = BaseGIQLGenerator(tables=tables_with_two_tables)
         output = generator.generate(ast)
 
         expected = (
@@ -767,7 +687,7 @@ class TestBaseGIQLGenerator:
         )
         assert output == expected
 
-    def test_giqldistance_sql_signed(self, schema_with_two_tables):
+    def test_giqldistance_sql_signed(self, tables_with_two_tables):
         """
         GIVEN a GIQLDistance with signed=True
         WHEN giqldistance_sql is called
@@ -779,7 +699,7 @@ class TestBaseGIQLGenerator:
         )
         ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(schema_info=schema_with_two_tables)
+        generator = BaseGIQLGenerator(tables=tables_with_two_tables)
         output = generator.generate(ast)
 
         expected = (
@@ -792,7 +712,7 @@ class TestBaseGIQLGenerator:
         )
         assert output == expected
 
-    def test_giqldistance_sql_stranded_and_signed(self, schema_with_two_tables):
+    def test_giqldistance_sql_stranded_and_signed(self, tables_with_two_tables):
         """
         GIVEN a GIQLDistance with both stranded and signed=True
         WHEN giqldistance_sql is called
@@ -805,7 +725,7 @@ class TestBaseGIQLGenerator:
         )
         ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(schema_info=schema_with_two_tables)
+        generator = BaseGIQLGenerator(tables=tables_with_two_tables)
         output = generator.generate(ast)
 
         expected = (
@@ -826,27 +746,16 @@ class TestBaseGIQLGenerator:
         )
         assert output == expected
 
-    def test_giqldistance_with_closed_intervals(self, schema_with_closed_intervals):
+    def test_giqldistance_with_closed_intervals(self, tables_with_closed_intervals):
         """
         GIVEN intervals from table with CLOSED interval type
         WHEN Distance calculation is performed
         THEN Distance includes +1 adjustment (bedtools compatibility).
         """
-        # Create a second table with closed intervals for distance calculation
-        schema = schema_with_closed_intervals
-        table_b = TableSchema(name="bed_features_b", columns={})
-        table_b.columns["id"] = ColumnInfo(name="id", type="INTEGER")
-        table_b.columns["interval"] = ColumnInfo(
-            name="interval",
-            type="VARCHAR",
-            is_genomic=True,
-            chrom_col="chromosome",
-            start_col="start_pos",
-            end_col="end_pos",
-            strand_col="strand",
-            interval_type=IntervalType.CLOSED,
+        # Add a second table with closed intervals for distance calculation
+        tables_with_closed_intervals.register(
+            "bed_features_b", Table(interval_type="closed")
         )
-        schema.tables["bed_features_b"] = table_b
 
         sql = (
             "SELECT DISTANCE(a.interval, b.interval) as dist "
@@ -854,7 +763,7 @@ class TestBaseGIQLGenerator:
         )
         ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(schema_info=schema)
+        generator = BaseGIQLGenerator(tables=tables_with_closed_intervals)
         output = generator.generate(ast)
 
         expected = (
@@ -901,7 +810,7 @@ class TestBaseGIQLGenerator:
         with pytest.raises(ValueError):
             generator.generate(ast)
 
-    def test_select_sql_join_without_alias(self, schema_with_two_tables):
+    def test_select_sql_join_without_alias(self, tables_with_two_tables):
         """
         GIVEN a SELECT with JOIN where joined table has no alias
         WHEN select_sql is called
@@ -910,7 +819,7 @@ class TestBaseGIQLGenerator:
         sql = "SELECT * FROM features_a JOIN features_b ON features_a.id = features_b.id"
         ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(schema_info=schema_with_two_tables)
+        generator = BaseGIQLGenerator(tables=tables_with_two_tables)
         output = generator.generate(ast)
 
         expected = (
@@ -919,7 +828,7 @@ class TestBaseGIQLGenerator:
         assert output == expected
 
     def test_giqlnearest_sql_stranded_literal_with_strand(
-        self, schema_with_peaks_and_genes
+        self, tables_with_peaks_and_genes
     ):
         """
         GIVEN a GIQLNearest with stranded=True and literal reference containing strand
@@ -932,7 +841,7 @@ class TestBaseGIQLGenerator:
         )
         ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(schema_info=schema_with_peaks_and_genes)
+        generator = BaseGIQLGenerator(tables=tables_with_peaks_and_genes)
         output = generator.generate(ast)
 
         # Should contain strand literal '+' and strand filtering
@@ -940,7 +849,7 @@ class TestBaseGIQLGenerator:
         assert 'genes."strand"' in output
 
     def test_giqlnearest_sql_stranded_implicit_reference(
-        self, schema_with_peaks_and_genes
+        self, tables_with_peaks_and_genes
     ):
         """
         GIVEN a GIQLNearest in correlated mode with implicit reference and stranded=True
@@ -950,7 +859,7 @@ class TestBaseGIQLGenerator:
         sql = "SELECT * FROM peaks CROSS JOIN LATERAL NEAREST(genes, k=3, stranded=true)"
         ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(schema_info=schema_with_peaks_and_genes)
+        generator = BaseGIQLGenerator(tables=tables_with_peaks_and_genes)
         output = generator.generate(ast)
 
         # Should have strand columns from both tables
@@ -963,31 +872,19 @@ class TestBaseGIQLGenerator:
         WHEN giqlnearest_sql is called
         THEN Distance calculation includes +1 adjustment for bedtools compatibility.
         """
-        schema = SchemaInfo()
-        genes_closed = TableSchema(name="genes_closed", columns={})
-        genes_closed.columns["gene_id"] = ColumnInfo(name="gene_id", type="INTEGER")
-        genes_closed.columns["interval"] = ColumnInfo(
-            name="interval",
-            type="VARCHAR",
-            is_genomic=True,
-            chrom_col="chromosome",
-            start_col="start_pos",
-            end_col="end_pos",
-            strand_col="strand",
-            interval_type=IntervalType.CLOSED,
-        )
-        schema.tables["genes_closed"] = genes_closed
+        tables = Tables()
+        tables.register("genes_closed", Table(interval_type="closed"))
 
         sql = "SELECT * FROM NEAREST(genes_closed, reference='chr1:1000-2000', k=3)"
         ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(schema_info=schema)
+        generator = BaseGIQLGenerator(tables=tables)
         output = generator.generate(ast)
 
         # Should have +1 adjustment for closed intervals
         assert "+ 1)" in output
 
-    def test_giqldistance_sql_literal_first_arg_error(self, schema_with_two_tables):
+    def test_giqldistance_sql_literal_first_arg_error(self, tables_with_two_tables):
         """
         GIVEN a GIQLDistance with literal range as first argument
         WHEN giqldistance_sql is called
@@ -996,12 +893,12 @@ class TestBaseGIQLGenerator:
         sql = "SELECT DISTANCE('chr1:1000-2000', b.interval) as dist FROM features_b b"
         ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(schema_info=schema_with_two_tables)
+        generator = BaseGIQLGenerator(tables=tables_with_two_tables)
 
         with pytest.raises(ValueError, match="Literal range as first argument"):
             generator.generate(ast)
 
-    def test_giqldistance_sql_literal_second_arg_error(self, schema_with_two_tables):
+    def test_giqldistance_sql_literal_second_arg_error(self, tables_with_two_tables):
         """
         GIVEN a GIQLDistance with literal range as second argument
         WHEN giqldistance_sql is called
@@ -1010,13 +907,13 @@ class TestBaseGIQLGenerator:
         sql = "SELECT DISTANCE(a.interval, 'chr1:1000-2000') as dist FROM features_a a"
         ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(schema_info=schema_with_two_tables)
+        generator = BaseGIQLGenerator(tables=tables_with_two_tables)
 
         with pytest.raises(ValueError, match="Literal range as second argument"):
             generator.generate(ast)
 
     def test_giqlnearest_sql_missing_outer_table_error(
-        self, schema_with_peaks_and_genes
+        self, tables_with_peaks_and_genes
     ):
         """
         GIVEN a GIQLNearest in correlated mode without reference where outer table
@@ -1030,82 +927,33 @@ class TestBaseGIQLGenerator:
             k=exp.Literal.number(3),
         )
 
-        generator = BaseGIQLGenerator(schema_info=schema_with_peaks_and_genes)
+        generator = BaseGIQLGenerator(tables=tables_with_peaks_and_genes)
 
         with pytest.raises(ValueError, match="Could not find outer table"):
             generator.giqlnearest_sql(nearest)
 
-    def test_giqlnearest_sql_outer_table_not_in_schema(self):
+    def test_giqlnearest_sql_outer_table_not_in_tables(self):
         """
-        GIVEN a GIQLNearest in correlated mode where outer table is not in schema
+        GIVEN a GIQLNearest in correlated mode where outer table is not registered
         WHEN giqlnearest_sql is called
         THEN ValueError is raised listing the issue.
         """
-        schema = SchemaInfo()
-        genes_table = TableSchema(name="genes", columns={})
-        genes_table.columns["gene_id"] = ColumnInfo(name="gene_id", type="INTEGER")
-        genes_table.columns["interval"] = ColumnInfo(
-            name="interval",
-            type="VARCHAR",
-            is_genomic=True,
-            chrom_col="chromosome",
-            start_col="start_pos",
-            end_col="end_pos",
-            strand_col="strand",
-        )
-        schema.tables["genes"] = genes_table
+        tables = Tables()
+        tables.register("genes", Table())
 
         nearest = GIQLNearest(
             this=exp.Table(this=exp.Identifier(this="genes")),
             k=exp.Literal.number(3),
         )
 
-        generator = BaseGIQLGenerator(schema_info=schema)
+        generator = BaseGIQLGenerator(tables=tables)
         generator._alias_to_table = {"unknown_table": "unknown_table"}
         generator._find_outer_table_in_lateral_join = lambda x: "unknown_table"
 
-        with pytest.raises(ValueError, match="not found in schema"):
+        with pytest.raises(ValueError, match="not found in tables"):
             generator.giqlnearest_sql(nearest)
 
-    def test_giqlnearest_sql_no_genomic_column_in_outer(self):
-        """
-        GIVEN a GIQLNearest in correlated mode where outer table has no genomic column
-        WHEN giqlnearest_sql is called
-        THEN ValueError is raised about missing genomic column.
-        """
-        schema = SchemaInfo()
-
-        outer_table = TableSchema(name="outer_table", columns={})
-        outer_table.columns["id"] = ColumnInfo(name="id", type="INTEGER")
-        outer_table.columns["name"] = ColumnInfo(name="name", type="VARCHAR")
-        schema.tables["outer_table"] = outer_table
-
-        genes_table = TableSchema(name="genes", columns={})
-        genes_table.columns["gene_id"] = ColumnInfo(name="gene_id", type="INTEGER")
-        genes_table.columns["interval"] = ColumnInfo(
-            name="interval",
-            type="VARCHAR",
-            is_genomic=True,
-            chrom_col="chromosome",
-            start_col="start_pos",
-            end_col="end_pos",
-            strand_col="strand",
-        )
-        schema.tables["genes"] = genes_table
-
-        nearest = GIQLNearest(
-            this=exp.Table(this=exp.Identifier(this="genes")),
-            k=exp.Literal.number(3),
-        )
-
-        generator = BaseGIQLGenerator(schema_info=schema)
-        generator._alias_to_table = {"outer_table": "outer_table"}
-        generator._find_outer_table_in_lateral_join = lambda x: "outer_table"
-
-        with pytest.raises(ValueError, match="No genomic column found"):
-            generator.giqlnearest_sql(nearest)
-
-    def test_giqlnearest_sql_invalid_reference_range(self, schema_with_peaks_and_genes):
+    def test_giqlnearest_sql_invalid_reference_range(self, tables_with_peaks_and_genes):
         """
         GIVEN a GIQLNearest with invalid/unparseable reference range string
         WHEN giqlnearest_sql is called
@@ -1114,58 +962,38 @@ class TestBaseGIQLGenerator:
         sql = "SELECT * FROM NEAREST(genes, reference='invalid_range', k=3)"
         ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(schema_info=schema_with_peaks_and_genes)
+        generator = BaseGIQLGenerator(tables=tables_with_peaks_and_genes)
 
         with pytest.raises(ValueError, match="Could not parse reference genomic range"):
             generator.generate(ast)
 
-    def test_giqlnearest_sql_no_schema_error(self):
+    def test_giqlnearest_sql_no_tables_error(self):
         """
-        GIVEN a GIQLNearest without schema_info provided (empty schema)
+        GIVEN a GIQLNearest without tables registered
         WHEN giqlnearest_sql is called
         THEN ValueError is raised because target table cannot be resolved.
         """
         sql = "SELECT * FROM NEAREST(genes, reference='chr1:1000-2000', k=3)"
         ast = parse_one(sql, dialect=GIQLDialect)
 
-        # Generator with empty schema - table won't be found
+        # Generator with empty tables - table won't be found
         generator = BaseGIQLGenerator()
 
-        with pytest.raises(ValueError, match="not found in schema"):
+        with pytest.raises(ValueError, match="not found in tables"):
             generator.generate(ast)
 
-    def test_giqlnearest_sql_target_not_in_schema(self, schema_with_peaks_and_genes):
+    def test_giqlnearest_sql_target_not_in_tables(self, tables_with_peaks_and_genes):
         """
-        GIVEN a GIQLNearest with target table not found in schema
+        GIVEN a GIQLNearest with target table not registered
         WHEN giqlnearest_sql is called
         THEN ValueError is raised listing available tables.
         """
         sql = "SELECT * FROM NEAREST(unknown_table, reference='chr1:1000-2000', k=3)"
         ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(schema_info=schema_with_peaks_and_genes)
+        generator = BaseGIQLGenerator(tables=tables_with_peaks_and_genes)
 
-        with pytest.raises(ValueError, match="not found in schema"):
-            generator.generate(ast)
-
-    def test_giqlnearest_sql_target_no_genomic_column(self):
-        """
-        GIVEN a GIQLNearest with target table having no genomic column defined
-        WHEN giqlnearest_sql is called
-        THEN ValueError is raised about missing genomic column.
-        """
-        schema = SchemaInfo()
-        no_genomic_table = TableSchema(name="no_genomic", columns={})
-        no_genomic_table.columns["id"] = ColumnInfo(name="id", type="INTEGER")
-        no_genomic_table.columns["name"] = ColumnInfo(name="name", type="VARCHAR")
-        schema.tables["no_genomic"] = no_genomic_table
-
-        sql = "SELECT * FROM NEAREST(no_genomic, reference='chr1:1000-2000', k=3)"
-        ast = parse_one(sql, dialect=GIQLDialect)
-
-        generator = BaseGIQLGenerator(schema_info=schema)
-
-        with pytest.raises(ValueError, match="does not have a genomic column"):
+        with pytest.raises(ValueError, match="not found in tables"):
             generator.generate(ast)
 
     def test_intersects_sql_unqualified_column(self):
@@ -1187,7 +1015,7 @@ class TestBaseGIQLGenerator:
         assert output == expected
 
     def test_giqlnearest_sql_stranded_unqualified_reference(
-        self, schema_with_peaks_and_genes
+        self, tables_with_peaks_and_genes
     ):
         """
         GIVEN a GIQLNearest with stranded=True and unqualified column reference
@@ -1204,7 +1032,7 @@ class TestBaseGIQLGenerator:
             stranded=exp.Boolean(this=True),
         )
 
-        generator = BaseGIQLGenerator(schema_info=schema_with_peaks_and_genes)
+        generator = BaseGIQLGenerator(tables=tables_with_peaks_and_genes)
         output = generator.giqlnearest_sql(nearest)
 
         # Should produce valid output with unqualified strand column
@@ -1212,7 +1040,7 @@ class TestBaseGIQLGenerator:
         # The strand column should be unqualified (no table prefix)
         assert '"strand"' in output
 
-    def test_giqlnearest_sql_identifier_target(self, schema_with_peaks_and_genes):
+    def test_giqlnearest_sql_identifier_target(self, tables_with_peaks_and_genes):
         """
         GIVEN a GIQLNearest where target is an Identifier (not Table or Column)
         WHEN giqlnearest_sql is called
@@ -1227,7 +1055,7 @@ class TestBaseGIQLGenerator:
             k=exp.Literal.number(3),
         )
 
-        generator = BaseGIQLGenerator(schema_info=schema_with_peaks_and_genes)
+        generator = BaseGIQLGenerator(tables=tables_with_peaks_and_genes)
         output = generator.giqlnearest_sql(nearest)
 
         # Should succeed and produce valid SQL
@@ -1239,7 +1067,7 @@ class TestBaseGIQLGenerator:
     )
     @settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
     def test_giqldistance_stranded_param_truthy_values_property(
-        self, schema_with_two_tables, bool_repr
+        self, tables_with_two_tables, bool_repr
     ):
         """
         GIVEN a GIQLDistance with stranded parameter in various truthy representations
@@ -1252,7 +1080,7 @@ class TestBaseGIQLGenerator:
         )
         ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(schema_info=schema_with_two_tables)
+        generator = BaseGIQLGenerator(tables=tables_with_two_tables)
         output = generator.generate(ast)
 
         # Should include strand handling (NULL checks for strand columns)
@@ -1264,7 +1092,7 @@ class TestBaseGIQLGenerator:
     )
     @settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
     def test_giqldistance_stranded_param_falsy_values_property(
-        self, schema_with_two_tables, bool_repr
+        self, tables_with_two_tables, bool_repr
     ):
         """
         GIVEN a GIQLDistance with stranded parameter in various falsy representations
@@ -1277,7 +1105,7 @@ class TestBaseGIQLGenerator:
         )
         ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(schema_info=schema_with_two_tables)
+        generator = BaseGIQLGenerator(tables=tables_with_two_tables)
         output = generator.generate(ast)
 
         # Should NOT include strand NULL checks (basic distance)
@@ -1288,7 +1116,7 @@ class TestBaseGIQLGenerator:
     )
     @settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
     def test_giqldistance_signed_param_truthy_values_property(
-        self, schema_with_two_tables, bool_repr
+        self, tables_with_two_tables, bool_repr
     ):
         """
         GIVEN a GIQLDistance with signed parameter in various truthy representations
@@ -1301,7 +1129,7 @@ class TestBaseGIQLGenerator:
         )
         ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(schema_info=schema_with_two_tables)
+        generator = BaseGIQLGenerator(tables=tables_with_two_tables)
         output = generator.generate(ast)
 
         # Signed distance has negative sign for upstream intervals
@@ -1312,7 +1140,7 @@ class TestBaseGIQLGenerator:
     )
     @settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
     def test_giqldistance_signed_param_falsy_values_property(
-        self, schema_with_two_tables, bool_repr
+        self, tables_with_two_tables, bool_repr
     ):
         """
         GIVEN a GIQLDistance with signed parameter in various falsy representations
@@ -1325,7 +1153,7 @@ class TestBaseGIQLGenerator:
         )
         ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(schema_info=schema_with_two_tables)
+        generator = BaseGIQLGenerator(tables=tables_with_two_tables)
         output = generator.generate(ast)
 
         # Unsigned distance has no negative sign (both ELSE branches are positive)
