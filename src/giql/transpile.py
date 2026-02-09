@@ -14,14 +14,14 @@ from giql.transformer import ClusterTransformer
 from giql.transformer import MergeTransformer
 
 
-def _build_tables(tables: list[str] | dict[str, Table] | None) -> Tables:
+def _build_tables(tables: list[str | Table] | None) -> Tables:
     """Build a Tables container from table specifications.
 
     Parameters
     ----------
-    tables : list[str] | dict[str, Table] | None
+    tables : list[str | Table] | None
         Table specifications. Strings use default column mappings.
-        Dict maps table names to Table configurations.
+        Table objects provide custom column mappings.
 
     Returns
     -------
@@ -33,19 +33,18 @@ def _build_tables(tables: list[str] | dict[str, Table] | None) -> Tables:
     if tables is None:
         return container
 
-    if isinstance(tables, dict):
-        for name, table in tables.items():
-            container.register(name, table)
-    else:
-        for name in tables:
-            container.register(name, Table())
+    for item in tables:
+        if isinstance(item, str):
+            container.register(item, Table(item))
+        else:
+            container.register(item.name, item)
 
     return container
 
 
 def transpile(
     giql: str,
-    tables: list[str] | dict[str, Table] | None = None,
+    tables: list[str | Table] | None = None,
 ) -> str:
     """Transpile a GIQL query to SQL.
 
@@ -57,10 +56,10 @@ def transpile(
     giql : str
         The GIQL query string containing genomic extensions like
         INTERSECTS, CONTAINS, WITHIN, CLUSTER, MERGE, or NEAREST.
-    tables : list[str] | dict[str, Table] | None
-        Table configurations. A list of strings uses default column mappings
-        (chromosome, start_pos, end_pos, strand). A dict maps table names
-        to Table objects for custom column name mappings.
+    tables : list[str | Table] | None
+        Table configurations. Strings use default column mappings
+        (chrom, start, end, strand). Table objects provide custom
+        column name mappings.
 
     Returns
     -------
@@ -85,14 +84,15 @@ def transpile(
 
         sql = transpile(
             "SELECT * FROM peaks WHERE interval INTERSECTS 'chr1:1000-2000'",
-            tables={
-                "peaks": Table(
+            tables=[
+                Table(
+                    "peaks",
                     genomic_col="interval",
                     chrom_col="chrom",
                     start_col="start",
                     end_col="end",
                 )
-            }
+            ]
         )
     """
     # Build tables container

@@ -22,7 +22,7 @@ from giql.table import Tables
 def tables_info():
     """Basic Tables with a single table containing genomic columns."""
     tables = Tables()
-    tables.register("variants", Table())
+    tables.register("variants", Table("variants"))
     return tables
 
 
@@ -30,8 +30,8 @@ def tables_info():
 def tables_with_two_tables():
     """Tables with two tables for column-to-column tests."""
     tables = Tables()
-    tables.register("features_a", Table())
-    tables.register("features_b", Table())
+    tables.register("features_a", Table("features_a"))
+    tables.register("features_b", Table("features_b"))
     return tables
 
 
@@ -39,7 +39,7 @@ def tables_with_two_tables():
 def tables_with_closed_intervals():
     """Tables with CLOSED interval type for bedtools compatibility tests."""
     tables = Tables()
-    tables.register("bed_features", Table(interval_type="closed"))
+    tables.register("bed_features", Table("bed_features", interval_type="closed"))
     return tables
 
 
@@ -47,8 +47,8 @@ def tables_with_closed_intervals():
 def tables_with_peaks_and_genes():
     """Tables with peaks and genes tables for NEAREST tests."""
     tables = Tables()
-    tables.register("peaks", Table())
-    tables.register("genes", Table())
+    tables.register("peaks", Table("peaks"))
+    tables.register("genes", Table("genes"))
     return tables
 
 
@@ -119,8 +119,8 @@ class TestBaseGIQLGenerator:
 
         expected = (
             "SELECT * FROM variants AS v WHERE "
-            '(v."chromosome" = \'chr1\' AND v."start_pos" < 2000 '
-            'AND v."end_pos" > 1000)'
+            '(v."chrom" = \'chr1\' AND v."start" < 2000 '
+            'AND v."end" > 1000)'
         )
         assert output == expected
 
@@ -153,7 +153,7 @@ class TestBaseGIQLGenerator:
 
         expected = (
             "SELECT * FROM variants WHERE "
-            '("chromosome" = \'chr1\' AND "start_pos" < 2000 AND "end_pos" > 1000)'
+            '("chrom" = \'chr1\' AND "start" < 2000 AND "end" > 1000)'
         )
         assert output == expected
 
@@ -175,8 +175,8 @@ class TestBaseGIQLGenerator:
 
         expected = (
             "SELECT * FROM features_a AS a CROSS JOIN features_b AS b WHERE "
-            '(a."chromosome" = b."chromosome" AND a."start_pos" < b."end_pos" '
-            'AND a."end_pos" > b."start_pos")'
+            '(a."chrom" = b."chrom" AND a."start" < b."end" '
+            'AND a."end" > b."start")'
         )
         assert output == expected
 
@@ -217,7 +217,7 @@ class TestBaseGIQLGenerator:
 
         expected = (
             "SELECT * FROM variants WHERE "
-            '("chromosome" = \'chr1\' AND "start_pos" <= 1500 AND "end_pos" > 1500)'
+            '("chrom" = \'chr1\' AND "start" <= 1500 AND "end" > 1500)'
         )
         assert output == expected
 
@@ -235,8 +235,8 @@ class TestBaseGIQLGenerator:
 
         expected = (
             "SELECT * FROM variants WHERE "
-            '("chromosome" = \'chr1\' AND "start_pos" <= 1500 '
-            'AND "end_pos" >= 2000)'
+            '("chrom" = \'chr1\' AND "start" <= 1500 '
+            'AND "end" >= 2000)'
         )
         assert output == expected
 
@@ -257,8 +257,8 @@ class TestBaseGIQLGenerator:
 
         expected = (
             "SELECT * FROM features_a AS a CROSS JOIN features_b AS b WHERE "
-            '(a."chromosome" = b."chromosome" '
-            'AND a."start_pos" <= b."start_pos" AND a."end_pos" >= b."end_pos")'
+            '(a."chrom" = b."chrom" '
+            'AND a."start" <= b."start" AND a."end" >= b."end")'
         )
         assert output == expected
 
@@ -302,7 +302,7 @@ class TestBaseGIQLGenerator:
 
         expected = (
             "SELECT * FROM variants WHERE "
-            '("chromosome" = \'chr1\' AND "start_pos" >= 1000 AND "end_pos" <= 5000)'
+            '("chrom" = \'chr1\' AND "start" >= 1000 AND "end" <= 5000)'
         )
         assert output == expected
 
@@ -323,8 +323,8 @@ class TestBaseGIQLGenerator:
 
         expected = (
             "SELECT * FROM features_a AS a CROSS JOIN features_b AS b WHERE "
-            '(a."chromosome" = b."chromosome" '
-            'AND a."start_pos" >= b."start_pos" AND a."end_pos" <= b."end_pos")'
+            '(a."chrom" = b."chrom" '
+            'AND a."start" >= b."start" AND a."end" <= b."end")'
         )
         assert output == expected
 
@@ -345,8 +345,8 @@ class TestBaseGIQLGenerator:
 
         expected = (
             "SELECT * FROM variants WHERE "
-            '(("chromosome" = \'chr1\' AND "start_pos" < 2000 AND "end_pos" > 1000) '
-            'OR ("chromosome" = \'chr1\' AND "start_pos" < 6000 AND "end_pos" > 5000))'
+            '(("chrom" = \'chr1\' AND "start" < 2000 AND "end" > 1000) '
+            'OR ("chrom" = \'chr1\' AND "start" < 6000 AND "end" > 5000))'
         )
         assert output == expected
 
@@ -367,8 +367,8 @@ class TestBaseGIQLGenerator:
 
         expected = (
             "SELECT * FROM variants WHERE "
-            '(("chromosome" = \'chr1\' AND "start_pos" < 2000 AND "end_pos" > 1000) '
-            'AND ("chromosome" = \'chr1\' AND "start_pos" < 1800 AND "end_pos" > 1500))'
+            '(("chrom" = \'chr1\' AND "start" < 2000 AND "end" > 1000) '
+            'AND ("chrom" = \'chr1\' AND "start" < 1800 AND "end" > 1500))'
         )
         assert output == expected
 
@@ -387,19 +387,19 @@ class TestBaseGIQLGenerator:
         expected = (
             "SELECT * FROM (\n"
             "                SELECT genes.*, "
-            "CASE WHEN 'chr1' != genes.\"chromosome\" THEN NULL "
-            'WHEN 1000 < genes."end_pos" AND 2000 > genes."start_pos" THEN 0 '
-            'WHEN 2000 <= genes."start_pos" '
-            'THEN (genes."start_pos" - 2000) '
-            'ELSE (1000 - genes."end_pos") END AS distance\n'
+            "CASE WHEN 'chr1' != genes.\"chrom\" THEN NULL "
+            'WHEN 1000 < genes."end" AND 2000 > genes."start" THEN 0 '
+            'WHEN 2000 <= genes."start" '
+            'THEN (genes."start" - 2000) '
+            'ELSE (1000 - genes."end") END AS distance\n'
             "                FROM genes\n"
-            "                WHERE 'chr1' = genes.\"chromosome\"\n"
+            "                WHERE 'chr1' = genes.\"chrom\"\n"
             "                ORDER BY ABS("
-            "CASE WHEN 'chr1' != genes.\"chromosome\" THEN NULL "
-            'WHEN 1000 < genes."end_pos" AND 2000 > genes."start_pos" THEN 0 '
-            'WHEN 2000 <= genes."start_pos" '
-            'THEN (genes."start_pos" - 2000) '
-            'ELSE (1000 - genes."end_pos") END)\n'
+            "CASE WHEN 'chr1' != genes.\"chrom\" THEN NULL "
+            'WHEN 1000 < genes."end" AND 2000 > genes."start" THEN 0 '
+            'WHEN 2000 <= genes."start" '
+            'THEN (genes."start" - 2000) '
+            'ELSE (1000 - genes."end") END)\n'
             "                LIMIT 3\n"
             "            )"
         )
@@ -423,21 +423,21 @@ class TestBaseGIQLGenerator:
         expected = (
             "SELECT * FROM peaks CROSS JOIN LATERAL (\n"
             "                SELECT genes.*, "
-            'CASE WHEN peaks."chromosome" != genes."chromosome" THEN NULL '
-            'WHEN peaks."start_pos" < genes."end_pos" '
-            'AND peaks."end_pos" > genes."start_pos" THEN 0 '
-            'WHEN peaks."end_pos" <= genes."start_pos" '
-            'THEN (genes."start_pos" - peaks."end_pos") '
-            'ELSE (peaks."start_pos" - genes."end_pos") END AS distance\n'
+            'CASE WHEN peaks."chrom" != genes."chrom" THEN NULL '
+            'WHEN peaks."start" < genes."end" '
+            'AND peaks."end" > genes."start" THEN 0 '
+            'WHEN peaks."end" <= genes."start" '
+            'THEN (genes."start" - peaks."end") '
+            'ELSE (peaks."start" - genes."end") END AS distance\n'
             "                FROM genes\n"
-            '                WHERE peaks."chromosome" = genes."chromosome"\n'
+            '                WHERE peaks."chrom" = genes."chrom"\n'
             "                ORDER BY ABS("
-            'CASE WHEN peaks."chromosome" != genes."chromosome" THEN NULL '
-            'WHEN peaks."start_pos" < genes."end_pos" '
-            'AND peaks."end_pos" > genes."start_pos" THEN 0 '
-            'WHEN peaks."end_pos" <= genes."start_pos" '
-            'THEN (genes."start_pos" - peaks."end_pos") '
-            'ELSE (peaks."start_pos" - genes."end_pos") END)\n'
+            'CASE WHEN peaks."chrom" != genes."chrom" THEN NULL '
+            'WHEN peaks."start" < genes."end" '
+            'AND peaks."end" > genes."start" THEN 0 '
+            'WHEN peaks."end" <= genes."start" '
+            'THEN (genes."start" - peaks."end") '
+            'ELSE (peaks."start" - genes."end") END)\n'
             "                LIMIT 3\n"
             "            )"
         )
@@ -462,28 +462,28 @@ class TestBaseGIQLGenerator:
         expected = (
             "SELECT * FROM peaks CROSS JOIN LATERAL (\n"
             "                SELECT genes.*, "
-            'CASE WHEN peaks."chromosome" != genes."chromosome" THEN NULL '
-            'WHEN peaks."start_pos" < genes."end_pos" '
-            'AND peaks."end_pos" > genes."start_pos" THEN 0 '
-            'WHEN peaks."end_pos" <= genes."start_pos" '
-            'THEN (genes."start_pos" - peaks."end_pos") '
-            'ELSE (peaks."start_pos" - genes."end_pos") END AS distance\n'
+            'CASE WHEN peaks."chrom" != genes."chrom" THEN NULL '
+            'WHEN peaks."start" < genes."end" '
+            'AND peaks."end" > genes."start" THEN 0 '
+            'WHEN peaks."end" <= genes."start" '
+            'THEN (genes."start" - peaks."end") '
+            'ELSE (peaks."start" - genes."end") END AS distance\n'
             "                FROM genes\n"
-            '                WHERE peaks."chromosome" = genes."chromosome" '
+            '                WHERE peaks."chrom" = genes."chrom" '
             "AND (ABS("
-            'CASE WHEN peaks."chromosome" != genes."chromosome" THEN NULL '
-            'WHEN peaks."start_pos" < genes."end_pos" '
-            'AND peaks."end_pos" > genes."start_pos" THEN 0 '
-            'WHEN peaks."end_pos" <= genes."start_pos" '
-            'THEN (genes."start_pos" - peaks."end_pos") '
-            'ELSE (peaks."start_pos" - genes."end_pos") END)) <= 100000\n'
+            'CASE WHEN peaks."chrom" != genes."chrom" THEN NULL '
+            'WHEN peaks."start" < genes."end" '
+            'AND peaks."end" > genes."start" THEN 0 '
+            'WHEN peaks."end" <= genes."start" '
+            'THEN (genes."start" - peaks."end") '
+            'ELSE (peaks."start" - genes."end") END)) <= 100000\n'
             "                ORDER BY ABS("
-            'CASE WHEN peaks."chromosome" != genes."chromosome" THEN NULL '
-            'WHEN peaks."start_pos" < genes."end_pos" '
-            'AND peaks."end_pos" > genes."start_pos" THEN 0 '
-            'WHEN peaks."end_pos" <= genes."start_pos" '
-            'THEN (genes."start_pos" - peaks."end_pos") '
-            'ELSE (peaks."start_pos" - genes."end_pos") END)\n'
+            'CASE WHEN peaks."chrom" != genes."chrom" THEN NULL '
+            'WHEN peaks."start" < genes."end" '
+            'AND peaks."end" > genes."start" THEN 0 '
+            'WHEN peaks."end" <= genes."start" '
+            'THEN (genes."start" - peaks."end") '
+            'ELSE (peaks."start" - genes."end") END)\n'
             "                LIMIT 5\n"
             "            )"
         )
@@ -508,36 +508,36 @@ class TestBaseGIQLGenerator:
         expected = (
             "SELECT * FROM peaks CROSS JOIN LATERAL (\n"
             "                SELECT genes.*, "
-            'CASE WHEN peaks."chromosome" != genes."chromosome" THEN NULL '
+            'CASE WHEN peaks."chrom" != genes."chrom" THEN NULL '
             'WHEN peaks."strand" IS NULL OR genes."strand" IS NULL THEN NULL '
             "WHEN peaks.\"strand\" = '.' OR peaks.\"strand\" = '?' THEN NULL "
             "WHEN genes.\"strand\" = '.' OR genes.\"strand\" = '?' THEN NULL "
-            'WHEN peaks."start_pos" < genes."end_pos" '
-            'AND peaks."end_pos" > genes."start_pos" THEN 0 '
-            'WHEN peaks."end_pos" <= genes."start_pos" '
+            'WHEN peaks."start" < genes."end" '
+            'AND peaks."end" > genes."start" THEN 0 '
+            'WHEN peaks."end" <= genes."start" '
             "THEN CASE WHEN peaks.\"strand\" = '-' "
-            'THEN -(genes."start_pos" - peaks."end_pos") '
-            'ELSE (genes."start_pos" - peaks."end_pos") END '
+            'THEN -(genes."start" - peaks."end") '
+            'ELSE (genes."start" - peaks."end") END '
             "ELSE CASE WHEN peaks.\"strand\" = '-' "
-            'THEN -(peaks."start_pos" - genes."end_pos") '
-            'ELSE (peaks."start_pos" - genes."end_pos") END END AS distance\n'
+            'THEN -(peaks."start" - genes."end") '
+            'ELSE (peaks."start" - genes."end") END END AS distance\n'
             "                FROM genes\n"
-            '                WHERE peaks."chromosome" = genes."chromosome" '
+            '                WHERE peaks."chrom" = genes."chrom" '
             'AND peaks."strand" = genes."strand"\n'
             "                ORDER BY ABS("
-            'CASE WHEN peaks."chromosome" != genes."chromosome" THEN NULL '
+            'CASE WHEN peaks."chrom" != genes."chrom" THEN NULL '
             'WHEN peaks."strand" IS NULL OR genes."strand" IS NULL THEN NULL '
             "WHEN peaks.\"strand\" = '.' OR peaks.\"strand\" = '?' THEN NULL "
             "WHEN genes.\"strand\" = '.' OR genes.\"strand\" = '?' THEN NULL "
-            'WHEN peaks."start_pos" < genes."end_pos" '
-            'AND peaks."end_pos" > genes."start_pos" THEN 0 '
-            'WHEN peaks."end_pos" <= genes."start_pos" '
+            'WHEN peaks."start" < genes."end" '
+            'AND peaks."end" > genes."start" THEN 0 '
+            'WHEN peaks."end" <= genes."start" '
             "THEN CASE WHEN peaks.\"strand\" = '-' "
-            'THEN -(genes."start_pos" - peaks."end_pos") '
-            'ELSE (genes."start_pos" - peaks."end_pos") END '
+            'THEN -(genes."start" - peaks."end") '
+            'ELSE (genes."start" - peaks."end") END '
             "ELSE CASE WHEN peaks.\"strand\" = '-' "
-            'THEN -(peaks."start_pos" - genes."end_pos") '
-            'ELSE (peaks."start_pos" - genes."end_pos") END END)\n'
+            'THEN -(peaks."start" - genes."end") '
+            'ELSE (peaks."start" - genes."end") END END)\n'
             "                LIMIT 3\n"
             "            )"
         )
@@ -562,21 +562,21 @@ class TestBaseGIQLGenerator:
         expected = (
             "SELECT * FROM peaks CROSS JOIN LATERAL (\n"
             "                SELECT genes.*, "
-            'CASE WHEN peaks."chromosome" != genes."chromosome" THEN NULL '
-            'WHEN peaks."start_pos" < genes."end_pos" '
-            'AND peaks."end_pos" > genes."start_pos" THEN 0 '
-            'WHEN peaks."end_pos" <= genes."start_pos" '
-            'THEN (genes."start_pos" - peaks."end_pos") '
-            'ELSE -(peaks."start_pos" - genes."end_pos") END AS distance\n'
+            'CASE WHEN peaks."chrom" != genes."chrom" THEN NULL '
+            'WHEN peaks."start" < genes."end" '
+            'AND peaks."end" > genes."start" THEN 0 '
+            'WHEN peaks."end" <= genes."start" '
+            'THEN (genes."start" - peaks."end") '
+            'ELSE -(peaks."start" - genes."end") END AS distance\n'
             "                FROM genes\n"
-            '                WHERE peaks."chromosome" = genes."chromosome"\n'
+            '                WHERE peaks."chrom" = genes."chrom"\n'
             "                ORDER BY ABS("
-            'CASE WHEN peaks."chromosome" != genes."chromosome" THEN NULL '
-            'WHEN peaks."start_pos" < genes."end_pos" '
-            'AND peaks."end_pos" > genes."start_pos" THEN 0 '
-            'WHEN peaks."end_pos" <= genes."start_pos" '
-            'THEN (genes."start_pos" - peaks."end_pos") '
-            'ELSE -(peaks."start_pos" - genes."end_pos") END)\n'
+            'CASE WHEN peaks."chrom" != genes."chrom" THEN NULL '
+            'WHEN peaks."start" < genes."end" '
+            'AND peaks."end" > genes."start" THEN 0 '
+            'WHEN peaks."end" <= genes."start" '
+            'THEN (genes."start" - peaks."end") '
+            'ELSE -(peaks."start" - genes."end") END)\n'
             "                LIMIT 3\n"
             "            )"
         )
@@ -645,11 +645,11 @@ class TestBaseGIQLGenerator:
         output = generator.generate(ast)
 
         expected = (
-            'SELECT CASE WHEN a."chromosome" != b."chromosome" THEN NULL '
-            'WHEN a."start_pos" < b."end_pos" AND a."end_pos" > b."start_pos" '
-            'THEN 0 WHEN a."end_pos" <= b."start_pos" '
-            'THEN (b."start_pos" - a."end_pos") '
-            'ELSE (a."start_pos" - b."end_pos") END AS dist '
+            'SELECT CASE WHEN a."chrom" != b."chrom" THEN NULL '
+            'WHEN a."start" < b."end" AND a."end" > b."start" '
+            'THEN 0 WHEN a."end" <= b."start" '
+            'THEN (b."start" - a."end") '
+            'ELSE (a."start" - b."end") END AS dist '
             "FROM features_a AS a CROSS JOIN features_b AS b"
         )
         assert output == expected
@@ -670,19 +670,19 @@ class TestBaseGIQLGenerator:
         output = generator.generate(ast)
 
         expected = (
-            'SELECT CASE WHEN a."chromosome" != b."chromosome" THEN NULL '
+            'SELECT CASE WHEN a."chrom" != b."chrom" THEN NULL '
             'WHEN a."strand" IS NULL OR b."strand" IS NULL THEN NULL '
             "WHEN a.\"strand\" = '.' OR a.\"strand\" = '?' THEN NULL "
             "WHEN b.\"strand\" = '.' OR b.\"strand\" = '?' THEN NULL "
-            'WHEN a."start_pos" < b."end_pos" '
-            'AND a."end_pos" > b."start_pos" THEN 0 '
-            'WHEN a."end_pos" <= b."start_pos" '
+            'WHEN a."start" < b."end" '
+            'AND a."end" > b."start" THEN 0 '
+            'WHEN a."end" <= b."start" '
             "THEN CASE WHEN a.\"strand\" = '-' "
-            'THEN -(b."start_pos" - a."end_pos") '
-            'ELSE (b."start_pos" - a."end_pos") END '
+            'THEN -(b."start" - a."end") '
+            'ELSE (b."start" - a."end") END '
             "ELSE CASE WHEN a.\"strand\" = '-' "
-            'THEN -(a."start_pos" - b."end_pos") '
-            'ELSE (a."start_pos" - b."end_pos") END END AS dist '
+            'THEN -(a."start" - b."end") '
+            'ELSE (a."start" - b."end") END END AS dist '
             "FROM features_a AS a CROSS JOIN features_b AS b"
         )
         assert output == expected
@@ -703,11 +703,11 @@ class TestBaseGIQLGenerator:
         output = generator.generate(ast)
 
         expected = (
-            'SELECT CASE WHEN a."chromosome" != b."chromosome" THEN NULL '
-            'WHEN a."start_pos" < b."end_pos" AND a."end_pos" > b."start_pos" '
-            'THEN 0 WHEN a."end_pos" <= b."start_pos" '
-            'THEN (b."start_pos" - a."end_pos") '
-            'ELSE -(a."start_pos" - b."end_pos") END AS dist '
+            'SELECT CASE WHEN a."chrom" != b."chrom" THEN NULL '
+            'WHEN a."start" < b."end" AND a."end" > b."start" '
+            'THEN 0 WHEN a."end" <= b."start" '
+            'THEN (b."start" - a."end") '
+            'ELSE -(a."start" - b."end") END AS dist '
             "FROM features_a AS a CROSS JOIN features_b AS b"
         )
         assert output == expected
@@ -729,19 +729,19 @@ class TestBaseGIQLGenerator:
         output = generator.generate(ast)
 
         expected = (
-            'SELECT CASE WHEN a."chromosome" != b."chromosome" THEN NULL '
+            'SELECT CASE WHEN a."chrom" != b."chrom" THEN NULL '
             'WHEN a."strand" IS NULL OR b."strand" IS NULL THEN NULL '
             "WHEN a.\"strand\" = '.' OR a.\"strand\" = '?' THEN NULL "
             "WHEN b.\"strand\" = '.' OR b.\"strand\" = '?' THEN NULL "
-            'WHEN a."start_pos" < b."end_pos" '
-            'AND a."end_pos" > b."start_pos" THEN 0 '
-            'WHEN a."end_pos" <= b."start_pos" '
+            'WHEN a."start" < b."end" '
+            'AND a."end" > b."start" THEN 0 '
+            'WHEN a."end" <= b."start" '
             "THEN CASE WHEN a.\"strand\" = '-' "
-            'THEN -(b."start_pos" - a."end_pos") '
-            'ELSE (b."start_pos" - a."end_pos") END '
+            'THEN -(b."start" - a."end") '
+            'ELSE (b."start" - a."end") END '
             "ELSE CASE WHEN a.\"strand\" = '-' "
-            'THEN (a."start_pos" - b."end_pos") '
-            'ELSE -(a."start_pos" - b."end_pos") END END AS dist '
+            'THEN (a."start" - b."end") '
+            'ELSE -(a."start" - b."end") END END AS dist '
             "FROM features_a AS a CROSS JOIN features_b AS b"
         )
         assert output == expected
@@ -754,7 +754,7 @@ class TestBaseGIQLGenerator:
         """
         # Add a second table with closed intervals for distance calculation
         tables_with_closed_intervals.register(
-            "bed_features_b", Table(interval_type="closed")
+            "bed_features_b", Table("bed_features_b", interval_type="closed")
         )
 
         sql = (
@@ -767,12 +767,12 @@ class TestBaseGIQLGenerator:
         output = generator.generate(ast)
 
         expected = (
-            'SELECT CASE WHEN a."chromosome" != b."chromosome" THEN NULL '
-            'WHEN a."start_pos" < b."end_pos" '
-            'AND a."end_pos" > b."start_pos" THEN 0 '
-            'WHEN a."end_pos" <= b."start_pos" '
-            'THEN (b."start_pos" - a."end_pos" + 1) '
-            'ELSE (a."start_pos" - b."end_pos" + 1) END AS dist '
+            'SELECT CASE WHEN a."chrom" != b."chrom" THEN NULL '
+            'WHEN a."start" < b."end" '
+            'AND a."end" > b."start" THEN 0 '
+            'WHEN a."end" <= b."start" '
+            'THEN (b."start" - a."end" + 1) '
+            'ELSE (a."start" - b."end" + 1) END AS dist '
             "FROM bed_features AS a CROSS JOIN bed_features_b AS b"
         )
         assert output == expected
@@ -873,7 +873,7 @@ class TestBaseGIQLGenerator:
         THEN Distance calculation includes +1 adjustment for bedtools compatibility.
         """
         tables = Tables()
-        tables.register("genes_closed", Table(interval_type="closed"))
+        tables.register("genes_closed", Table("genes_closed", interval_type="closed"))
 
         sql = "SELECT * FROM NEAREST(genes_closed, reference='chr1:1000-2000', k=3)"
         ast = parse_one(sql, dialect=GIQLDialect)
@@ -939,7 +939,7 @@ class TestBaseGIQLGenerator:
         THEN ValueError is raised listing the issue.
         """
         tables = Tables()
-        tables.register("genes", Table())
+        tables.register("genes", Table("genes"))
 
         nearest = GIQLNearest(
             this=exp.Table(this=exp.Identifier(this="genes")),
@@ -1010,7 +1010,7 @@ class TestBaseGIQLGenerator:
 
         expected = (
             "SELECT * FROM variants WHERE "
-            '("chromosome" = \'chr1\' AND "start_pos" < 2000 AND "end_pos" > 1000)'
+            '("chrom" = \'chr1\' AND "start" < 2000 AND "end" > 1000)'
         )
         assert output == expected
 

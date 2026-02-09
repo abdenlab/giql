@@ -23,9 +23,9 @@ class TestTranspileBasic:
 
         assert "SELECT" in sql
         assert "peaks" in sql
-        assert "chromosome" in sql
-        assert "start_pos" in sql
-        assert "end_pos" in sql
+        assert "chrom" in sql
+        assert "start" in sql
+        assert "end" in sql
         assert "chr1" in sql
 
     def test_transpile_contains_literal(self):
@@ -82,25 +82,26 @@ class TestTranspileWithTableObjects:
         """
         sql = transpile(
             "SELECT * FROM peaks WHERE interval INTERSECTS 'chr1:1000-2000'",
-            tables={
-                "peaks": Table(
+            tables=[
+                Table(
+                    "peaks",
                     genomic_col="interval",
-                    chrom_col="chrom",
-                    start_col="start",
-                    end_col="end",
+                    chrom_col="chromosome",
+                    start_col="start_pos",
+                    end_col="end_pos",
                 )
-            },
+            ],
         )
 
         assert "SELECT" in sql
         assert "peaks" in sql
-        assert '"chrom"' in sql
-        assert '"start"' in sql
-        assert '"end"' in sql
+        assert '"chromosome"' in sql
+        assert '"start_pos"' in sql
+        assert '"end_pos"' in sql
         # Should NOT contain default column names
-        assert "chromosome" not in sql
-        assert "start_pos" not in sql
-        assert "end_pos" not in sql
+        assert '"chrom"' not in sql
+        assert '"start"' not in sql
+        assert '"end"' not in sql
 
     def test_transpile_no_strand_column(self):
         """
@@ -110,9 +111,7 @@ class TestTranspileWithTableObjects:
         """
         sql = transpile(
             "SELECT * FROM peaks WHERE interval INTERSECTS 'chr1:1000-2000'",
-            tables={
-                "peaks": Table(strand_col=None)
-            },
+            tables=[Table("peaks", strand_col=None)],
         )
 
         assert "SELECT" in sql
@@ -133,10 +132,10 @@ class TestTranspileMultipleTables:
             FROM peaks a
             JOIN genes b ON a.interval INTERSECTS b.region
             """,
-            tables={
-                "peaks": Table(genomic_col="interval"),
-                "genes": Table(genomic_col="region"),
-            },
+            tables=[
+                Table("peaks", genomic_col="interval"),
+                Table("genes", genomic_col="region"),
+            ],
         )
 
         assert "SELECT" in sql
@@ -156,20 +155,22 @@ class TestTranspileMultipleTables:
             FROM peaks a
             JOIN features b ON a.interval INTERSECTS b.location
             """,
-            tables={
-                "peaks": Table(
+            tables=[
+                Table(
+                    "peaks",
                     genomic_col="interval",
                     chrom_col="chromosome",
                     start_col="start_pos",
                     end_col="end_pos",
                 ),
-                "features": Table(
+                Table(
+                    "features",
                     genomic_col="location",
                     chrom_col="seqname",
                     start_col="begin",
                     end_col="terminus",
                 ),
-            },
+            ],
         )
 
         assert "SELECT" in sql

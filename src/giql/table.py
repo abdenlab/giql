@@ -23,17 +23,19 @@ class Table:
 
     Parameters
     ----------
+    name : str
+        The table name.
     genomic_col : str
         The pseudo-column name used in GIQL queries to reference the genomic
         interval (default: "interval").
     chrom_col : str
-        The physical column name storing chromosome/contig (default: "chromosome").
+        The physical column name storing chromosome/contig (default: "chrom").
     start_col : str
         The physical column name storing interval start position
-        (default: "start_pos").
+        (default: "start").
     end_col : str
         The physical column name storing interval end position
-        (default: "end_pos").
+        (default: "end").
     strand_col : str | None
         The physical column name storing strand information, or None if the
         table has no strand column (default: "strand").
@@ -48,12 +50,14 @@ class Table:
 
         sql = transpile(query, tables=["peaks"])
 
-    Using custom column names::
+    Mixing default and custom table configurations::
 
         sql = transpile(
             query,
-            tables={
-                "variants": Table(
+            tables=[
+                "peaks",
+                Table(
+                    "variants",
                     genomic_col="position",
                     chrom_col="chr",
                     start_col="pos_start",
@@ -61,11 +65,12 @@ class Table:
                     strand_col=None,  # No strand column
                     coordinate_system="1based",
                     interval_type="closed",
-                )
-            }
+                ),
+            ]
         )
     """
 
+    name: str
     genomic_col: str = DEFAULT_GENOMIC_COL
     chrom_col: str = DEFAULT_CHROM_COL
     start_col: str = DEFAULT_START_COL

@@ -17,8 +17,8 @@ from giql.table import Tables
 def tables_with_peaks_and_genes():
     """Tables container with peaks and genes tables."""
     tables = Tables()
-    tables.register("peaks", Table())
-    tables.register("genes", Table())
+    tables.register("peaks", Table("peaks"))
+    tables.register("genes", Table("genes"))
     return tables
 
 

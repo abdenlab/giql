@@ -27,7 +27,7 @@ class TestDistanceTranspilation:
         generator = BaseGIQLGenerator()
         output = generator.generate(ast)
 
-        expected = """SELECT CASE WHEN a."chromosome" != b."chromosome" THEN NULL WHEN a."start_pos" < b."end_pos" AND a."end_pos" > b."start_pos" THEN 0 WHEN a."end_pos" <= b."start_pos" THEN (b."start_pos" - a."end_pos") ELSE (a."start_pos" - b."end_pos") END AS dist FROM features_a AS a CROSS JOIN features_b AS b"""
+        expected = """SELECT CASE WHEN a."chrom" != b."chrom" THEN NULL WHEN a."start" < b."end" AND a."end" > b."start" THEN 0 WHEN a."end" <= b."start" THEN (b."start" - a."end") ELSE (a."start" - b."end") END AS dist FROM features_a AS a CROSS JOIN features_b AS b"""
 
         assert output == expected, f"Expected:\n{expected}\n\nGot:\n{output}"
 
@@ -46,7 +46,7 @@ class TestDistanceTranspilation:
         generator = BaseGIQLGenerator()
         output = generator.generate(ast)
 
-        expected = """SELECT CASE WHEN a."chromosome" != b."chromosome" THEN NULL WHEN a."start_pos" < b."end_pos" AND a."end_pos" > b."start_pos" THEN 0 WHEN a."end_pos" <= b."start_pos" THEN (b."start_pos" - a."end_pos") ELSE (a."start_pos" - b."end_pos") END AS dist FROM features_a AS a, features_b AS b"""
+        expected = """SELECT CASE WHEN a."chrom" != b."chrom" THEN NULL WHEN a."start" < b."end" AND a."end" > b."start" THEN 0 WHEN a."end" <= b."start" THEN (b."start" - a."end") ELSE (a."start" - b."end") END AS dist FROM features_a AS a, features_b AS b"""
 
         assert output == expected, f"Expected:\n{expected}\n\nGot:\n{output}"
 
@@ -65,7 +65,7 @@ class TestDistanceTranspilation:
         generator = BaseGIQLGenerator()
         output = generator.generate(ast)
 
-        expected = """SELECT CASE WHEN a."chromosome" != b."chromosome" THEN NULL WHEN a."start_pos" < b."end_pos" AND a."end_pos" > b."start_pos" THEN 0 WHEN a."end_pos" <= b."start_pos" THEN (b."start_pos" - a."end_pos") ELSE (a."start_pos" - b."end_pos") END AS dist FROM features_a AS a CROSS JOIN features_b AS b"""
+        expected = """SELECT CASE WHEN a."chrom" != b."chrom" THEN NULL WHEN a."start" < b."end" AND a."end" > b."start" THEN 0 WHEN a."end" <= b."start" THEN (b."start" - a."end") ELSE (a."start" - b."end") END AS dist FROM features_a AS a CROSS JOIN features_b AS b"""
 
         assert output == expected, f"Expected:\n{expected}\n\nGot:\n{output}"
 
@@ -88,10 +88,10 @@ class TestDistanceTranspilation:
         # Signed distance: upstream (B before A) returns negative,
         # downstream (B after A) returns positive
         expected = (
-            'SELECT CASE WHEN a."chromosome" != b."chromosome" THEN NULL '
-            'WHEN a."start_pos" < b."end_pos" AND a."end_pos" > b."start_pos" THEN 0 '
-            'WHEN a."end_pos" <= b."start_pos" THEN (b."start_pos" - a."end_pos") '
-            'ELSE -(a."start_pos" - b."end_pos") END AS dist '
+            'SELECT CASE WHEN a."chrom" != b."chrom" THEN NULL '
+            'WHEN a."start" < b."end" AND a."end" > b."start" THEN 0 '
+            'WHEN a."end" <= b."start" THEN (b."start" - a."end") '
+            'ELSE -(a."start" - b."end") END AS dist '
             "FROM features_a AS a CROSS JOIN features_b AS b"
         )
 

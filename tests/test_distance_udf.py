@@ -26,9 +26,9 @@ class TestDistanceCalculation:
         SELECT
             DISTANCE(a.interval, b.interval) as distance
         FROM
-            (SELECT 'chr1' as chromosome, 100 as start_pos, 200 as end_pos) a
+            (SELECT 'chr1' as chrom, 100 as start, 200 as end) a
         CROSS JOIN
-            (SELECT 'chr1' as chromosome, 150 as start_pos, 250 as end_pos) b
+            (SELECT 'chr1' as chrom, 150 as start, 250 as end) b
         """
 
         # Parse and generate SQL
@@ -64,9 +64,9 @@ class TestDistanceCalculation:
         SELECT
             DISTANCE(a.interval, b.interval) as distance
         FROM
-            (SELECT 'chr1' as chromosome, 100 as start_pos, 200 as end_pos) a
+            (SELECT 'chr1' as chrom, 100 as start, 200 as end) a
         CROSS JOIN
-            (SELECT 'chr1' as chromosome, 300 as start_pos, 400 as end_pos) b
+            (SELECT 'chr1' as chrom, 300 as start, 400 as end) b
         """
 
         ast = parse_one(sql, dialect=GIQLDialect)
@@ -91,9 +91,9 @@ class TestDistanceCalculation:
         SELECT
             DISTANCE(a.interval, b.interval) as distance
         FROM
-            (SELECT 'chr1' as chromosome, 100 as start_pos, 200 as end_pos) a
+            (SELECT 'chr1' as chrom, 100 as start, 200 as end) a
         CROSS JOIN
-            (SELECT 'chr2' as chromosome, 150 as start_pos, 250 as end_pos) b
+            (SELECT 'chr2' as chrom, 150 as start, 250 as end) b
         """
 
         ast = parse_one(sql, dialect=GIQLDialect)
@@ -122,9 +122,9 @@ class TestDistanceCalculation:
         SELECT
             DISTANCE(a.interval, b.interval) as distance
         FROM
-            (SELECT 'chr1' as chromosome, 100 as start_pos, 200 as end_pos) a
+            (SELECT 'chr1' as chrom, 100 as start, 200 as end) a
         CROSS JOIN
-            (SELECT 'chr1' as chromosome, 200 as start_pos, 300 as end_pos) b
+            (SELECT 'chr1' as chrom, 200 as start, 300 as end) b
         """
 
         ast = parse_one(sql, dialect=GIQLDialect)
@@ -154,9 +154,9 @@ class TestDistanceCalculation:
         SELECT
             DISTANCE(a.interval, b.interval) as distance
         FROM
-            (SELECT 'chr1' as chromosome, 150 as start_pos, 150 as end_pos) a
+            (SELECT 'chr1' as chrom, 150 as start, 150 as end) a
         CROSS JOIN
-            (SELECT 'chr1' as chromosome, 300 as start_pos, 400 as end_pos) b
+            (SELECT 'chr1' as chrom, 300 as start, 400 as end) b
         """
 
         ast = parse_one(sql, dialect=GIQLDialect)
@@ -185,9 +185,9 @@ class TestStrandedDistance:
         SELECT
             DISTANCE(a.interval, b.interval, stranded=true) as distance
         FROM
-            (SELECT 'chr1' as chromosome, 100 as start_pos, 200 as end_pos, '+' as strand) a
+            (SELECT 'chr1' as chrom, 100 as start, 200 as end, '+' as strand) a
         CROSS JOIN
-            (SELECT 'chr1' as chromosome, 300 as start_pos, 400 as end_pos, '+' as strand) b
+            (SELECT 'chr1' as chrom, 300 as start, 400 as end, '+' as strand) b
         """
 
         ast = parse_one(sql, dialect=GIQLDialect)
@@ -212,9 +212,9 @@ class TestStrandedDistance:
         SELECT
             DISTANCE(a.interval, b.interval, stranded=true) as distance
         FROM
-            (SELECT 'chr1' as chromosome, 100 as start_pos, 200 as end_pos, '-' as strand) a
+            (SELECT 'chr1' as chrom, 100 as start, 200 as end, '-' as strand) a
         CROSS JOIN
-            (SELECT 'chr1' as chromosome, 300 as start_pos, 400 as end_pos, '-' as strand) b
+            (SELECT 'chr1' as chrom, 300 as start, 400 as end, '-' as strand) b
         """
 
         ast = parse_one(sql, dialect=GIQLDialect)
@@ -239,9 +239,9 @@ class TestStrandedDistance:
         SELECT
             DISTANCE(a.interval, b.interval, stranded=true) as distance
         FROM
-            (SELECT 'chr1' as chromosome, 100 as start_pos, 200 as end_pos, '+' as strand) a
+            (SELECT 'chr1' as chrom, 100 as start, 200 as end, '+' as strand) a
         CROSS JOIN
-            (SELECT 'chr1' as chromosome, 300 as start_pos, 400 as end_pos, '-' as strand) b
+            (SELECT 'chr1' as chrom, 300 as start, 400 as end, '-' as strand) b
         """
 
         ast = parse_one(sql, dialect=GIQLDialect)
@@ -266,9 +266,9 @@ class TestStrandedDistance:
         SELECT
             DISTANCE(a.interval, b.interval, stranded=true) as distance
         FROM
-            (SELECT 'chr1' as chromosome, 100 as start_pos, 200 as end_pos, '-' as strand) a
+            (SELECT 'chr1' as chrom, 100 as start, 200 as end, '-' as strand) a
         CROSS JOIN
-            (SELECT 'chr1' as chromosome, 300 as start_pos, 400 as end_pos, '+' as strand) b
+            (SELECT 'chr1' as chrom, 300 as start, 400 as end, '+' as strand) b
         """
 
         ast = parse_one(sql, dialect=GIQLDialect)
@@ -293,9 +293,9 @@ class TestStrandedDistance:
         SELECT
             DISTANCE(a.interval, b.interval, stranded=true) as distance
         FROM
-            (SELECT 'chr1' as chromosome, 100 as start_pos, 200 as end_pos, '.' as strand) a
+            (SELECT 'chr1' as chrom, 100 as start, 200 as end, '.' as strand) a
         CROSS JOIN
-            (SELECT 'chr1' as chromosome, 300 as start_pos, 400 as end_pos, '.' as strand) b
+            (SELECT 'chr1' as chrom, 300 as start, 400 as end, '.' as strand) b
         """
 
         ast = parse_one(sql, dialect=GIQLDialect)
@@ -320,9 +320,9 @@ class TestStrandedDistance:
         SELECT
             DISTANCE(a.interval, b.interval, stranded=true) as distance
         FROM
-            (SELECT 'chr1' as chromosome, 100 as start_pos, 200 as end_pos, '?' as strand) a
+            (SELECT 'chr1' as chrom, 100 as start, 200 as end, '?' as strand) a
         CROSS JOIN
-            (SELECT 'chr1' as chromosome, 300 as start_pos, 400 as end_pos, '+' as strand) b
+            (SELECT 'chr1' as chrom, 300 as start, 400 as end, '+' as strand) b
         """
 
         ast = parse_one(sql, dialect=GIQLDialect)
@@ -347,9 +347,9 @@ class TestStrandedDistance:
         SELECT
             DISTANCE(a.interval, b.interval, stranded=true) as distance
         FROM
-            (SELECT 'chr1' as chromosome, 100 as start_pos, 200 as end_pos, NULL as strand) a
+            (SELECT 'chr1' as chrom, 100 as start, 200 as end, NULL as strand) a
         CROSS JOIN
-            (SELECT 'chr1' as chromosome, 300 as start_pos, 400 as end_pos, '+' as strand) b
+            (SELECT 'chr1' as chrom, 300 as start, 400 as end, '+' as strand) b
         """
 
         ast = parse_one(sql, dialect=GIQLDialect)
@@ -374,9 +374,9 @@ class TestStrandedDistance:
         SELECT
             DISTANCE(a.interval, b.interval, stranded=true) as distance
         FROM
-            (SELECT 'chr1' as chromosome, 100 as start_pos, 200 as end_pos, '-' as strand) a
+            (SELECT 'chr1' as chrom, 100 as start, 200 as end, '-' as strand) a
         CROSS JOIN
-            (SELECT 'chr1' as chromosome, 150 as start_pos, 250 as end_pos, '-' as strand) b
+            (SELECT 'chr1' as chrom, 150 as start, 250 as end, '-' as strand) b
         """
 
         ast = parse_one(sql, dialect=GIQLDialect)
