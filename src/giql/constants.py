@@ -4,8 +4,8 @@ This module defines default column names and other constants used throughout GIQ
 """
 
 # Default genomic column names
-DEFAULT_CHROM_COL = "chromosome"
-DEFAULT_START_COL = "start_pos"
-DEFAULT_END_COL = "end_pos"
+DEFAULT_CHROM_COL = "chrom"
+DEFAULT_START_COL = "start"
+DEFAULT_END_COL = "end"
 DEFAULT_STRAND_COL = "strand"
 DEFAULT_GENOMIC_COL = "interval"

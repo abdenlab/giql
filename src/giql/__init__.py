@@ -1,19 +1,22 @@
 """GIQL - Genomic Interval Query Language.
 
-A SQL dialect for genomic range queries with multi-database support.
+A SQL dialect for genomic range queries.
 
 This package provides:
-    - GIQL dialect extending SQL with spatial operators
-    - Query engine supporting multiple backends (DuckDB, SQLite)
+    - GIQL dialect extending SQL with spatial operators (INTERSECTS, CONTAINS, WITHIN)
+    - CLUSTER and MERGE operations for interval grouping
+    - NEAREST operator for finding closest intervals
     - Range parser for genomic coordinate strings
-    - Schema management for genomic data
+    - Transpilation to standard SQL-92 compatible output
 """
 
-from giql.engine import GIQLEngine as GIQLEngine
+from giql.table import Table
+from giql.transpile import transpile
 
 __version__ = "0.1.0"
 
 
 __all__ = [
-    "GIQLEngine",
+    "Table",
+    "transpile",
 ]
