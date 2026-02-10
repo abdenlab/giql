@@ -27,7 +27,7 @@ name = "giql"
 readme = "README.md"
 requires-python = ">=3.11"
 
-[project.optional-dependencies]
+[dependency-groups]
 dev = [
     "duckdb>=1.4.0",
     "hypothesis>=6.0.0",
@@ -36,6 +36,12 @@ dev = [
     "pytest-cov>=4.0.0",
     "pytest>=7.0.0",
     "ruff>=0.1.0",
+]
+docs = [
+    "sphinx>=7.0",
+    "sphinx-autobuild>=2024.0",
+    "sphinx-book-theme>=1.1",
+    "sphinx-design>=0.6",
 ]
 
 [tool.hatch.metadata.hooks.custom]
