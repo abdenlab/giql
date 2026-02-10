@@ -1,4 +1,7 @@
-# GIQL - Genomic Interval Query Language
+# GIQL
+
+<p align="center">Genomic Interval Query Language (GIQL)</p>
+<p align="center"><i>/JEE-quel/</i></p>
 
 <samp>
   <p align="center">
@@ -34,6 +37,16 @@ sql = transpile(
     tables=["peaks"],
 )
 print(sql)
+```
+
+```sql
+SELECT
+  *
+FROM peaks
+WHERE
+  (
+    "chrom" = 'chr1' AND "start" < 2000 AND "end" > 1000
+  )
 ```
 
 Each table referenced in a GIQL query exposes a genomic "pseudo-column" that maps to separate logical chromosome, start, end, and strand columns. You can customize the column mappings.
