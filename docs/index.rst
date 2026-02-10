@@ -1,8 +1,16 @@
 Genomic Interval Query Language (GIQL)
 ======================================
 
+.. toctree::
+   :hidden:
+
+   Home <self>
+   guides/quickstart
+
 **GIQL** is an extended SQL dialect that allows you to declaratively express genomic interval operations.
 
+See the :doc:`guides/quickstart` to get started.
+   
 Dialect
 -------
 GIQL extends the SQL query language with dedicated constructs for these 
@@ -40,7 +48,6 @@ See the following guides to learn how to use GIQL effectively:
    :maxdepth: 1
    :caption: Guides and Recipes
 
-   guides/quickstart
    guides/index
    recipes/index
 

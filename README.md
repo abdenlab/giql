@@ -3,8 +3,8 @@
 <samp>
   <p align="center">
       <a href="https://giql.readthedocs.io/">docs</a> |
-      <a href="https://giql.readthedocs.io/dialect">syntax</a> |
-      <a href="https://giql.readthedocs.io/transpilation">transpiler</a>
+      <a href="https://giql.readthedocs.io/en/latest/dialect/index.html">syntax</a> |
+      <a href="https://giql.readthedocs.io/en/latest/transpilation/index.html">transpiler</a>
   </p>
 </samp>
 
