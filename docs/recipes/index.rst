@@ -11,34 +11,21 @@ using GIQL. Each recipe focuses on a specific use case with ready-to-use query p
 Getting Started with Recipes
 ----------------------------
 
-All recipes assume you have set up a GIQL engine and registered your table schemas:
+All recipes show GIQL queries that you can transpile and execute on your database.
+Setup:
 
 .. code-block:: python
 
-   from giql import GIQLEngine
+   from giql import transpile
 
-   with GIQLEngine(target_dialect="duckdb") as engine:
-       # Load your data
-       engine.load_csv("features_a", "file_a.bed")
-       engine.load_csv("features_b", "file_b.bed")
+   # Transpile any GIQL query to SQL
+   sql = transpile(
+       "... GIQL query from the recipes below ...",
+       tables=["features_a", "features_b"],
+   )
 
-       # Register schemas with genomic column mapping
-       for table in ["features_a", "features_b"]:
-           engine.register_table_schema(
-               table,
-               {
-                   "chromosome": "VARCHAR",
-                   "start_pos": "BIGINT",
-                   "end_pos": "BIGINT",
-                   "name": "VARCHAR",
-                   "score": "FLOAT",
-                   "strand": "VARCHAR",
-               },
-               genomic_column="interval",
-           )
-
-       # Now run queries from the recipes below
-       cursor = engine.execute("...")
+   # Then execute the SQL on your database connection
+   # e.g., conn.execute(sql)
 
 Recipe Categories
 -----------------

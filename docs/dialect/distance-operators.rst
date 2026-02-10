@@ -1,5 +1,5 @@
-Distance and Proximity Operators
-================================
+Distance and Proximity
+======================
 
 Distance and proximity operators calculate genomic distances and find nearest features.
 These operators are essential for proximity analysis, such as finding genes near
@@ -7,7 +7,7 @@ regulatory elements or variants near transcription start sites.
 
 .. contents::
    :local:
-   :depth: 2
+   :depth: 1
 
 .. _distance-operator:
 
@@ -37,7 +37,7 @@ Parameters
 ~~~~~~~~~~
 
 **interval_a**
-   A genomic column registered with the engine.
+   A genomic column.
 
 **interval_b**
    Another genomic column to measure distance to.
@@ -56,52 +56,46 @@ Examples
 
 Calculate distance between peaks and genes:
 
-.. code-block:: python
+.. code-block:: sql
 
-   cursor = engine.execute("""
-       SELECT
-           p.name AS peak,
-           g.name AS gene,
-           DISTANCE(p.interval, g.interval) AS distance
-       FROM peaks p
-       CROSS JOIN genes g
-       WHERE p.chromosome = g.chromosome
-       ORDER BY p.name, distance
-   """)
+   SELECT
+       p.name AS peak,
+       g.name AS gene,
+       DISTANCE(p.interval, g.interval) AS distance
+   FROM peaks p
+   CROSS JOIN genes g
+   WHERE p.chrom = g.chrom
+   ORDER BY p.name, distance
 
 **Filter by Distance:**
 
 Find features within 10kb of each other:
 
-.. code-block:: python
+.. code-block:: sql
 
-   cursor = engine.execute("""
-       SELECT a.name, b.name, DISTANCE(a.interval, b.interval) AS dist
-       FROM features_a a
-       CROSS JOIN features_b b
-       WHERE a.chromosome = b.chromosome
-         AND DISTANCE(a.interval, b.interval) <= 10000
-   """)
+   SELECT a.name, b.name, DISTANCE(a.interval, b.interval) AS dist
+   FROM features_a a
+   CROSS JOIN features_b b
+   WHERE a.chrom = b.chrom
+     AND DISTANCE(a.interval, b.interval) <= 10000
 
 **Identify Overlapping vs. Proximal:**
 
 Distinguish between overlapping and nearby features:
 
-.. code-block:: python
+.. code-block:: sql
 
-   cursor = engine.execute("""
-       SELECT
-           p.name,
-           g.name,
-           CASE
-               WHEN DISTANCE(p.interval, g.interval) = 0 THEN 'overlapping'
-               WHEN DISTANCE(p.interval, g.interval) <= 1000 THEN 'proximal'
-               ELSE 'distant'
-           END AS relationship
-       FROM peaks p
-       CROSS JOIN genes g
-       WHERE p.chromosome = g.chromosome
-   """)
+   SELECT
+       p.name,
+       g.name,
+       CASE
+           WHEN DISTANCE(p.interval, g.interval) = 0 THEN 'overlapping'
+           WHEN DISTANCE(p.interval, g.interval) <= 1000 THEN 'proximal'
+           ELSE 'distant'
+       END AS relationship
+   FROM peaks p
+   CROSS JOIN genes g
+   WHERE p.chrom = g.chrom
 
 Backend Compatibility
 ~~~~~~~~~~~~~~~~~~~~~
@@ -126,7 +120,7 @@ Backend Compatibility
 Performance Notes
 ~~~~~~~~~~~~~~~~~
 
-- Always include ``WHERE a.chromosome = b.chromosome`` to avoid unnecessary
+- Always include ``WHERE a.chrom = b.chrom`` to avoid unnecessary
   cross-chromosome comparisons
 - For large datasets, consider pre-filtering by region before calculating distances
 - Create indexes on chromosome and position columns for better performance
@@ -219,136 +213,124 @@ Examples
 
 Find the 3 nearest genes for each peak:
 
-.. code-block:: python
+.. code-block:: sql
 
-   cursor = engine.execute("""
-       SELECT
-           peaks.name AS peak,
-           nearest.name AS gene,
-           nearest.distance
-       FROM peaks
-       CROSS JOIN LATERAL NEAREST(genes, reference=peaks.interval, k=3) AS nearest
-       ORDER BY peaks.name, nearest.distance
-   """)
+   SELECT
+       peaks.name AS peak,
+       nearest.name AS gene,
+       nearest.distance
+   FROM peaks
+   CROSS JOIN LATERAL NEAREST(genes, reference=peaks.interval, k=3) AS nearest
+   ORDER BY peaks.name, nearest.distance
 
 **Standalone Query:**
 
 Find 5 nearest genes to a specific genomic location:
 
-.. code-block:: python
+.. code-block:: sql
 
-   cursor = engine.execute("""
-       SELECT gene_name, distance
-       FROM NEAREST(genes, reference='chr1:1000000-1001000', k=5)
-       ORDER BY distance
-   """)
+   SELECT gene_name, distance
+   FROM NEAREST(genes, reference='chr1:1000000-1001000', k=5)
+   ORDER BY distance
 
 **Distance-Constrained Search:**
 
 Find nearest features within 100kb:
 
-.. code-block:: python
+.. code-block:: sql
 
-   cursor = engine.execute("""
-       SELECT
-           peaks.name,
-           nearest.name AS gene,
-           nearest.distance
-       FROM peaks
-       CROSS JOIN LATERAL NEAREST(
-           genes,
-           reference=peaks.interval,
-           k=5,
-           max_distance=100000
-       ) AS nearest
-       ORDER BY peaks.name, nearest.distance
-   """)
+   SELECT
+       peaks.name,
+       nearest.name AS gene,
+       nearest.distance
+   FROM peaks
+   CROSS JOIN LATERAL NEAREST(
+       genes,
+       reference=peaks.interval,
+       k=5,
+       max_distance=100000
+   ) AS nearest
+   ORDER BY peaks.name, nearest.distance
 
 **Strand-Specific Nearest Neighbors:**
 
 Find nearest same-strand features:
 
-.. code-block:: python
+.. code-block:: sql
 
-   cursor = engine.execute("""
-       SELECT
-           peaks.name,
-           nearest.name AS gene,
-           nearest.strand,
-           nearest.distance
-       FROM peaks
-       CROSS JOIN LATERAL NEAREST(
-           genes,
-           reference=peaks.interval,
-           k=3,
-           stranded=true
-       ) AS nearest
-       ORDER BY peaks.name, nearest.distance
-   """)
+   SELECT
+       peaks.name,
+       nearest.name AS gene,
+       nearest.strand,
+       nearest.distance
+   FROM peaks
+   CROSS JOIN LATERAL NEAREST(
+       genes,
+       reference=peaks.interval,
+       k=3,
+       stranded=true
+   ) AS nearest
+   ORDER BY peaks.name, nearest.distance
 
 **Directional (Upstream/Downstream) Queries:**
 
 Find upstream features using signed distances:
 
-.. code-block:: python
+.. code-block:: sql
 
-   # Upstream features have negative distances
-   cursor = engine.execute("""
-       SELECT
-           peaks.name,
-           nearest.name AS gene,
-           nearest.distance
-       FROM peaks
-       CROSS JOIN LATERAL NEAREST(
-           genes,
-           reference=peaks.interval,
-           k=10,
-           signed=true
-       ) AS nearest
-       WHERE nearest.distance < 0
-       ORDER BY peaks.name, nearest.distance DESC
-   """)
+   -- Upstream features have negative distances
+   SELECT
+       peaks.name,
+       nearest.name AS gene,
+       nearest.distance
+   FROM peaks
+   CROSS JOIN LATERAL NEAREST(
+       genes,
+       reference=peaks.interval,
+       k=10,
+       signed=true
+   ) AS nearest
+   WHERE nearest.distance < 0
+   ORDER BY peaks.name, nearest.distance DESC
 
-   # Downstream features have positive distances
-   cursor = engine.execute("""
-       SELECT
-           peaks.name,
-           nearest.name AS gene,
-           nearest.distance
-       FROM peaks
-       CROSS JOIN LATERAL NEAREST(
-           genes,
-           reference=peaks.interval,
-           k=10,
-           signed=true
-       ) AS nearest
-       WHERE nearest.distance > 0
-       ORDER BY peaks.name, nearest.distance
-   """)
+.. code-block:: sql
+
+   -- Downstream features have positive distances
+   SELECT
+       peaks.name,
+       nearest.name AS gene,
+       nearest.distance
+   FROM peaks
+   CROSS JOIN LATERAL NEAREST(
+       genes,
+       reference=peaks.interval,
+       k=10,
+       signed=true
+   ) AS nearest
+   WHERE nearest.distance > 0
+   ORDER BY peaks.name, nearest.distance
 
 **Combined Parameters:**
 
 Find nearby same-strand features within distance constraints:
 
-.. code-block:: python
+.. code-block:: sql
 
-   cursor = engine.execute("""
-       SELECT
-           peaks.name,
-           nearest.name AS gene,
-           nearest.distance
-       FROM peaks
-       CROSS JOIN LATERAL NEAREST(
-           genes,
-           reference=peaks.interval,
-           k=5,
-           max_distance=50000,
-           stranded=true,
-           signed=true
-       ) AS nearest
-       WHERE nearest.distance BETWEEN -10000 AND 10000
-       ORDER BY peaks.name, ABS(nearest.distance)
-   """)
+   SELECT
+       peaks.name,
+       nearest.name AS gene,
+       nearest.distance
+   FROM peaks
+   CROSS JOIN LATERAL NEAREST(
+       genes,
+       reference=peaks.interval,
+       k=5,
+       max_distance=50000,
+       stranded=true,
+       signed=true
+   ) AS nearest
+   WHERE nearest.distance BETWEEN -10000 AND 10000
+   ORDER BY peaks.name, ABS(nearest.distance)
 
 Backend Compatibility
 ~~~~~~~~~~~~~~~~~~~~~
@@ -376,15 +358,13 @@ Performance Notes
 - **Chromosome pre-filtering**: NEAREST automatically filters by chromosome for efficiency
 - **Use max_distance**: Specifying a maximum distance reduces the search space significantly
 - **Limit k**: Only request as many neighbors as you actually need
-- **Create indexes**: Add indexes on ``(chromosome, start_pos, end_pos)`` for better performance
+- **Create indexes**: Add indexes on ``(chrom, start, "end")`` for better performance
 
-.. code-block:: python
+.. code-block:: sql
 
-   # Create indexes for better NEAREST performance
-   engine.conn.execute("""
-       CREATE INDEX idx_genes_position
-       ON genes (chromosome, start_pos, end_pos)
-   """)
+   -- Create indexes for better NEAREST performance
+   CREATE INDEX idx_genes_position
+   ON genes (chrom, start, "end")
 
 Related Operators
 ~~~~~~~~~~~~~~~~~

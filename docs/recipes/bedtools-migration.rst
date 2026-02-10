@@ -20,19 +20,19 @@ Quick Reference Table
      - GIQL Equivalent
      - Recipe
    * - ``intersect -a A -b B``
-     - ``SELECT DISTINCT a.* FROM a, b WHERE a.pos INTERSECTS b.pos``
+     - ``SELECT DISTINCT a.* FROM a, b WHERE a.interval INTERSECTS b.interval``
      - :ref:`intersect-basic`
    * - ``intersect -a A -b B -wa``
-     - ``SELECT a.* FROM a, b WHERE a.pos INTERSECTS b.pos``
+     - ``SELECT a.* FROM a, b WHERE a.interval INTERSECTS b.interval``
      - :ref:`intersect-wa`
    * - ``intersect -a A -b B -wb``
-     - ``SELECT b.* FROM a, b WHERE a.pos INTERSECTS b.pos``
+     - ``SELECT b.* FROM a, b WHERE a.interval INTERSECTS b.interval``
      - :ref:`intersect-wb`
    * - ``intersect -a A -b B -wa -wb``
-     - ``SELECT a.*, b.* FROM a, b WHERE a.pos INTERSECTS b.pos``
+     - ``SELECT a.*, b.* FROM a, b WHERE a.interval INTERSECTS b.interval``
      - :ref:`intersect-wawb`
    * - ``intersect -a A -b B -v``
-     - ``SELECT a.* FROM a LEFT JOIN b ... WHERE b.chr IS NULL``
+     - ``SELECT a.* FROM a LEFT JOIN b ... WHERE b.chrom IS NULL``
      - :ref:`intersect-v`
    * - ``intersect -a A -b B -u``
      - ``SELECT DISTINCT a.* FROM a JOIN b ...``
@@ -47,10 +47,10 @@ Quick Reference Table
      - ``SELECT a.*, b.* FROM a LEFT JOIN b ...``
      - :ref:`intersect-loj`
    * - ``closest -a A -b B -k N``
-     - ``CROSS JOIN LATERAL NEAREST(b, reference=a.pos, k=N)``
+     - ``CROSS JOIN LATERAL NEAREST(b, reference=a.interval, k=N)``
      - :ref:`closest-k`
    * - ``closest -a A -b B -d``
-     - ``SELECT ..., DISTANCE(a.pos, b.pos) ...``
+     - ``SELECT ..., DISTANCE(a.interval, b.interval) ...``
      - :ref:`closest-d`
    * - ``cluster -i A``
      - ``SELECT *, CLUSTER(interval) AS cluster_id FROM a``
@@ -84,13 +84,11 @@ Default: Report overlaps between A and B
 
 **GIQL:**
 
-.. code-block:: python
+.. code-block:: sql
 
-   cursor = engine.execute("""
-       SELECT DISTINCT a.*
-       FROM features_a a, features_b b
-       WHERE a.interval INTERSECTS b.interval
-   """)
+   SELECT DISTINCT a.*
+   FROM features_a a, features_b b
+   WHERE a.interval INTERSECTS b.interval
 
 .. _intersect-wa:
 
@@ -105,13 +103,11 @@ Default: Report overlaps between A and B
 
 **GIQL:**
 
-.. code-block:: python
+.. code-block:: sql
 
-   cursor = engine.execute("""
-       SELECT a.*
-       FROM features_a a, features_b b
-       WHERE a.interval INTERSECTS b.interval
-   """)
+   SELECT a.*
+   FROM features_a a, features_b b
+   WHERE a.interval INTERSECTS b.interval
 
 .. _intersect-wb:
 
@@ -126,13 +122,11 @@ Default: Report overlaps between A and B
 
 **GIQL:**
 
-.. code-block:: python
+.. code-block:: sql
 
-   cursor = engine.execute("""
-       SELECT b.*
-       FROM features_a a, features_b b
-       WHERE a.interval INTERSECTS b.interval
-   """)
+   SELECT b.*
+   FROM features_a a, features_b b
+   WHERE a.interval INTERSECTS b.interval
 
 .. _intersect-wawb:
 
@@ -147,13 +141,11 @@ Default: Report overlaps between A and B
 
 **GIQL:**
 
-.. code-block:: python
+.. code-block:: sql
 
-   cursor = engine.execute("""
-       SELECT a.*, b.*
-       FROM features_a a, features_b b
-       WHERE a.interval INTERSECTS b.interval
-   """)
+   SELECT a.*, b.*
+   FROM features_a a, features_b b
+   WHERE a.interval INTERSECTS b.interval
 
 .. _intersect-v:
 
@@ -168,14 +160,12 @@ Default: Report overlaps between A and B
 
 **GIQL:**
 
-.. code-block:: python
+.. code-block:: sql
 
-   cursor = engine.execute("""
-       SELECT a.*
-       FROM features_a a
-       LEFT JOIN features_b b ON a.interval INTERSECTS b.interval
-       WHERE b.chromosome IS NULL
-   """)
+   SELECT a.*
+   FROM features_a a
+   LEFT JOIN features_b b ON a.interval INTERSECTS b.interval
+   WHERE b.chrom IS NULL
 
 .. _intersect-u:
 
@@ -190,13 +180,11 @@ Default: Report overlaps between A and B
 
 **GIQL:**
 
-.. code-block:: python
+.. code-block:: sql
 
-   cursor = engine.execute("""
-       SELECT DISTINCT a.*
-       FROM features_a a
-       INNER JOIN features_b b ON a.interval INTERSECTS b.interval
-   """)
+   SELECT DISTINCT a.*
+   FROM features_a a
+   INNER JOIN features_b b ON a.interval INTERSECTS b.interval
 
 .. _intersect-c:
 
@@ -211,14 +199,12 @@ Default: Report overlaps between A and B
 
 **GIQL:**
 
-.. code-block:: python
+.. code-block:: sql
 
-   cursor = engine.execute("""
-       SELECT a.*, COUNT(b.name) AS overlap_count
-       FROM features_a a
-       LEFT JOIN features_b b ON a.interval INTERSECTS b.interval
-       GROUP BY a.chromosome, a.start_pos, a.end_pos, a.name, a.score, a.strand
-   """)
+   SELECT a.*, COUNT(b.name) AS overlap_count
+   FROM features_a a
+   LEFT JOIN features_b b ON a.interval INTERSECTS b.interval
+   GROUP BY a.chrom, a.start, a.end, a.name, a.score, a.strand
 
 .. _intersect-wo:
 
@@ -233,16 +219,14 @@ Default: Report overlaps between A and B
 
 **GIQL:**
 
-.. code-block:: python
+.. code-block:: sql
 
-   cursor = engine.execute("""
-       SELECT
-           a.*,
-           b.*,
-           (LEAST(a.end_pos, b.end_pos) - GREATEST(a.start_pos, b.start_pos)) AS overlap_bp
-       FROM features_a a, features_b b
-       WHERE a.interval INTERSECTS b.interval
-   """)
+   SELECT
+       a.*,
+       b.*,
+       (LEAST(a.end, b.end) - GREATEST(a.start, b.start)) AS overlap_bp
+   FROM features_a a, features_b b
+   WHERE a.interval INTERSECTS b.interval
 
 .. _intersect-wao:
 
@@ -257,19 +241,17 @@ Default: Report overlaps between A and B
 
 **GIQL:**
 
-.. code-block:: python
+.. code-block:: sql
 
-   cursor = engine.execute("""
-       SELECT
-           a.*,
-           b.*,
-           CASE
-               WHEN b.chromosome IS NULL THEN 0
-               ELSE LEAST(a.end_pos, b.end_pos) - GREATEST(a.start_pos, b.start_pos)
-           END AS overlap_bp
-       FROM features_a a
-       LEFT JOIN features_b b ON a.interval INTERSECTS b.interval
-   """)
+   SELECT
+       a.*,
+       b.*,
+       CASE
+           WHEN b.chrom IS NULL THEN 0
+           ELSE LEAST(a.end, b.end) - GREATEST(a.start, b.start)
+       END AS overlap_bp
+   FROM features_a a
+   LEFT JOIN features_b b ON a.interval INTERSECTS b.interval
 
 .. _intersect-loj:
 
@@ -284,13 +266,11 @@ Default: Report overlaps between A and B
 
 **GIQL:**
 
-.. code-block:: python
+.. code-block:: sql
 
-   cursor = engine.execute("""
-       SELECT a.*, b.*
-       FROM features_a a
-       LEFT JOIN features_b b ON a.interval INTERSECTS b.interval
-   """)
+   SELECT a.*, b.*
+   FROM features_a a
+   LEFT JOIN features_b b ON a.interval INTERSECTS b.interval
 
 ``-s``: Same strand overlaps only
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -303,14 +283,12 @@ Default: Report overlaps between A and B
 
 **GIQL:**
 
-.. code-block:: python
+.. code-block:: sql
 
-   cursor = engine.execute("""
-       SELECT a.*
-       FROM features_a a, features_b b
-       WHERE a.interval INTERSECTS b.interval
-         AND a.strand = b.strand
-   """)
+   SELECT a.*
+   FROM features_a a, features_b b
+   WHERE a.interval INTERSECTS b.interval
+     AND a.strand = b.strand
 
 ``-S``: Opposite strand overlaps only
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -323,16 +301,14 @@ Default: Report overlaps between A and B
 
 **GIQL:**
 
-.. code-block:: python
+.. code-block:: sql
 
-   cursor = engine.execute("""
-       SELECT a.*
-       FROM features_a a, features_b b
-       WHERE a.interval INTERSECTS b.interval
-         AND a.strand != b.strand
-         AND a.strand IN ('+', '-')
-         AND b.strand IN ('+', '-')
-   """)
+   SELECT a.*
+   FROM features_a a, features_b b
+   WHERE a.interval INTERSECTS b.interval
+     AND a.strand != b.strand
+     AND a.strand IN ('+', '-')
+     AND b.strand IN ('+', '-')
 
 ``-f``: Minimum overlap fraction of A
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -345,16 +321,14 @@ Default: Report overlaps between A and B
 
 **GIQL:**
 
-.. code-block:: python
+.. code-block:: sql
 
-   cursor = engine.execute("""
-       SELECT a.*
-       FROM features_a a, features_b b
-       WHERE a.interval INTERSECTS b.interval
-         AND (
-             LEAST(a.end_pos, b.end_pos) - GREATEST(a.start_pos, b.start_pos)
-         ) >= 0.5 * (a.end_pos - a.start_pos)
-   """)
+   SELECT a.*
+   FROM features_a a, features_b b
+   WHERE a.interval INTERSECTS b.interval
+     AND (
+         LEAST(a.end, b.end) - GREATEST(a.start, b.start)
+     ) >= 0.5 * (a.end - a.start)
 
 ``-r``: Reciprocal overlap
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -367,23 +341,21 @@ Default: Report overlaps between A and B
 
 **GIQL:**
 
-.. code-block:: python
+.. code-block:: sql
 
-   cursor = engine.execute("""
-       WITH overlap_calcs AS (
-           SELECT
-               a.*,
-               (LEAST(a.end_pos, b.end_pos) - GREATEST(a.start_pos, b.start_pos)) AS overlap_bp,
-               (a.end_pos - a.start_pos) AS a_length,
-               (b.end_pos - b.start_pos) AS b_length
-           FROM features_a a, features_b b
-           WHERE a.interval INTERSECTS b.interval
-       )
-       SELECT chromosome, start_pos, end_pos, name, score, strand
-       FROM overlap_calcs
-       WHERE overlap_bp >= 0.5 * a_length
-         AND overlap_bp >= 0.5 * b_length
-   """)
+   WITH overlap_calcs AS (
+       SELECT
+           a.*,
+           (LEAST(a.end, b.end) - GREATEST(a.start, b.start)) AS overlap_bp,
+           (a.end - a.start) AS a_length,
+           (b.end - b.start) AS b_length
+       FROM features_a a, features_b b
+       WHERE a.interval INTERSECTS b.interval
+   )
+   SELECT chrom, start, end, name, score, strand
+   FROM overlap_calcs
+   WHERE overlap_bp >= 0.5 * a_length
+     AND overlap_bp >= 0.5 * b_length
 
 bedtools closest
 ----------------
@@ -401,17 +373,15 @@ bedtools closest
 
 **GIQL:**
 
-.. code-block:: python
+.. code-block:: sql
 
-   cursor = engine.execute("""
-       SELECT
-           peaks.name AS peak,
-           nearest.name AS gene,
-           nearest.distance
-       FROM peaks
-       CROSS JOIN LATERAL NEAREST(genes, reference=peaks.interval, k=3) AS nearest
-       ORDER BY peaks.name, nearest.distance
-   """)
+   SELECT
+       peaks.name AS peak,
+       nearest.name AS gene,
+       nearest.distance
+   FROM peaks
+   CROSS JOIN LATERAL NEAREST(genes, reference=peaks.interval, k=3) AS nearest
+   ORDER BY peaks.name, nearest.distance
 
 .. _closest-d:
 
@@ -426,31 +396,27 @@ bedtools closest
 
 **GIQL:**
 
-.. code-block:: python
+.. code-block:: sql
 
-   cursor = engine.execute("""
-       SELECT
-           a.name AS peak,
-           b.name AS gene,
-           DISTANCE(a.interval, b.interval) AS distance
-       FROM peaks a
-       CROSS JOIN genes b
-       WHERE a.chromosome = b.chromosome
-       ORDER BY a.name, distance
-   """)
+   SELECT
+       a.name AS peak,
+       b.name AS gene,
+       DISTANCE(a.interval, b.interval) AS distance
+   FROM peaks a
+   CROSS JOIN genes b
+   WHERE a.chrom = b.chrom
+   ORDER BY a.name, distance
 
 Or using NEAREST for just the closest:
 
-.. code-block:: python
+.. code-block:: sql
 
-   cursor = engine.execute("""
-       SELECT
-           peaks.name AS peak,
-           nearest.name AS gene,
-           nearest.distance
-       FROM peaks
-       CROSS JOIN LATERAL NEAREST(genes, reference=peaks.interval, k=1) AS nearest
-   """)
+   SELECT
+       peaks.name AS peak,
+       nearest.name AS gene,
+       nearest.distance
+   FROM peaks
+   CROSS JOIN LATERAL NEAREST(genes, reference=peaks.interval, k=1) AS nearest
 
 ``-s``: Same strand only
 ~~~~~~~~~~~~~~~~~~~~~~~~
@@ -463,22 +429,20 @@ Or using NEAREST for just the closest:
 
 **GIQL:**
 
-.. code-block:: python
+.. code-block:: sql
 
-   cursor = engine.execute("""
-       SELECT
-           peaks.name,
-           nearest.name AS gene,
-           nearest.distance
-       FROM peaks
-       CROSS JOIN LATERAL NEAREST(
-           genes,
-           reference=peaks.interval,
-           k=3,
-           stranded=true
-       ) AS nearest
-       ORDER BY peaks.name, nearest.distance
-   """)
+   SELECT
+       peaks.name,
+       nearest.name AS gene,
+       nearest.distance
+   FROM peaks
+   CROSS JOIN LATERAL NEAREST(
+       genes,
+       reference=peaks.interval,
+       k=3,
+       stranded=true
+   ) AS nearest
+   ORDER BY peaks.name, nearest.distance
 
 bedtools cluster
 ----------------
@@ -496,15 +460,13 @@ Basic clustering
 
 **GIQL:**
 
-.. code-block:: python
+.. code-block:: sql
 
-   cursor = engine.execute("""
-       SELECT
-           *,
-           CLUSTER(interval) AS cluster_id
-       FROM features
-       ORDER BY chromosome, start_pos
-   """)
+   SELECT
+       *,
+       CLUSTER(interval) AS cluster_id
+   FROM features
+   ORDER BY chrom, start
 
 .. _cluster-d:
 
@@ -519,15 +481,13 @@ Basic clustering
 
 **GIQL:**
 
-.. code-block:: python
+.. code-block:: sql
 
-   cursor = engine.execute("""
-       SELECT
-           *,
-           CLUSTER(interval, 1000) AS cluster_id
-       FROM features
-       ORDER BY chromosome, start_pos
-   """)
+   SELECT
+       *,
+       CLUSTER(interval, 1000) AS cluster_id
+   FROM features
+   ORDER BY chrom, start
 
 ``-s``: Strand-specific clustering
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -540,15 +500,13 @@ Basic clustering
 
 **GIQL:**
 
-.. code-block:: python
+.. code-block:: sql
 
-   cursor = engine.execute("""
-       SELECT
-           *,
-           CLUSTER(interval, stranded=true) AS cluster_id
-       FROM features
-       ORDER BY chromosome, strand, start_pos
-   """)
+   SELECT
+       *,
+       CLUSTER(interval, stranded=true) AS cluster_id
+   FROM features
+   ORDER BY chrom, strand, start
 
 bedtools merge
 --------------
@@ -566,12 +524,10 @@ Basic merge
 
 **GIQL:**
 
-.. code-block:: python
+.. code-block:: sql
 
-   cursor = engine.execute("""
-       SELECT MERGE(interval)
-       FROM features
-   """)
+   SELECT MERGE(interval)
+   FROM features
 
 .. _merge-d:
 
@@ -586,12 +542,10 @@ Basic merge
 
 **GIQL:**
 
-.. code-block:: python
+.. code-block:: sql
 
-   cursor = engine.execute("""
-       SELECT MERGE(interval, 1000)
-       FROM features
-   """)
+   SELECT MERGE(interval, 1000)
+   FROM features
 
 ``-s``: Strand-specific merge
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -604,12 +558,10 @@ Basic merge
 
 **GIQL:**
 
-.. code-block:: python
+.. code-block:: sql
 
-   cursor = engine.execute("""
-       SELECT MERGE(interval, stranded=true)
-       FROM features
-   """)
+   SELECT MERGE(interval, stranded=true)
+   FROM features
 
 .. _merge-count:
 
@@ -624,14 +576,12 @@ Basic merge
 
 **GIQL:**
 
-.. code-block:: python
+.. code-block:: sql
 
-   cursor = engine.execute("""
-       SELECT
-           MERGE(interval),
-           COUNT(*) AS feature_count
-       FROM features
-   """)
+   SELECT
+       MERGE(interval),
+       COUNT(*) AS feature_count
+   FROM features
 
 ``-c -o mean``: Average score
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -644,14 +594,12 @@ Basic merge
 
 **GIQL:**
 
-.. code-block:: python
+.. code-block:: sql
 
-   cursor = engine.execute("""
-       SELECT
-           MERGE(interval),
-           AVG(score) AS avg_score
-       FROM features
-   """)
+   SELECT
+       MERGE(interval),
+       AVG(score) AS avg_score
+   FROM features
 
 ``-c -o collapse``: Collect names
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -664,14 +612,12 @@ Basic merge
 
 **GIQL:**
 
-.. code-block:: python
+.. code-block:: sql
 
-   cursor = engine.execute("""
-       SELECT
-           MERGE(interval),
-           STRING_AGG(name, ',') AS feature_names
-       FROM features
-   """)
+   SELECT
+       MERGE(interval),
+       STRING_AGG(name, ',') AS feature_names
+   FROM features
 
 Key Differences from Bedtools
 -----------------------------
