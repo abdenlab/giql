@@ -5,7 +5,7 @@ Quick reference for GIQL syntax and operators.
 
 .. contents::
    :local:
-   :depth: 2
+   :depth: 1
 
 Genomic Range Literals
 ----------------------
@@ -238,7 +238,7 @@ Exclusion (NOT IN)
    SELECT a.*
    FROM table_a a
    LEFT JOIN table_b b ON a.interval INTERSECTS b.interval
-   WHERE b.chromosome IS NULL
+   WHERE b.chrom IS NULL
 
 Count Overlaps
 ~~~~~~~~~~~~~~
@@ -248,7 +248,7 @@ Count Overlaps
    SELECT a.*, COUNT(b.name) AS overlap_count
    FROM table_a a
    LEFT JOIN table_b b ON a.interval INTERSECTS b.interval
-   GROUP BY a.chromosome, a.start_pos, a.end_pos, ...
+   GROUP BY a.chrom, a.start, a."end", ...
 
 K-Nearest Neighbors
 ~~~~~~~~~~~~~~~~~~~
@@ -266,7 +266,7 @@ Clustering
 
    SELECT *, CLUSTER(interval) AS cluster_id
    FROM table
-   ORDER BY chromosome, start_pos
+   ORDER BY chrom, start
 
 Merging
 ~~~~~~~
@@ -275,55 +275,3 @@ Merging
 
    SELECT MERGE(interval), COUNT(*) AS count
    FROM table
-
-Engine Methods
---------------
-
-execute()
-~~~~~~~~~
-
-Execute a GIQL query and return a cursor.
-
-.. code-block:: python
-
-   cursor = engine.execute("SELECT * FROM table WHERE interval INTERSECTS 'chr1:1000-2000'")
-
-transpile()
-~~~~~~~~~~~
-
-Convert GIQL to SQL without executing.
-
-.. code-block:: python
-
-   sql = engine.transpile("SELECT * FROM table WHERE interval INTERSECTS 'chr1:1000-2000'")
-
-register_table_schema()
-~~~~~~~~~~~~~~~~~~~~~~~
-
-Register a table's schema for genomic operations.
-
-.. code-block:: python
-
-   engine.register_table_schema(
-       "table_name",
-       {
-           "chromosome": "VARCHAR",
-           "start_pos": "BIGINT",
-           "end_pos": "BIGINT",
-           "name": "VARCHAR",
-       },
-       genomic_column="interval",
-       chromosome_column="chromosome",  # optional, default: "chromosome"
-       start_column="start_pos",        # optional, default: "start_pos"
-       end_column="end_pos",            # optional, default: "end_pos"
-   )
-
-load_csv()
-~~~~~~~~~~
-
-Load a CSV file into a table.
-
-.. code-block:: python
-
-   engine.load_csv("table_name", "file.csv")
-   engine.load_csv("table_name", "file.tsv", delimiter="\t")

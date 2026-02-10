@@ -1,15 +1,13 @@
-GIQL Operators
-==============
+Operators
+=========
 
 GIQL extends SQL with operators specifically designed for genomic interval queries.
 These operators enable powerful spatial reasoning over genomic coordinates without
 requiring complex SQL expressions.
 
-Operators are organized by functionality:
-
-.. contents::
-   :local:
-   :depth: 1
+Operators are organized by functionality. All operators work across supported 
+database backends (DuckDB, SQLite, with PostgreSQL planned). Each operator page 
+includes a compatibility table showing backend support status.
 
 Spatial Relationship Operators
 ------------------------------
@@ -98,11 +96,6 @@ Apply operators to multiple ranges simultaneously.
 
 See :doc:`quantifiers` for detailed documentation.
 
-Operator Compatibility
-----------------------
-
-All operators work across supported database backends (DuckDB, SQLite, with PostgreSQL planned).
-Each operator page includes a compatibility table showing backend support status.
 
 .. toctree::
    :maxdepth: 2

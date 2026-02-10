@@ -1,5 +1,5 @@
-Aggregation Operators
-=====================
+Aggregation
+===========
 
 Aggregation operators combine and cluster genomic intervals. These operators are
 essential for reducing complex interval data into summarized regions, such as
@@ -7,7 +7,7 @@ merging overlapping peaks or identifying clusters of related features.
 
 .. contents::
    :local:
-   :depth: 2
+   :depth: 1
 
 .. _cluster-operator:
 
@@ -51,7 +51,7 @@ Parameters
 ~~~~~~~~~~
 
 **interval**
-   A genomic column registered with the engine.
+   A genomic column.
 
 **distance** *(optional)*
    Maximum gap between intervals to consider them part of the same cluster.
@@ -73,91 +73,81 @@ Examples
 
 Assign cluster IDs to overlapping intervals:
 
-.. code-block:: python
+.. code-block:: sql
 
-   cursor = engine.execute("""
-       SELECT
-           *,
-           CLUSTER(interval) AS cluster_id
-       FROM features
-       ORDER BY chromosome, start_pos
-   """)
+   SELECT
+       *,
+       CLUSTER(interval) AS cluster_id
+   FROM features
+   ORDER BY chrom, start
 
 **Distance-Based Clustering:**
 
 Cluster intervals within 1000bp of each other:
 
-.. code-block:: python
+.. code-block:: sql
 
-   cursor = engine.execute("""
-       SELECT
-           *,
-           CLUSTER(interval, 1000) AS cluster_id
-       FROM features
-       ORDER BY chromosome, start_pos
-   """)
+   SELECT
+       *,
+       CLUSTER(interval, 1000) AS cluster_id
+   FROM features
+   ORDER BY chrom, start
 
 **Strand-Specific Clustering:**
 
 Cluster intervals separately by strand:
 
-.. code-block:: python
+.. code-block:: sql
 
-   cursor = engine.execute("""
-       SELECT
-           *,
-           CLUSTER(interval, stranded=true) AS cluster_id
-       FROM features
-       ORDER BY chromosome, strand, start_pos
-   """)
+   SELECT
+       *,
+       CLUSTER(interval, stranded=true) AS cluster_id
+   FROM features
+   ORDER BY chrom, strand, start
 
 **Analyze Cluster Statistics:**
 
 Count features per cluster:
 
-.. code-block:: python
+.. code-block:: sql
 
-   cursor = engine.execute("""
-       WITH clustered AS (
-           SELECT
-               *,
-               CLUSTER(interval) AS cluster_id
-           FROM features
-       )
+   WITH clustered AS (
        SELECT
-           chromosome,
-           cluster_id,
-           COUNT(*) AS feature_count,
-           MIN(start_pos) AS cluster_start,
-           MAX(end_pos) AS cluster_end
-       FROM clustered
-       GROUP BY chromosome, cluster_id
-       ORDER BY chromosome, cluster_start
-   """)
+           *,
+           CLUSTER(interval) AS cluster_id
+       FROM features
+   )
+   SELECT
+       chrom,
+       cluster_id,
+       COUNT(*) AS feature_count,
+       MIN(start) AS cluster_start,
+       MAX(end) AS cluster_end
+   FROM clustered
+   GROUP BY chrom, cluster_id
+   ORDER BY chrom, cluster_start
 
 **Filter by Cluster Size:**
 
 Find regions with multiple overlapping features:
 
-.. code-block:: python
+.. code-block:: sql
 
-   cursor = engine.execute("""
-       WITH clustered AS (
-           SELECT
-               *,
-               CLUSTER(interval) AS cluster_id
-           FROM features
-       ),
-       cluster_sizes AS (
-           SELECT cluster_id, COUNT(*) AS size
-           FROM clustered
-           GROUP BY cluster_id
-       )
-       SELECT c.*
-       FROM clustered c
-       INNER JOIN cluster_sizes s ON c.cluster_id = s.cluster_id
-       WHERE s.size >= 3
-   """)
+   WITH clustered AS (
+       SELECT
+           *,
+           CLUSTER(interval) AS cluster_id
+       FROM features
+   ),
+   cluster_sizes AS (
+       SELECT cluster_id, COUNT(*) AS size
+       FROM clustered
+       GROUP BY cluster_id
+   )
+   SELECT c.*
+   FROM clustered c
+   INNER JOIN cluster_sizes s ON c.cluster_id = s.cluster_id
+   WHERE s.size >= 3
 
 Backend Compatibility
 ~~~~~~~~~~~~~~~~~~~~~
@@ -239,7 +229,7 @@ Parameters
 ~~~~~~~~~~
 
 **interval**
-   A genomic column registered with the engine.
+   A genomic column.
 
 **distance** *(optional)*
    Maximum gap between intervals to merge. Default: ``0`` (only overlapping
@@ -253,9 +243,9 @@ Return Value
 
 Returns merged interval coordinates:
 
-- ``chromosome`` - Chromosome of the merged region
-- ``start_pos`` - Start position of the merged region
-- ``end_pos`` - End position of the merged region
+- ``chrom`` - Chromosome of the merged region
+- ``start`` - Start position of the merged region
+- ``end`` - End position of the merged region
 - ``strand`` - Strand (if ``stranded=true``)
 
 Examples
@@ -265,108 +255,92 @@ Examples
 
 Merge all overlapping intervals:
 
-.. code-block:: python
+.. code-block:: sql
 
-   cursor = engine.execute("""
-       SELECT MERGE(interval)
-       FROM features
-   """)
+   SELECT MERGE(interval)
+   FROM features
 
-   # Returns: chromosome, start_pos, end_pos for each merged region
+   -- Returns: chrom, start, end for each merged region
 
 **Distance-Based Merge:**
 
 Merge intervals within 1000bp of each other:
 
-.. code-block:: python
+.. code-block:: sql
 
-   cursor = engine.execute("""
-       SELECT MERGE(interval, 1000)
-       FROM features
-   """)
+   SELECT MERGE(interval, 1000)
+   FROM features
 
 **Strand-Specific Merge:**
 
 Merge intervals separately by strand:
 
-.. code-block:: python
+.. code-block:: sql
 
-   cursor = engine.execute("""
-       SELECT MERGE(interval, stranded=true)
-       FROM features
-   """)
+   SELECT MERGE(interval, stranded=true)
+   FROM features
 
 **Merge with Feature Count:**
 
 Count how many features were merged into each region:
 
-.. code-block:: python
+.. code-block:: sql
 
-   cursor = engine.execute("""
-       SELECT
-           MERGE(interval),
-           COUNT(*) AS feature_count
-       FROM features
-   """)
+   SELECT
+       MERGE(interval),
+       COUNT(*) AS feature_count
+   FROM features
 
 **Merge with Aggregations:**
 
 Calculate statistics for merged regions:
 
-.. code-block:: python
+.. code-block:: sql
 
-   cursor = engine.execute("""
-       SELECT
-           MERGE(interval),
-           COUNT(*) AS feature_count,
-           AVG(score) AS avg_score,
-           MAX(score) AS max_score
-       FROM features
-   """)
+   SELECT
+       MERGE(interval),
+       COUNT(*) AS feature_count,
+       AVG(score) AS avg_score,
+       MAX(score) AS max_score
+   FROM features
 
 **Collect Merged Feature Names:**
 
 List the names of features that were merged:
 
-.. code-block:: python
+.. code-block:: sql
 
-   cursor = engine.execute("""
-       SELECT
-           MERGE(interval),
-           STRING_AGG(name, ',') AS feature_names
-       FROM features
-   """)
+   SELECT
+       MERGE(interval),
+       STRING_AGG(name, ',') AS feature_names
+   FROM features
 
 **Merge by Chromosome:**
 
 Process each chromosome separately (explicit grouping):
 
-.. code-block:: python
+.. code-block:: sql
 
-   cursor = engine.execute("""
-       SELECT
-           chromosome,
-           MERGE(interval),
-           COUNT(*) AS feature_count
-       FROM features
-       GROUP BY chromosome
-       ORDER BY chromosome
-   """)
+   SELECT
+       chrom,
+       MERGE(interval),
+       COUNT(*) AS feature_count
+   FROM features
+   GROUP BY chrom
+   ORDER BY chrom
 
 **Calculate Total Coverage:**
 
 Calculate the total base pairs covered after merging:
 
-.. code-block:: python
+.. code-block:: sql
 
-   cursor = engine.execute("""
-       WITH merged AS (
-           SELECT MERGE(interval) AS merged_pos
-           FROM features
-       )
-       SELECT SUM(end_pos - start_pos) AS total_coverage
-       FROM merged
-   """)
+   WITH merged AS (
+       SELECT MERGE(interval) AS merged_pos
+       FROM features
+   )
+   SELECT SUM(end - start) AS total_coverage
+   FROM merged
 
 Backend Compatibility
 ~~~~~~~~~~~~~~~~~~~~~
