@@ -1,52 +1,124 @@
-Performance Guide
-=================
-
-This guide covers strategies for optimizing GIQL query performance, including
-indexing, query patterns, and backend-specific optimizations.
-
-.. contents::
-   :local:
-   :depth: 1
-
-Understanding Query Performance
--------------------------------
-
-How GIQL Queries Execute
-~~~~~~~~~~~~~~~~~~~~~~~~
+Performance
+-----------
 
 When you use GIQL:
 
 1. GIQL parses the query and identifies genomic operators
 2. Operators are expanded into SQL predicates
-3. You execute the SQL on your database backend
-4. The database executes the query using its optimizer
+3. You execute the SQL on your database backend or analytics engine
+4. The system optimizes the query and executes it
 
-Performance depends on both the generated SQL and how the database executes it.
-
-Common Performance Bottlenecks
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Performance depends on both the generated SQL and how the target data system
+plans, optimizes, and executes it. Some common performance bottlenecks include:
 
 - **Full table scans**: No indexes to speed up filtering
 - **Cartesian products**: Large cross joins without early filtering
 - **Missing chromosome filters**: Comparing features across all chromosomes
 - **Inefficient join order**: Small tables should drive joins
 
-Indexing Strategies
--------------------
+Streaming
+---------
 
-Creating Indexes
-~~~~~~~~~~~~~~~~
+Analytics engines like DuckDB and Polars support streaming data sources
+in sequences of small "record batches", enabling parallel processing and 
+out-of-core workflows on files that may be much larger than memory.
 
-Create indexes on genomic columns for faster queries:
+For delimited text files, you can use native APIs:
+
+**DuckDB:**
+
+.. code-block:: python
+
+   import duckdb
+   from giql import transpile
+
+   conn = duckdb.connect()
+
+   # DuckDB can query CSV/TSV files directly
+   conn.execute("""
+       CREATE VIEW peaks AS
+       SELECT * FROM read_csv('peaks.bed', delim='\t',
+           columns={'chrom': 'VARCHAR', 'start': 'INTEGER',
+                    'end': 'INTEGER', 'name': 'VARCHAR',
+                    'score': 'INTEGER', 'strand': 'VARCHAR'})
+   """)
+
+   sql = transpile(
+       "SELECT * FROM peaks WHERE interval INTERSECTS 'chr1:1000-2000'",
+       tables=["peaks"],
+   )
+
+   df = conn.execute(sql).fetchdf()
+
+**Polars:**
+
+.. code-block:: python
+
+   import polars as pl
+   from giql import transpile
+
+   lf = pl.scan_csv("peaks.bed", separator="\t",
+       new_columns=["chrom", "start", "end", "name", "score", "strand"])
+
+   sql = transpile(
+       "SELECT * FROM peaks WHERE interval INTERSECTS 'chr1:1000-2000'",
+       tables=["peaks"],
+   )
+
+   ctx = pl.SQLContext(peaks=lf)
+   df = ctx.execute(sql).collect()
+
+For specialized NGS formats, you can supply streaming data using the
+`oxbow <https://github.com/abdenlab/oxbow>`_ package:
+
+.. code-block:: python
+
+   import duckdb
+   import oxbow as ox
+   from giql import transpile
+
+   conn = duckdb.connect()
+
+   # Load a streaming data source as a DuckDB relation
+   peaks = ox.read_bed("peaks.bed").to_duckdb(conn, "peaks")
+
+   sql = transpile(
+       "SELECT * FROM peaks WHERE interval INTERSECTS 'chr1:1000-2000'",
+       tables=["peaks"],
+   )
+
+   df = conn.execute(sql).fetchdf()
+
+.. code-block:: python
+
+   import polars as pl
+   import oxbow as ox
+   from giql import transpile
+
+   # Load a streaming data source as a Polars LazyFrame
+   lf = ox.read_bed("peaks.bed").pl(lazy=True)
+
+   sql = transpile(
+      """SELECT *, CLUSTER(interval) AS cluster_id
+         FROM features
+         ORDER BY chrom, start
+      """,
+      tables=["peaks"],
+   )
+   ctx = pl.SQLContext(peaks=lf)
+   ctx.execute(sql).sink_parquet("peaks_clustered.parquet")
+
+Indexing
+--------
+
+If your data source is a database table, you can create indexes on 
+genomic columns for faster queries:
 
 .. code-block:: sql
 
    -- DuckDB or SQLite
    CREATE INDEX idx_features_position
    ON features (chrom, start, "end")
-
-Recommended Index Patterns
-~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 **For single-table queries (filtering):**
 
@@ -68,12 +140,9 @@ Recommended Index Patterns
 
    CREATE INDEX idx_features_strand ON features (chrom, strand, start, "end")
 
-When to Create Indexes
-~~~~~~~~~~~~~~~~~~~~~~
-
 Create indexes when:
 
-- Tables have more than ~10,000 rows
+- Tables are very large
 - You're running repeated queries on the same tables
 - Join queries are slow
 - Filtering by genomic position is common
@@ -142,9 +211,6 @@ DISTINCT can be expensive. Only use when necessary:
        WHERE a.interval INTERSECTS b.interval
    )
 
-NEAREST Query Optimization
---------------------------
-
 Optimizing K-NN Queries
 ~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -178,9 +244,6 @@ The NEAREST operator can be expensive for large datasets. Optimize with:
 .. code-block:: sql
 
    CREATE INDEX idx_genes_position ON genes (chrom, start, "end")
-
-Merge and Cluster Optimization
-------------------------------
 
 Efficient Clustering
 ~~~~~~~~~~~~~~~~~~~~
@@ -273,27 +336,3 @@ SQLite Optimizations
 .. code-block:: sql
 
    ANALYZE features
-
-Performance Checklist
----------------------
-
-Before running large queries, check:
-
-.. code-block:: text
-
-   - Indexes created on genomic columns
-   - Chromosome filtering included in joins
-   - Selective filters applied early
-   - LIMIT used for exploration
-   - Only necessary columns selected
-   - NEAREST queries use max_distance
-   - Results streamed instead of fetched all at once
-
-Quick Wins
-~~~~~~~~~~
-
-1. **Add indexes** - Usually the biggest performance improvement
-2. **Filter by chromosome** - Reduces join complexity significantly
-3. **Use max_distance with NEAREST** - Limits search space
-4. **Stream results** - Reduces memory pressure
-5. **Use DuckDB** - Generally faster for analytical queries

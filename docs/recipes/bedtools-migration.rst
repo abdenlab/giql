@@ -5,10 +5,6 @@ This guide maps bedtools commands to their GIQL equivalents. If you're familiar
 with bedtools and want to replicate specific operations in GIQL, use this
 reference to find the corresponding query patterns.
 
-.. contents::
-   :local:
-   :depth: 2
-
 Quick Reference Table
 ---------------------
 
@@ -634,8 +630,8 @@ Key Differences from Bedtools
 4. **Built-in aggregation**: SQL's GROUP BY and aggregate functions (COUNT, AVG,
    SUM, etc.) are available directly, without needing separate post-processing.
 
-5. **Database integration**: GIQL queries run against database tables, enabling
-   integration with other data and persistence of results.
+5. **Database integration**: GIQL queries can be run against database tables, 
+   enabling integration with other data and persistence of results.
 
 6. **Multi-backend support**: The same GIQL query can run on DuckDB, SQLite,
    or other supported backends without modification.

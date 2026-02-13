@@ -5,11 +5,11 @@ Genomic Interval Query Language (GIQL)
    :hidden:
 
    Home <self>
-   guides/quickstart
+   quickstart
 
 **GIQL** is an extended SQL dialect that allows you to declaratively express genomic interval operations.
 
-See the :doc:`guides/quickstart` to get started.
+See the :doc:`quickstart` to get started.
    
 Dialect
 -------
@@ -19,37 +19,51 @@ than how. Whether you're filtering variants by genomic region, finding
 overlapping features, or calculating distances between intervals, GIQL 
 makes these operations intuitive and portable.
 
+See the :doc:`GIQL dialect <dialect/index>` docs.
+
 .. toctree::
-   :maxdepth: 1
+   :hidden:
    :caption: Dialect
 
-   dialect/index
-   dialect/syntax-reference
+   Overview <dialect/index>
+   dialect/spatial-operators
+   dialect/distance-operators
+   dialect/aggregation-operators
+   dialect/quantifiers
 
 Transpilation
 -------------
 The ``giql`` package *transpiles* queries written in GIQL to regular SQL
-for use in existing database systems and analytics engines.
+for use in existing database systems (like SQLite or PostgreSQL), data
+warehouses, or analytics engines (like Polars and DuckDB).
+
+See the :doc:`GIQL transpiler <transpilation/index>` docs.
 
 .. toctree::
-   :maxdepth: 1
+   :hidden:
    :caption: Transpilation
 
-   transpilation/index
+   Overview <transpilation/index>
+   transpilation/schema-mapping
    transpilation/execution
+   transpilation/performance
    transpilation/api-reference
 
 
 Learn more
 ----------
-See the following guides to learn how to use GIQL effectively:
+See the following :doc:`recipes <recipes/index>` to learn how to use GIQL effectively.
 
 .. toctree::
-   :maxdepth: 1
-   :caption: Guides and Recipes
+   :hidden:
+   :caption: Recipes
 
-   guides/index
-   recipes/index
+   Overview <recipes/index>
+   recipes/intersect
+   recipes/distance
+   recipes/clustering
+   recipes/advanced
+   recipes/bedtools-migration
 
 
 Indices and tables

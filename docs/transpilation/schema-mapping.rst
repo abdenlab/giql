@@ -4,20 +4,10 @@ Schema Mapping
 This guide explains how to configure GIQL to work with your genomic data by
 defining table configurations that map logical genomic columns to physical columns.
 
-.. contents::
-   :local:
-   :depth: 1
-
-Understanding Schema Mapping
-----------------------------
-
 GIQL needs to know how your genomic data is structured in order to translate
 genomic operators into SQL. This is done through ``Table`` objects, which
 map a logical "genomic column" (used in your queries) to the physical columns
 in your files, data frames, or database tables.
-
-The Core Concept
-~~~~~~~~~~~~~~~~
 
 In GIQL queries, you use a logical genomic column name like ``interval``:
 
@@ -94,9 +84,6 @@ the mapping:
            )
        ],
    )
-
-Multiple Tables
----------------
 
 Configuring Multiple Tables
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -197,27 +184,3 @@ For point features (like SNPs), create an interval of length 1:
    # 0-based interval: [999, 1000)
    start = 999
    end = 1000
-
-
-Troubleshooting
----------------
-
-Common Issues
-~~~~~~~~~~~~~
-
-**"Unknown column" errors:**
-
-- Ensure the table is included in the ``tables`` parameter
-- Check that the genomic column name in your query matches the configured name
-- Verify column names in the ``Table`` object match actual table columns
-
-**Incorrect results:**
-
-- Verify your coordinate system (0-based vs 1-based)
-- Check that start < end for all intervals
-- Ensure chromosome names match between tables (e.g., 'chr1' vs '1')
-
-**Performance issues:**
-
-- See the :doc:`performance` guide for optimization tips
-- Consider adding indexes on genomic columns

@@ -5,10 +5,6 @@ Set quantifiers extend spatial operators to work with multiple ranges simultaneo
 They allow you to test whether a genomic position matches any or all of a set of
 specified ranges in a single query.
 
-.. contents::
-   :local:
-   :depth: 1
-
 .. _any-quantifier:
 
 ANY
@@ -112,32 +108,11 @@ Query across different chromosomes efficiently:
        'chrX:100000-200000'
    )
 
-Backend Compatibility
-~~~~~~~~~~~~~~~~~~~~~
-
-.. list-table::
-   :header-rows: 1
-   :widths: 20 20 60
-
-   * - Backend
-     - Support
-     - Notes
-   * - DuckDB
-     - Full
-     -
-   * - SQLite
-     - Full
-     -
-   * - PostgreSQL
-     - Planned
-     -
-
-Performance Notes
-~~~~~~~~~~~~~~~~~
+Notes
+~~~~~
 
 - ``ANY`` expands to multiple OR conditions in the generated SQL
 - For very large sets of ranges, consider using a separate table and JOIN instead
-- The optimizer may benefit from indexes on chromosome and position columns
 
 Related
 ~~~~~~~
@@ -238,28 +213,8 @@ features in the intersection of multiple regions):
    -- This finds features that overlap BOTH ranges
    -- (i.e., features in the intersection: chr1:1500-2000)
 
-Backend Compatibility
-~~~~~~~~~~~~~~~~~~~~~
-
-.. list-table::
-   :header-rows: 1
-   :widths: 20 20 60
-
-   * - Backend
-     - Support
-     - Notes
-   * - DuckDB
-     - Full
-     -
-   * - SQLite
-     - Full
-     -
-   * - PostgreSQL
-     - Planned
-     -
-
-Performance Notes
-~~~~~~~~~~~~~~~~~
+Notes
+~~~~~
 
 - ``ALL`` expands to multiple AND conditions in the generated SQL
 - Queries with ``ALL`` may be more restrictive, potentially reducing result sets

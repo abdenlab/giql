@@ -5,10 +5,6 @@ Aggregation operators combine and cluster genomic intervals. These operators are
 essential for reducing complex interval data into summarized regions, such as
 merging overlapping peaks or identifying clusters of related features.
 
-.. contents::
-   :local:
-   :depth: 1
-
 .. _cluster-operator:
 
 CLUSTER
@@ -148,26 +144,6 @@ Find regions with multiple overlapping features:
    FROM clustered c
    INNER JOIN cluster_sizes s ON c.cluster_id = s.cluster_id
    WHERE s.size >= 3
-
-Backend Compatibility
-~~~~~~~~~~~~~~~~~~~~~
-
-.. list-table::
-   :header-rows: 1
-   :widths: 20 20 60
-
-   * - Backend
-     - Support
-     - Notes
-   * - DuckDB
-     - Full
-     - Efficient window function implementation
-   * - SQLite
-     - Full
-     -
-   * - PostgreSQL
-     - Planned
-     -
 
 Performance Notes
 ~~~~~~~~~~~~~~~~~
@@ -342,31 +318,10 @@ Calculate the total base pairs covered after merging:
    SELECT SUM(end - start) AS total_coverage
    FROM merged
 
-Backend Compatibility
-~~~~~~~~~~~~~~~~~~~~~
-
-.. list-table::
-   :header-rows: 1
-   :widths: 20 20 60
-
-   * - Backend
-     - Support
-     - Notes
-   * - DuckDB
-     - Full
-     -
-   * - SQLite
-     - Full
-     -
-   * - PostgreSQL
-     - Planned
-     -
-
-Performance Notes
-~~~~~~~~~~~~~~~~~
+Notes
+~~~~~
 
 - MERGE is an aggregate operation that processes all matching rows
-- For very large datasets, consider filtering by chromosome first
 - The operation sorts data internally, so pre-sorting is not required
 
 Related Operators

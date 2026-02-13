@@ -1,13 +1,9 @@
-Spatial Relationships
-=====================
+Spatial Operators
+=================
 
 Spatial relationship operators test positional relationships between genomic ranges.
 These are the core operators for determining whether genomic intervals overlap,
 contain, or are contained within other intervals.
-
-.. contents::
-   :local:
-   :depth: 1
 
 .. _intersects-operator:
 
@@ -103,33 +99,6 @@ Find all variants, with gene information where available:
    FROM variants v
    LEFT JOIN genes g ON v.interval INTERSECTS g.interval
 
-Backend Compatibility
-~~~~~~~~~~~~~~~~~~~~~
-
-.. list-table::
-   :header-rows: 1
-   :widths: 20 20 60
-
-   * - Backend
-     - Support
-     - Notes
-   * - DuckDB
-     - Full
-     -
-   * - SQLite
-     - Full
-     -
-   * - PostgreSQL
-     - Planned
-     - Targeted for future release
-
-Performance Notes
-~~~~~~~~~~~~~~~~~
-
-- Create indexes on ``(chrom, start, "end")`` for better join performance
-- When joining large tables, consider filtering by chromosome first
-- The generated SQL uses efficient range comparison predicates
-
 Related Operators
 ~~~~~~~~~~~~~~~~~
 
@@ -220,26 +189,6 @@ Find variants that are completely within gene boundaries:
    FROM variants v
    INNER JOIN genes g ON g.interval CONTAINS v.interval
 
-Backend Compatibility
-~~~~~~~~~~~~~~~~~~~~~
-
-.. list-table::
-   :header-rows: 1
-   :widths: 20 20 60
-
-   * - Backend
-     - Support
-     - Notes
-   * - DuckDB
-     - Full
-     -
-   * - SQLite
-     - Full
-     -
-   * - PostgreSQL
-     - Planned
-     -
-
 Related Operators
 ~~~~~~~~~~~~~~~~~
 
@@ -315,26 +264,6 @@ Find exons that are completely within their parent gene:
    SELECT e.*, g.name AS gene_name
    FROM exons e
    INNER JOIN genes g ON e.interval WITHIN g.interval
-
-Backend Compatibility
-~~~~~~~~~~~~~~~~~~~~~
-
-.. list-table::
-   :header-rows: 1
-   :widths: 20 20 60
-
-   * - Backend
-     - Support
-     - Notes
-   * - DuckDB
-     - Full
-     -
-   * - SQLite
-     - Full
-     -
-   * - PostgreSQL
-     - Planned
-     -
 
 Related Operators
 ~~~~~~~~~~~~~~~~~

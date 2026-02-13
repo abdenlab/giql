@@ -32,6 +32,12 @@ The result is a standard SQL query that can be consumed by an execution engine t
    SELECT * FROM variants
    WHERE "chrom" = 'chr1' AND "start" < 2000 AND "end" > 1000
 
+Notably, the transpiler expands logical genomic range columns into physical column comparisons.
+
+The ``Table`` configuration of ``"variants"`` tells GIQL which physical columns correspond to 
+the logical ``interval`` column. The above example simply maps to the default column names: 
+``chrom``, ``start``, ``end``.
+
 
 Examples
 --------
