@@ -1,12 +1,8 @@
-Distance and Proximity Queries
-==============================
+Distance and Neighbors
+======================
 
 This section covers patterns for calculating genomic distances and finding
 nearest features using GIQL's distance operators.
-
-.. contents::
-   :local:
-   :depth: 2
 
 Calculating Distances
 ---------------------

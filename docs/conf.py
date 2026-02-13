@@ -72,3 +72,11 @@ intersphinx_mapping = {
 
 html_theme = "sphinx_book_theme"
 # html_static_path = ['_static']  # Uncomment when you have custom static files
+html_theme_options = {
+    # "logo": {
+    #     "image_light": "_static/logo-light.svg",
+    #     "image_dark": "_static/logo-dark.svg",
+    # },
+    "repository_url": "https://github.com/abdenlab/giql",
+    "use_repository_button": True,
+}

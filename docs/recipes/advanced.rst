@@ -4,10 +4,6 @@ Advanced Queries
 This section covers advanced query patterns including multi-range matching,
 complex filtering, aggregate statistics, and multi-table workflows.
 
-.. contents::
-   :local:
-   :depth: 2
-
 Multi-Range Matching
 --------------------
 

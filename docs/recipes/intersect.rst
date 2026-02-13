@@ -1,12 +1,8 @@
-Intersection Queries
-====================
+Intersection
+============
 
 This section covers common patterns for finding overlapping genomic features
 using GIQL's spatial operators.
-
-.. contents::
-   :local:
-   :depth: 2
 
 Finding Overlapping Features
 ----------------------------

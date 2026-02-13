@@ -1,13 +1,9 @@
-Distance and Proximity
+Distance and Neighbors
 ======================
 
 Distance and proximity operators calculate genomic distances and find nearest features.
 These operators are essential for proximity analysis, such as finding genes near
 regulatory elements or variants near transcription start sites.
-
-.. contents::
-   :local:
-   :depth: 1
 
 .. _distance-operator:
 
@@ -97,33 +93,12 @@ Distinguish between overlapping and nearby features:
    CROSS JOIN genes g
    WHERE p.chrom = g.chrom
 
-Backend Compatibility
-~~~~~~~~~~~~~~~~~~~~~
-
-.. list-table::
-   :header-rows: 1
-   :widths: 20 20 60
-
-   * - Backend
-     - Support
-     - Notes
-   * - DuckDB
-     - Full
-     -
-   * - SQLite
-     - Full
-     -
-   * - PostgreSQL
-     - Planned
-     -
-
-Performance Notes
-~~~~~~~~~~~~~~~~~
+Notes
+~~~~~
 
 - Always include ``WHERE a.chrom = b.chrom`` to avoid unnecessary
   cross-chromosome comparisons
 - For large datasets, consider pre-filtering by region before calculating distances
-- Create indexes on chromosome and position columns for better performance
 
 Related Operators
 ~~~~~~~~~~~~~~~~~
@@ -332,39 +307,12 @@ Find nearby same-strand features within distance constraints:
    WHERE nearest.distance BETWEEN -10000 AND 10000
    ORDER BY peaks.name, ABS(nearest.distance)
 
-Backend Compatibility
-~~~~~~~~~~~~~~~~~~~~~
-
-.. list-table::
-   :header-rows: 1
-   :widths: 20 20 60
-
-   * - Backend
-     - Support
-     - Notes
-   * - DuckDB
-     - Full
-     - Efficient lateral join support
-   * - SQLite
-     - Partial
-     - Works but slower for large k values
-   * - PostgreSQL
-     - Planned
-     -
-
-Performance Notes
-~~~~~~~~~~~~~~~~~
+Notes
+~~~~~
 
 - **Chromosome pre-filtering**: NEAREST automatically filters by chromosome for efficiency
 - **Use max_distance**: Specifying a maximum distance reduces the search space significantly
 - **Limit k**: Only request as many neighbors as you actually need
-- **Create indexes**: Add indexes on ``(chrom, start, "end")`` for better performance
-
-.. code-block:: sql
-
-   -- Create indexes for better NEAREST performance
-   CREATE INDEX idx_genes_position
-   ON genes (chrom, start, "end")
 
 Related Operators
 ~~~~~~~~~~~~~~~~~

@@ -1,12 +1,8 @@
-Clustering and Merging Queries
-==============================
+Clustering and Merging
+======================
 
 This section covers patterns for clustering overlapping intervals and merging
 them into unified regions using GIQL's aggregation operators.
-
-.. contents::
-   :local:
-   :depth: 2
 
 Basic Clustering
 ----------------

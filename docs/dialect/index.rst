@@ -1,5 +1,5 @@
-Operators
-=========
+The GIQL Dialect
+================
 
 GIQL extends SQL with operators specifically designed for genomic interval queries.
 These operators enable powerful spatial reasoning over genomic coordinates without
@@ -8,6 +8,29 @@ requiring complex SQL expressions.
 Operators are organized by functionality. All operators work across supported 
 database backends (DuckDB, SQLite, with PostgreSQL planned). Each operator page 
 includes a compatibility table showing backend support status.
+
+Logical genomic range columns
+-----------------------------
+
+GIQL allows you to reference *logical* genomic range columns in queries. Such logical
+columns do not need to exist explicitly or materially in any of your data sources,
+and no specialized composite data types are needed. Rather, a logical genomic range 
+column or "pseudo-column" can be mapped to physical columns in your source table that 
+contain the required information and use conventional data types (reference sequence name, 
+start and end coordinates, optional strand, etc.).
+
+In GIQL queries, you reference a logical genomic range column using a designated name 
+like ``interval``:
+
+.. code-block:: sql
+
+   SELECT * FROM variants WHERE interval INTERSECTS 'chr1:1000-2000'
+
+By providing a :doc:`schema mapping <../transpilation/schema-mapping>` for the genomic 
+range columns of each of the tables in a GIQL query, the GIQL transpiler can translate 
+range operations into standard SQL expressions to be consumed by a general-purpose 
+query engine. Alternatively, a GIQL-aware query engine could use the schema mapping
+directly for optimization.
 
 Spatial Relationship Operators
 ------------------------------
@@ -97,11 +120,11 @@ Apply operators to multiple ranges simultaneously.
 See :doc:`quantifiers` for detailed documentation.
 
 
-.. toctree::
-   :maxdepth: 2
-   :hidden:
+.. .. toctree::
+..    :maxdepth: 2
+..    :hidden:
 
-   spatial-operators
-   distance-operators
-   aggregation-operators
-   quantifiers
+..    spatial-operators
+..    distance-operators
+..    aggregation-operators
+..    quantifiers
