@@ -50,6 +50,7 @@ Then open `http://localhost:6274` in your browser.
 | `explain_operator` | Get detailed documentation for a specific operator |
 | `get_syntax_reference` | Get the complete GIQL syntax quick reference |
 | `search_docs` | Search across GIQL documentation |
+| `transpile` | Transpile a GIQL query to SQL |
 
 ### Resources
 
