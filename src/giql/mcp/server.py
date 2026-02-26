@@ -13,6 +13,9 @@ from typing import Any
 
 from fastmcp import FastMCP
 
+from giql.table import Table
+from giql.transpile import transpile as giql_transpile
+
 # =============================================================================
 # Operator Metadata
 # =============================================================================
@@ -468,6 +471,39 @@ def search_docs(query: str) -> list[dict[str, str]]:
         return [{"message": f"No results found for '{query}'"}]
 
     return results
+
+
+@mcp.tool()
+def transpile(
+    query: str, tables: list[str | dict[str, Any]] | None = None
+) -> dict[str, str]:
+    """Transpile a GIQL query to SQL.
+
+    Converts a GIQL query string (with genomic operators like INTERSECTS,
+    CONTAINS, WITHIN, etc.) into standard SQL.
+
+    Args:
+        query: The GIQL query string.
+        tables: Optional list of table specifications. Each entry can be:
+            - A string table name (uses default column mappings:
+              chrom, start, end, strand)
+            - A dict with keys: name (required), plus optional chrom_col,
+              start_col, end_col, strand_col, genomic_col,
+              coordinate_system, interval_type
+    """
+    try:
+        converted: list[str | Table] | None = None
+        if tables is not None:
+            converted = []
+            for entry in tables:
+                if isinstance(entry, str):
+                    converted.append(entry)
+                else:
+                    converted.append(Table(**entry))
+        result = giql_transpile(query, tables=converted)
+        return {"sql": result}
+    except (ValueError, Exception) as e:
+        return {"error": str(e)}
 
 
 # =============================================================================
