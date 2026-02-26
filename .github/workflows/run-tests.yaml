@@ -24,6 +24,6 @@ jobs:
       - name: Install pixi dependencies
         run: pixi install
       - name: Install package in development mode
-        run: pixi run pip install -e .
+        run: pixi run pip install -e ".[mcp]"
       - name: Run tests
         run: pixi run pytest tests
