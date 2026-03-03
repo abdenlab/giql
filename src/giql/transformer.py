@@ -12,7 +12,7 @@ from giql.constants import DEFAULT_START_COL
 from giql.constants import DEFAULT_STRAND_COL
 from giql.expressions import GIQLCluster
 from giql.expressions import GIQLMerge
-from giql.schema import SchemaInfo
+from giql.table import Tables
 
 
 class ClusterTransformer:
@@ -32,13 +32,13 @@ class ClusterTransformer:
         FROM lag_calc
     """
 
-    def __init__(self, schema_info: SchemaInfo):
+    def __init__(self, tables: Tables):
         """Initialize transformer.
 
-        :param schema_info:
-            Schema information for column mapping
+        :param tables:
+            Table configurations for column mapping
         """
-        self.schema_info = schema_info
+        self.tables = tables
 
     def _get_table_name(self, query: exp.Select) -> str | None:
         """Extract table name from query's FROM clause.
@@ -58,7 +58,7 @@ class ClusterTransformer:
         return None
 
     def _get_genomic_columns(self, query: exp.Select) -> tuple[str, str, str, str]:
-        """Get genomic column names from schema info or defaults.
+        """Get genomic column names from table config or defaults.
 
         :param query:
             Query to extract table and column info from
@@ -74,20 +74,13 @@ class ClusterTransformer:
         strand_col = DEFAULT_STRAND_COL
 
         if table_name:
-            table_schema = self.schema_info.get_table(table_name)
-            if table_schema:
-                # Find the genomic column
-                for col_info in table_schema.columns.values():
-                    if col_info.is_genomic:
-                        if col_info.chrom_col:
-                            chrom_col = col_info.chrom_col
-                        if col_info.start_col:
-                            start_col = col_info.start_col
-                        if col_info.end_col:
-                            end_col = col_info.end_col
-                        if col_info.strand_col:
-                            strand_col = col_info.strand_col
-                        break
+            table = self.tables.get(table_name)
+            if table:
+                chrom_col = table.chrom_col
+                start_col = table.start_col
+                end_col = table.end_col
+                if table.strand_col:
+                    strand_col = table.strand_col
 
         return chrom_col, start_col, end_col, strand_col
 
@@ -209,7 +202,7 @@ class ClusterTransformer:
         else:
             stranded = False
 
-        # Get column names from schema_info or use defaults
+        # Get column names from table config or use defaults
         chrom_col, start_col, end_col, strand_col = self._get_genomic_columns(query)
 
         # Build partition clause
@@ -366,14 +359,14 @@ class MergeTransformer:
         ORDER BY chromosome, start_pos
     """
 
-    def __init__(self, schema_info: SchemaInfo):
+    def __init__(self, tables: Tables):
         """Initialize transformer.
 
-        :param schema_info:
-            Schema information for column mapping
+        :param tables:
+            Table configurations for column mapping
         """
-        self.schema_info = schema_info
-        self.cluster_transformer = ClusterTransformer(schema_info)
+        self.tables = tables
+        self.cluster_transformer = ClusterTransformer(tables)
 
     def transform(self, query: exp.Expression) -> exp.Expression:
         """Transform query if it contains MERGE expressions.
@@ -468,7 +461,7 @@ class MergeTransformer:
         distance_expr = merge_expr.args.get("distance")
         stranded_expr = merge_expr.args.get("stranded")
 
-        # Get column names from schema_info or use defaults
+        # Get column names from table config or use defaults
         (
             chrom_col,
             start_col,

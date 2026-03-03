@@ -15,7 +15,7 @@ from giql.expressions import SpatialSetPredicate
 from giql.expressions import Within
 from giql.range_parser import ParsedRange
 from giql.range_parser import RangeParser
-from giql.schema import SchemaInfo
+from giql.table import Tables
 
 
 class BaseGIQLGenerator(Generator):
@@ -48,9 +48,9 @@ class BaseGIQLGenerator(Generator):
         else:
             return str(param_expr).upper() in ("TRUE", "1", "YES")
 
-    def __init__(self, schema_info: Optional[SchemaInfo] = None, **kwargs):
+    def __init__(self, tables: Optional[Tables] = None, **kwargs):
         super().__init__(**kwargs)
-        self.schema_info = schema_info or SchemaInfo()
+        self.tables = tables or Tables()
         self._current_table = None  # Track current table for column resolution
         self._alias_to_table = {}  # Map aliases to table names
 
@@ -187,40 +187,26 @@ class BaseGIQLGenerator(Generator):
             else:
                 # Implicit reference in correlated mode - get strand from outer table
                 outer_table = self._find_outer_table_in_lateral_join(expression)
-                if outer_table and self.schema_info:
+                if outer_table and self.tables:
                     actual_table = self._alias_to_table.get(outer_table, outer_table)
-                    table_schema = self.schema_info.get_table(actual_table)
-                    if table_schema:
-                        for col_info in table_schema.columns.values():
-                            if col_info.is_genomic and col_info.strand_col:
-                                ref_strand = f'{outer_table}."{col_info.strand_col}"'
-                                break
+                    table = self.tables.get(actual_table)
+                    if table and table.strand_col:
+                        ref_strand = f'{outer_table}."{table.strand_col}"'
 
             # Get strand column for target table
-            target_table_info = (
-                self.schema_info.get_table(table_name) if self.schema_info else None
-            )
-            if target_table_info:
-                for col_info in target_table_info.columns.values():
-                    if col_info.is_genomic and col_info.strand_col:
-                        target_strand = f'{table_name}."{col_info.strand_col}"'
-                        break
+            target_table = self.tables.get(table_name) if self.tables else None
+            if target_table and target_table.strand_col:
+                target_strand = f'{table_name}."{target_table.strand_col}"'
 
         # Determine if we should add 1 for gap distances (bedtools compatibility)
         # This depends on the interval types of the tables involved
         add_one = False
-        if self.schema_info:
-            target_table_info = self.schema_info.get_table(table_name)
-            if target_table_info:
-                for col_info in target_table_info.columns.values():
-                    if col_info.is_genomic:
-                        # Import IntervalType to check
-                        from giql.range_parser import IntervalType
-
-                        # Add 1 for closed intervals (bedtools behavior)
-                        if col_info.interval_type == IntervalType.CLOSED:
-                            add_one = True
-                        break
+        if self.tables:
+            target_table = self.tables.get(table_name)
+            if target_table:
+                # Add 1 for closed intervals (bedtools behavior)
+                if target_table.interval_type == "closed":
+                    add_one = True
 
         # Build distance calculation using CASE expression
         # For NEAREST: ORDER BY absolute distance, but RETURN signed distance
@@ -338,30 +324,25 @@ class BaseGIQLGenerator(Generator):
             raise ValueError("Literal range as second argument not yet supported")
 
         # Determine if we should add 1 for gap distances (bedtools compatibility)
-        # Check interval types from schema
+        # Check interval types from table config
         add_one = False
-        if self.schema_info:
+        if self.tables:
             # Extract table names from column references
             # Column refs look like "table.column" or "alias.column"
             table_a = interval_a_sql.split(".")[0] if "." in interval_a_sql else None
             table_b = interval_b_sql.split(".")[0] if "." in interval_b_sql else None
 
             # Check if either table uses closed intervals
-            from giql.range_parser import IntervalType
-
-            for table_name in [table_a, table_b]:
-                if table_name:
+            for tbl_name in [table_a, table_b]:
+                if tbl_name:
                     # Remove quotes if present
-                    table_name = table_name.strip('"')
+                    tbl_name = tbl_name.strip('"')
                     # Check if it's an alias first
-                    actual_table = self._alias_to_table.get(table_name, table_name)
-                    table_info = self.schema_info.get_table(actual_table)
-                    if table_info:
-                        for col_info in table_info.columns.values():
-                            if col_info.is_genomic:
-                                if col_info.interval_type == IntervalType.CLOSED:
-                                    add_one = True
-                                break
+                    actual_table = self._alias_to_table.get(tbl_name, tbl_name)
+                    table = self.tables.get(actual_table)
+                    if table and table.interval_type == "closed":
+                        add_one = True
+                        break
 
         # Generate CASE expression
         return self._generate_distance_case(
@@ -776,32 +757,19 @@ class BaseGIQLGenerator(Generator):
                         "Please specify reference parameter explicitly."
                     )
 
-                # Look up the table's schema to find the genomic column
+                # Look up the table to find the genomic column
                 # Check if outer_table is an alias
                 actual_table = self._alias_to_table.get(outer_table, outer_table)
-                table_schema = self.schema_info.get_table(actual_table)
+                table = self.tables.get(actual_table)
 
-                if not table_schema:
+                if not table:
                     raise ValueError(
-                        f"Outer table '{outer_table}' not found in schema. "
-                        "Please specify reference parameter explicitly."
-                    )
-
-                # Find the genomic column in the table schema
-                genomic_col_name = None
-                for col_info in table_schema.columns.values():
-                    if col_info.is_genomic:
-                        genomic_col_name = col_info.name
-                        break
-
-                if not genomic_col_name:
-                    raise ValueError(
-                        f"No genomic column found in table '{outer_table}'. "
+                        f"Outer table '{outer_table}' not found in tables. "
                         "Please specify reference parameter explicitly."
                     )
 
                 # Build column references using the outer table and genomic column
-                reference_sql = f"{outer_table}.{genomic_col_name}"
+                reference_sql = f"{outer_table}.{table.genomic_col}"
                 return self._get_column_refs(reference_sql, None)
 
     def _resolve_target_table(
@@ -828,31 +796,15 @@ class BaseGIQLGenerator(Generator):
             # Try to extract as string
             table_name = str(target)
 
-        table_schema = self.schema_info.get_table(table_name)
-        if not table_schema:
+        table = self.tables.get(table_name)
+        if not table:
             raise ValueError(
-                f"Target table '{table_name}' not found in schema. "
-                f"Available tables: {list(self.schema_info.tables.keys())}"
+                f"Target table '{table_name}' not found in tables. "
+                "Register the table before transpiling."
             )
 
-        # Find genomic column in target table
-        genomic_col = None
-        for col_info in table_schema.columns.values():
-            if col_info.is_genomic:
-                genomic_col = col_info
-                break
-
-        if not genomic_col:
-            raise ValueError(
-                f"Target table '{table_name}' does not have a genomic column"
-            )
-
-        # Get physical column names
-        chrom_col = genomic_col.chrom_col or DEFAULT_CHROM_COL
-        start_col = genomic_col.start_col or DEFAULT_START_COL
-        end_col = genomic_col.end_col or DEFAULT_END_COL
-
-        return table_name, (chrom_col, start_col, end_col)
+        # Get physical column names from table config
+        return table_name, (table.chrom_col, table.start_col, table.end_col)
 
     def _get_column_refs(
         self,
@@ -887,22 +839,15 @@ class BaseGIQLGenerator(Generator):
                 # Look up actual table name from alias
                 table_name = self._alias_to_table.get(table_alias, self._current_table)
 
-        # Try to get custom column names from schema
-        if table_name and self.schema_info:
-            table_schema = self.schema_info.get_table(table_name)
-            if table_schema:
-                # Find the genomic column
-                for col_info in table_schema.columns.values():
-                    if col_info.is_genomic:
-                        if col_info.chrom_col:
-                            chrom_col = col_info.chrom_col
-                        if col_info.start_col:
-                            start_col = col_info.start_col
-                        if col_info.end_col:
-                            end_col = col_info.end_col
-                        if col_info.strand_col:
-                            strand_col = col_info.strand_col
-                        break
+        # Try to get custom column names from table config
+        if table_name and self.tables:
+            table = self.tables.get(table_name)
+            if table:
+                chrom_col = table.chrom_col
+                start_col = table.start_col
+                end_col = table.end_col
+                if table.strand_col:
+                    strand_col = table.strand_col
 
         # Format with table alias if present
         if table_alias:

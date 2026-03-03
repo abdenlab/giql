@@ -1,64 +1,34 @@
 """Transpilation tests for NEAREST operator SQL generation.
 
-Tests verify that NEAREST() is correctly transpiled to dialect-specific SQL
-(LATERAL joins for PostgreSQL/DuckDB, window functions for SQLite).
+Tests verify that NEAREST() is correctly transpiled to SQL
+(LATERAL joins for correlated queries, ORDER BY + LIMIT for standalone).
 """
 
 import pytest
 from sqlglot import parse_one
 
+from giql import Table
 from giql.dialect import GIQLDialect
 from giql.generators import BaseGIQLGenerator
-from giql.generators import GIQLDuckDBGenerator
-from giql.schema import ColumnInfo
-from giql.schema import SchemaInfo
-from giql.schema import TableSchema
+from giql.table import Tables
 
 
 @pytest.fixture
-def schema_with_peaks_and_genes():
-    """Schema info with peaks and genes tables."""
-    schema = SchemaInfo()
-
-    # Register peaks table
-    peaks_table = TableSchema(name="peaks", columns={})
-    peaks_table.columns["peak_id"] = ColumnInfo(name="peak_id", type="INTEGER")
-    peaks_table.columns["interval"] = ColumnInfo(
-        name="interval",
-        type="VARCHAR",
-        is_genomic=True,
-        chrom_col="chromosome",
-        start_col="start_pos",
-        end_col="end_pos",
-        strand_col="strand",
-    )
-    schema.tables["peaks"] = peaks_table
-
-    # Register genes table
-    genes_table = TableSchema(name="genes", columns={})
-    genes_table.columns["gene_id"] = ColumnInfo(name="gene_id", type="INTEGER")
-    genes_table.columns["name"] = ColumnInfo(name="name", type="VARCHAR")
-    genes_table.columns["interval"] = ColumnInfo(
-        name="interval",
-        type="VARCHAR",
-        is_genomic=True,
-        chrom_col="chromosome",
-        start_col="start_pos",
-        end_col="end_pos",
-        strand_col="strand",
-    )
-    schema.tables["genes"] = genes_table
-
-    return schema
+def tables_with_peaks_and_genes():
+    """Tables container with peaks and genes tables."""
+    tables = Tables()
+    tables.register("peaks", Table("peaks"))
+    tables.register("genes", Table("genes"))
+    return tables
 
 
-class TestNearestTranspilationDuckDB:
-    """Tests for NEAREST transpilation to DuckDB SQL (LATERAL joins)."""
+class TestNearestTranspilation:
+    """Tests for NEAREST transpilation to SQL."""
 
-    def test_nearest_basic_k3_duckdb(self, schema_with_peaks_and_genes):
+    def test_nearest_basic_k3(self, tables_with_peaks_and_genes):
         """
         GIVEN a GIQL query with NEAREST(genes, k=3)
-        WHEN transpiling to DuckDB SQL
+        WHEN transpiling to SQL
         THEN should generate LATERAL join with DISTANCE and LIMIT 3
         """
         sql = """
@@ -68,7 +38,7 @@ class TestNearestTranspilationDuckDB:
         """
 
         ast = parse_one(sql, dialect=GIQLDialect)
-        generator = GIQLDuckDBGenerator(schema_info=schema_with_peaks_and_genes)
+        generator = BaseGIQLGenerator(tables=tables_with_peaks_and_genes)
         output = generator.generate(ast)
 
         # Expectations:
@@ -83,10 +53,10 @@ class TestNearestTranspilationDuckDB:
         assert "LIMIT 3" in output
         assert "ORDER BY" in output
 
-    def test_nearest_with_max_distance_duckdb(self, schema_with_peaks_and_genes):
+    def test_nearest_with_max_distance(self, tables_with_peaks_and_genes):
         """
         GIVEN a GIQL query with NEAREST(genes, k=5, max_distance=100000)
-        WHEN transpiling to DuckDB SQL
+        WHEN transpiling to SQL
         THEN should generate LATERAL join with distance filter
         """
         sql = """
@@ -96,7 +66,7 @@ class TestNearestTranspilationDuckDB:
         """
 
         ast = parse_one(sql, dialect=GIQLDialect)
-        generator = GIQLDuckDBGenerator(schema_info=schema_with_peaks_and_genes)
+        generator = BaseGIQLGenerator(tables=tables_with_peaks_and_genes)
         output = generator.generate(ast)
 
         # Expectations:
@@ -107,10 +77,10 @@ class TestNearestTranspilationDuckDB:
         assert "100000" in output
         assert "LIMIT 5" in output
 
-    def test_nearest_standalone_literal_duckdb(self, schema_with_peaks_and_genes):
+    def test_nearest_standalone_literal(self, tables_with_peaks_and_genes):
         """
         GIVEN a GIQL query with literal reference NEAREST(genes, reference='chr1:1000-2000', k=3)
-        WHEN transpiling to DuckDB SQL
+        WHEN transpiling to SQL
         THEN should generate standalone query without LATERAL
         """
         sql = """
@@ -119,7 +89,7 @@ class TestNearestTranspilationDuckDB:
         """
 
         ast = parse_one(sql, dialect=GIQLDialect)
-        generator = GIQLDuckDBGenerator(schema_info=schema_with_peaks_and_genes)
+        generator = BaseGIQLGenerator(tables=tables_with_peaks_and_genes)
         output = generator.generate(ast)
 
         # Expectations:
@@ -131,10 +101,10 @@ class TestNearestTranspilationDuckDB:
         assert "chr1" in output.lower()
         assert "LIMIT 3" in output
 
-    def test_nearest_with_stranded_duckdb(self, schema_with_peaks_and_genes):
+    def test_nearest_with_stranded(self, tables_with_peaks_and_genes):
         """
         GIVEN a GIQL query with NEAREST(genes, k=3, stranded=true)
-        WHEN transpiling to DuckDB SQL
+        WHEN transpiling to SQL
         THEN should generate SQL with strand filtering
         """
         sql = """
@@ -144,7 +114,7 @@ class TestNearestTranspilationDuckDB:
         """
 
         ast = parse_one(sql, dialect=GIQLDialect)
-        generator = GIQLDuckDBGenerator(schema_info=schema_with_peaks_and_genes)
+        generator = BaseGIQLGenerator(tables=tables_with_peaks_and_genes)
         output = generator.generate(ast)
 
         # Expectations:
@@ -155,10 +125,10 @@ class TestNearestTranspilationDuckDB:
         assert "strand" in output.lower()
         assert "LIMIT 3" in output
 
-    def test_nearest_with_signed_duckdb(self, schema_with_peaks_and_genes):
+    def test_nearest_with_signed(self, tables_with_peaks_and_genes):
         """
         GIVEN a GIQL query with NEAREST(genes, k=3, signed=true)
-        WHEN transpiling to DuckDB SQL
+        WHEN transpiling to SQL
         THEN should generate SQL with signed distance column
             (negative for upstream, positive for downstream)
         """
@@ -169,7 +139,7 @@ class TestNearestTranspilationDuckDB:
         """
 
         ast = parse_one(sql, dialect=GIQLDialect)
-        generator = GIQLDuckDBGenerator(schema_info=schema_with_peaks_and_genes)
+        generator = BaseGIQLGenerator(tables=tables_with_peaks_and_genes)
         output = generator.generate(ast)
 
         # Expectations:
@@ -183,114 +153,3 @@ class TestNearestTranspilationDuckDB:
         assert "ELSE -(" in output, (
             f"Expected signed distance with negation for upstream, got:\n{output}"
         )
-
-
-# PostgreSQL uses same generator as base for now
-# class TestNearestTranspilationPostgreSQL:
-#     """Tests for NEAREST transpilation to PostgreSQL SQL (LATERAL joins)."""
-#     (Skipped - uses BaseGIQLGenerator for now)
-
-
-class TestNearestTranspilationSQLite:
-    """Tests for NEAREST transpilation to SQLite SQL (using LATERAL for MVP)."""
-
-    def test_nearest_basic_k3_sqlite(self, schema_with_peaks_and_genes):
-        """
-        GIVEN a GIQL query with NEAREST(genes, k=3)
-        WHEN transpiling to SQLite SQL
-        THEN should generate LATERAL subquery with ORDER BY and LIMIT
-        (Note: Using LATERAL for MVP - window function optimization to be added later)
-        """
-        sql = """
-        SELECT *
-        FROM peaks
-        CROSS JOIN LATERAL NEAREST(genes, reference=peaks.interval, k=3)
-        """
-
-        ast = parse_one(sql, dialect=GIQLDialect)
-        generator = BaseGIQLGenerator(schema_info=schema_with_peaks_and_genes)
-        output = generator.generate(ast)
-
-        # MVP expectations (LATERAL syntax):
-        # - LATERAL subquery
-        # - Distance calculation (CASE WHEN)
-        # - ORDER BY distance
-        # - LIMIT 3
-        assert "LATERAL" in output.upper()
-        assert "CASE" in output.upper()
-        assert " AS distance" in output or " AS DISTANCE" in output
-        assert "ORDER BY" in output.upper()
-        assert "LIMIT 3" in output
-
-    def test_nearest_with_max_distance_sqlite(self, schema_with_peaks_and_genes):
-        """
-        GIVEN a GIQL query with NEAREST(genes, k=5, max_distance=100000)
-        WHEN transpiling to SQLite SQL
-        THEN should generate LATERAL with distance filter
-        (Note: Using LATERAL for MVP - window function optimization to be added later)
-        """
-        sql = """
-        SELECT *
-        FROM peaks
-        CROSS JOIN LATERAL NEAREST(genes, reference=peaks.interval, k=5, max_distance=100000)
-        """
-
-        ast = parse_one(sql, dialect=GIQLDialect)
-        generator = BaseGIQLGenerator(schema_info=schema_with_peaks_and_genes)
-        output = generator.generate(ast)
-
-        # MVP expectations (LATERAL syntax):
-        # - LATERAL subquery
-        # - Distance filter: <= 100000
-        # - LIMIT 5
-        assert "LATERAL" in output.upper()
-        assert "100000" in output
-        assert "LIMIT 5" in output
-
-    def test_nearest_standalone_literal_sqlite(self, schema_with_peaks_and_genes):
-        """
-        GIVEN a GIQL query with literal reference NEAREST(genes, reference='chr1:1000-2000', k=3)
-        WHEN transpiling to SQLite SQL
-        THEN should generate standalone query without window functions
-        """
-        sql = """
-        SELECT *
-        FROM NEAREST(genes, reference='chr1:1000-2000', k=3)
-        """
-
-        ast = parse_one(sql, dialect=GIQLDialect)
-        generator = BaseGIQLGenerator(schema_info=schema_with_peaks_and_genes)
-        output = generator.generate(ast)
-
-        # Expectations:
-        # - No CTE needed (standalone mode)
-        # - Distance calculation with literal 'chr1', 1000, 2000
-        # - ORDER BY distance
-        # - LIMIT 3
-        assert "chr1" in output.lower()
-        assert "ORDER BY" in output.upper()
-        assert "LIMIT 3" in output
-
-    def test_nearest_with_stranded_sqlite(self, schema_with_peaks_and_genes):
-        """
-        GIVEN a GIQL query with NEAREST(genes, k=3, stranded=true)
-        WHEN transpiling to SQLite SQL
-        THEN should generate SQL with strand filtering
-        """
-        sql = """
-        SELECT *
-        FROM peaks
-        CROSS JOIN LATERAL NEAREST(genes, reference=peaks.interval, k=3, stranded=true)
-        """
-
-        ast = parse_one(sql, dialect=GIQLDialect)
-        generator = BaseGIQLGenerator(schema_info=schema_with_peaks_and_genes)
-        output = generator.generate(ast)
-
-        # Expectations:
-        # - LATERAL subquery
-        # - Strand filtering in WHERE clause
-        # - LIMIT 3
-        assert "LATERAL" in output.upper()
-        assert "strand" in output.lower()
-        assert "LIMIT 3" in output

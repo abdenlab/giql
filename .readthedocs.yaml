@@ -6,30 +6,20 @@ version: 2
 
 # Set the OS, Python version and other tools
 build:
-  os: "ubuntu-22.04"
+  os: "ubuntu-24.04"
   tools:
     python: "3.11"
+  jobs:
+    post_install:
+      - python -m pip install --group docs
 
 # Build documentation in the docs/ directory with Sphinx
 sphinx:
   configuration: docs/conf.py
 
-formats:
-  - epub
-
-# Specify the Python requirements file
+# Install the project
 python:
   install:
-    - requirements: docs/requirements.txt
     - method: pip
       path: .
 
-# Version management:
-# Documentation is immutable per release. Each git tag (v0.1.0, v0.2.0, etc.) produces
-# a frozen snapshot of the docs as they were at that release.
-#
-# - Tags (v0.1.0, v0.2.0, ...): Immutable doc snapshots
-# - main/master branches: Development version docs (always latest)
-#
-# This ensures historical accuracy: users viewing old version docs see them exactly
-# as they were released, not retrospectively updated.
