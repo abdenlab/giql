@@ -92,6 +92,16 @@ sql = transpile(
 df = con.execute(sql).fetchdf()
 ```
 
+## MCP Server
+
+GIQL includes an [MCP](https://modelcontextprotocol.io/) server that gives LLM-powered tools access to operator references, syntax guides, and documentation. Install with the `mcp` extra:
+
+```bash
+pip install giql[mcp]
+```
+
+See [`src/giql/mcp/README.md`](src/giql/mcp/README.md) for configuration and usage details.
+
 ## Development
 
 ```bash
