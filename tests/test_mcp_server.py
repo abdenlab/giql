@@ -5,18 +5,16 @@ from __future__ import annotations
 import pytest
 
 from giql.mcp import server
-from giql.mcp.server import (
-    DOC_PATHS,
-    OPERATORS,
-    clean_rst,
-    explain_operator,
-    find_docs_root,
-    get_documentation,
-    get_syntax_reference,
-    list_operators,
-    search_docs,
-)
-
+from giql.mcp.server import DOC_PATHS
+from giql.mcp.server import OPERATORS
+from giql.mcp.server import clean_rst
+from giql.mcp.server import explain_operator
+from giql.mcp.server import find_docs_root
+from giql.mcp.server import get_documentation
+from giql.mcp.server import get_syntax_reference
+from giql.mcp.server import list_operators
+from giql.mcp.server import search_docs
+from giql.mcp.server import transpile
 
 # =============================================================================
 # Fixtures
@@ -350,3 +348,71 @@ class TestSearchDocs:
         """
         results = search_docs("anything")
         assert any("error" in r for r in results)
+
+
+# =============================================================================
+# TestTranspile
+# =============================================================================
+
+
+class TestTranspile:
+    """Tests for the transpile tool."""
+
+    def test_basic_query(self):
+        """
+        GIVEN a simple SQL query with no tables
+        WHEN transpile is called
+        THEN it returns a dict with a non-empty 'sql' key
+        """
+        result = transpile("SELECT * FROM t")
+        assert isinstance(result, dict)
+        assert "sql" in result
+        assert len(result["sql"]) > 0
+
+    def test_string_table_spec(self):
+        """
+        GIVEN a GIQL query with an INTERSECTS operator and a string table spec
+        WHEN transpile is called with tables=["peaks"]
+        THEN the SQL contains SELECT and the default column names
+        """
+        result = transpile(
+            query="SELECT * FROM peaks WHERE interval INTERSECTS 'chr1:1000-2000'",
+            tables=["peaks"],
+        )
+        sql = result["sql"]
+        assert "SELECT" in sql
+        assert "chrom" in sql
+        assert "start" in sql
+        assert "end" in sql
+
+    def test_dict_table_spec(self):
+        """
+        GIVEN a GIQL query with an INTERSECTS operator and a dict table spec
+        WHEN transpile is called with custom column names
+        THEN the SQL contains the custom column names
+        """
+        result = transpile(
+            query="SELECT * FROM peaks WHERE interval INTERSECTS 'chr1:1000-2000'",
+            tables=[
+                {
+                    "name": "peaks",
+                    "chrom_col": "chromosome",
+                    "start_col": "pos_start",
+                    "end_col": "pos_end",
+                }
+            ],
+        )
+        sql = result["sql"]
+        assert "chromosome" in sql
+        assert "pos_start" in sql
+        assert "pos_end" in sql
+
+    def test_invalid_query_returns_error(self):
+        """
+        GIVEN an invalid GIQL query
+        WHEN transpile is called
+        THEN it returns a dict with an 'error' key
+        """
+        result = transpile(query="NOT VALID GIQL %%% !!!")
+        assert isinstance(result, dict)
+        assert "error" in result
