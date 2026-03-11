@@ -170,11 +170,11 @@ class GIQLCoverage(exp.Func):
         kwargs = {}
         positional_args = []
 
-        # Separate named (EQ/PropertyEQ) and positional arguments
+        # Separate named (PropertyEQ for :=, Kwarg for =>) and positional arguments
         for arg in args:
-            if isinstance(arg, (exp.EQ, exp.PropertyEQ)):
+            if isinstance(arg, (exp.EQ, exp.PropertyEQ, exp.Kwarg)):
                 param_name = (
-                    arg.this.name if isinstance(arg.this, exp.Column) else str(arg.this)
+                    arg.this.name if hasattr(arg.this, "name") else str(arg.this)
                 )
                 kwargs[param_name.lower()] = arg.expression
             else:

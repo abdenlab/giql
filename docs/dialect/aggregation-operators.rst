@@ -361,8 +361,9 @@ Syntax
    -- Basic coverage (count overlapping intervals per bin)
    SELECT COVERAGE(interval, resolution) FROM features
 
-   -- With a named statistic
+   -- With a named statistic (either := or => syntax)
    SELECT COVERAGE(interval, 1000, stat := 'mean') FROM features
+   SELECT COVERAGE(interval, 1000, stat => 'mean') FROM features
 
    -- Named resolution parameter
    SELECT COVERAGE(interval, resolution := 500) FROM features
