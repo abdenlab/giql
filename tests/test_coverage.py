@@ -56,6 +56,21 @@ class TestCoverageParsing:
         assert len(coverage) == 1
         assert coverage[0].args["resolution"].this == "1000"
 
+    def test_parse_arrow_named_params(self):
+        """
+        GIVEN a COVERAGE expression using => (standard SQL named parameter syntax)
+        WHEN parsing with GIQLDialect
+        THEN should produce GIQLCoverage with the same result as :=
+        """
+        ast = parse_one(
+            "SELECT COVERAGE(interval, 500, stat => 'mean') FROM features",
+            dialect=GIQLDialect,
+        )
+        coverage = list(ast.find_all(GIQLCoverage))
+        assert len(coverage) == 1
+        assert coverage[0].args["resolution"].this == "500"
+        assert coverage[0].args["stat"].this == "mean"
+
 
 class TestCoverageTranspile:
     """Tests for COVERAGE transpilation."""
