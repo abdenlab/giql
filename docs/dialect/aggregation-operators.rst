@@ -328,4 +328,120 @@ Related Operators
 ~~~~~~~~~~~~~~~~~
 
 - :ref:`CLUSTER <cluster-operator>` - Assign cluster IDs without merging
+- :ref:`COVERAGE <coverage-operator>` - Compute binned genome coverage
 - :ref:`INTERSECTS <intersects-operator>` - Test for overlap between specific pairs
+
+----
+
+.. _coverage-operator:
+
+COVERAGE
+--------
+
+Compute binned genome coverage by tiling the genome into fixed-width bins.
+
+Description
+~~~~~~~~~~~
+
+The ``COVERAGE`` operator tiles the genome into fixed-width bins and aggregates overlapping intervals per bin. It generates a bin grid using ``generate_series`` and joins it against the source table to count (or otherwise aggregate) overlapping features in each bin.
+
+This is useful for:
+
+- Computing read depth or signal coverage across the genome
+- Creating fixed-resolution coverage tracks from interval data
+- Summarising feature density at a user-defined resolution
+
+The operator works as an aggregate function, returning one row per bin with the bin coordinates and the computed statistic.
+
+Syntax
+~~~~~~
+
+.. code-block:: sql
+
+   -- Basic coverage (count overlapping intervals per bin)
+   SELECT COVERAGE(interval, resolution) FROM features
+
+   -- With a named statistic
+   SELECT COVERAGE(interval, 1000, stat := 'mean') FROM features
+
+   -- Named resolution parameter
+   SELECT COVERAGE(interval, resolution := 500) FROM features
+
+Parameters
+~~~~~~~~~~
+
+**interval**
+   A genomic column.
+
+**resolution**
+   Bin width in base pairs. Can be given as a positional or named parameter.
+
+**stat** *(optional)*
+   Aggregation function applied to overlapping intervals per bin. One of:
+
+   - ``'count'`` — number of overlapping intervals (default)
+   - ``'mean'`` — average interval length of overlapping intervals
+   - ``'sum'`` — total interval length of overlapping intervals
+   - ``'min'`` — minimum interval length of overlapping intervals
+   - ``'max'`` — maximum interval length of overlapping intervals
+
+Return Value
+~~~~~~~~~~~~
+
+Returns one row per genomic bin:
+
+- ``chrom`` — Chromosome of the bin
+- ``start`` — Start position of the bin
+- ``end`` — End position of the bin
+- The computed aggregate value
+
+Examples
+~~~~~~~~
+
+**Basic Coverage:**
+
+Count the number of features overlapping each 1 kb bin:
+
+.. code-block:: sql
+
+   SELECT COVERAGE(interval, 1000)
+   FROM features
+
+**Mean Coverage:**
+
+Compute the average interval length per 500 bp bin:
+
+.. code-block:: sql
+
+   SELECT COVERAGE(interval, 500, stat := 'mean')
+   FROM features
+
+**Named Alias:**
+
+.. code-block:: sql
+
+   SELECT COVERAGE(interval, 1000) AS depth
+   FROM reads
+
+**With WHERE Filter:**
+
+Coverage of high-scoring features only:
+
+.. code-block:: sql
+
+   SELECT COVERAGE(interval, 1000) AS depth
+   FROM features
+   WHERE score > 10
+
+Performance Notes
+~~~~~~~~~~~~~~~~~
+
+- The operator creates one bin per chromosome per step, so smaller resolutions produce more rows
+- A ``LEFT JOIN`` ensures bins with zero coverage are included in the output
+- For very large genomes, consider restricting the query with a ``WHERE`` clause on chromosome
+
+Related Operators
+~~~~~~~~~~~~~~~~~
+
+- :ref:`MERGE <merge-operator>` - Combine overlapping intervals into single regions
+- :ref:`CLUSTER <cluster-operator>` - Assign cluster IDs to overlapping intervals
