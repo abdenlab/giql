@@ -171,6 +171,53 @@ class GIQLMerge(exp.Func):
         return cls(**kwargs)
 
 
+class GIQLCoverage(exp.Func):
+    """COVERAGE aggregate function for binned genome coverage.
+
+    Tiles the genome into fixed-width bins and aggregates overlapping
+    intervals per bin using generate_series and JOIN + GROUP BY.
+
+    Examples:
+        COVERAGE(interval, 1000)
+        COVERAGE(interval, 500, stat := 'mean')
+        COVERAGE(interval, resolution := 1000)
+    """
+
+    arg_types = {
+        "this": True,  # genomic column
+        "resolution": True,  # bin width (positional or named)
+        "stat": False,  # aggregation: 'count', 'mean', 'sum', 'min', 'max'
+    }
+
+    @classmethod
+    def from_arg_list(cls, args):
+        """Parse argument list, handling named parameters.
+
+        :param args: List of arguments from parser
+        :return: GIQLCoverage instance with properly mapped arguments
+        """
+        kwargs = {}
+        positional_args = []
+
+        # Separate named (EQ/PropertyEQ) and positional arguments
+        for arg in args:
+            if isinstance(arg, (exp.EQ, exp.PropertyEQ)):
+                param_name = (
+                    arg.this.name if isinstance(arg.this, exp.Column) else str(arg.this)
+                )
+                kwargs[param_name.lower()] = arg.expression
+            else:
+                positional_args.append(arg)
+
+        # Map positional arguments
+        if len(positional_args) > 0:
+            kwargs["this"] = positional_args[0]
+        if len(positional_args) > 1:
+            kwargs["resolution"] = positional_args[1]
+
+        return cls(**kwargs)
+
+
 class GIQLDistance(exp.Func):
     """DISTANCE function for calculating genomic distances between intervals.
 
