@@ -777,6 +777,16 @@ class CoverageTransformer:
 
         sql_agg = COVERAGE_STAT_MAP[stat]
 
+        # Extract target parameter
+        target_expr = coverage_expr.args.get("target")
+        if target_expr:
+            if isinstance(target_expr, exp.Literal):
+                target_col = target_expr.this.strip("'\"")
+            else:
+                target_col = str(target_expr).strip("'\"")
+        else:
+            target_col = None
+
         # Get column names and table info
         chrom_col, start_col, end_col = self._get_genomic_columns(query)
         table_name = self._get_table_name(query)
@@ -875,28 +885,43 @@ class CoverageTransformer:
 
         # Build the aggregate expression
         if stat == "count":
-            agg_expr = exp.Anonymous(
-                this="COUNT",
-                expressions=[
-                    exp.Column(
-                        this=exp.Star(),
-                        table=exp.Identifier(this=source_ref),
-                    )
-                ],
-            )
+            if target_col:
+                agg_expr = exp.Anonymous(
+                    this="COUNT",
+                    expressions=[
+                        exp.column(target_col, table=source_ref, quoted=True),
+                    ],
+                )
+            else:
+                agg_expr = exp.Anonymous(
+                    this="COUNT",
+                    expressions=[
+                        exp.Column(
+                            this=exp.Star(),
+                            table=exp.Identifier(this=source_ref),
+                        )
+                    ],
+                )
         else:
-            # For mean/sum/min/max, we need a column to aggregate on.
-            # Default to the end_col - start_col (interval length) for now,
-            # but COUNT just counts overlapping intervals.
-            agg_expr = exp.Anonymous(
-                this=sql_agg,
-                expressions=[
-                    exp.Sub(
-                        this=exp.column(end_col, table=source_ref, quoted=True),
-                        expression=exp.column(start_col, table=source_ref, quoted=True),
-                    )
-                ],
-            )
+            if target_col:
+                agg_expr = exp.Anonymous(
+                    this=sql_agg,
+                    expressions=[
+                        exp.column(target_col, table=source_ref, quoted=True),
+                    ],
+                )
+            else:
+                agg_expr = exp.Anonymous(
+                    this=sql_agg,
+                    expressions=[
+                        exp.Sub(
+                            this=exp.column(end_col, table=source_ref, quoted=True),
+                            expression=exp.column(
+                                start_col, table=source_ref, quoted=True
+                            ),
+                        )
+                    ],
+                )
 
         # Build main SELECT
         final_query = exp.Select()
@@ -920,7 +945,11 @@ class CoverageTransformer:
         # Replace COVERAGE(...) in select list with aggregate, and add other columns
         for expression in query.expressions:
             if isinstance(expression, GIQLCoverage):
-                final_query.select(agg_expr, append=True, copy=False)
+                final_query.select(
+                    exp.alias_(agg_expr, "value", quoted=False),
+                    append=True,
+                    copy=False,
+                )
             elif isinstance(expression, exp.Alias) and isinstance(
                 expression.this, GIQLCoverage
             ):
