@@ -365,6 +365,9 @@ Syntax
    SELECT COVERAGE(interval, 1000, stat := 'mean') FROM features
    SELECT COVERAGE(interval, 1000, stat => 'mean') FROM features
 
+   -- Aggregate a specific column instead of interval length
+   SELECT COVERAGE(interval, 1000, stat := 'mean', target := 'score') FROM features
+
    -- Named resolution parameter
    SELECT COVERAGE(interval, resolution := 500) FROM features
 
@@ -386,6 +389,11 @@ Parameters
    - ``'min'`` — minimum interval length of overlapping intervals
    - ``'max'`` — maximum interval length of overlapping intervals
 
+   When ``target`` is specified, the stat is applied to that column instead of interval length.
+
+**target** *(optional)*
+   Column name to aggregate. When omitted, non-count stats aggregate interval length (``end - start``). When specified, the stat is applied to the named column. For ``'count'``, specifying a target counts non-NULL values of that column instead of ``COUNT(*)``.
+
 Return Value
 ~~~~~~~~~~~~
 
@@ -394,7 +402,7 @@ Returns one row per genomic bin:
 - ``chrom`` — Chromosome of the bin
 - ``start`` — Start position of the bin
 - ``end`` — End position of the bin
-- The computed aggregate value
+- ``value`` — The computed aggregate (default alias; use ``AS`` to rename)
 
 Examples
 ~~~~~~~~

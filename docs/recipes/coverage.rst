@@ -64,6 +64,18 @@ Find the longest interval overlapping each bin:
    SELECT COVERAGE(interval, 1000, stat := 'max') AS max_len
    FROM features
 
+Aggregating a Specific Column
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Compute the mean score of overlapping features per bin instead of summarising interval length:
+
+.. code-block:: sql
+
+   SELECT COVERAGE(interval, 1000, stat := 'mean', target := 'score') AS avg_score
+   FROM features
+
+**Use case:** Signal tracks from a numeric column (e.g. ChIP-seq score, p-value).
+
 Filtered Coverage
 -----------------
 
