@@ -813,9 +813,15 @@ class CoverageTransformer:
         if table_name:
             chroms_select.from_(exp.to_table(table_name), copy=False)
 
-        # Apply WHERE from original query to the chroms subquery too
+        # Apply WHERE from original query to the chroms subquery too,
+        # qualifying unqualified column references with the table name
         if query.args.get("where"):
-            chroms_select.set("where", query.args["where"].copy())
+            chroms_where = query.args["where"].copy()
+            if table_name:
+                for col in chroms_where.find_all(exp.Column):
+                    if not col.table:
+                        col.set("table", exp.Identifier(this=table_name))
+            chroms_select.set("where", chroms_where)
 
         chroms_select.group_by(exp.column(chrom_col, quoted=True), copy=False)
 
@@ -993,16 +999,26 @@ class CoverageTransformer:
             ),
         )
 
+        # Merge original WHERE into the JOIN ON condition so that
+        # LEFT JOIN still produces zero-coverage bins (WHERE would filter
+        # them out because source columns are NULL for non-matching bins)
+        if query.args.get("where"):
+            where_condition = query.args["where"].this.copy()
+            # Qualify unqualified column references with source_ref
+            for col in where_condition.find_all(exp.Column):
+                if not col.table:
+                    col.set("table", exp.Identifier(this=source_ref))
+            join_condition = exp.And(
+                this=join_condition,
+                expression=where_condition,
+            )
+
         left_join = exp.Join(
             this=source_table,
             on=join_condition,
             kind="LEFT",
         )
         final_query.append("joins", left_join)
-
-        # WHERE clause: preserve from original on source side
-        if query.args.get("where"):
-            final_query.set("where", query.args["where"].copy())
 
         # GROUP BY bins.chrom, bins.start, bins.end
         final_query.group_by(
