@@ -11,6 +11,7 @@ from giql.generators import BaseGIQLGenerator
 from giql.table import Table
 from giql.table import Tables
 from giql.transformer import ClusterTransformer
+from giql.transformer import CoverageTransformer
 from giql.transformer import MergeTransformer
 
 
@@ -99,6 +100,7 @@ def transpile(
     tables_container = _build_tables(tables)
 
     # Initialize transformers with table configurations
+    coverage_transformer = CoverageTransformer(tables_container)
     merge_transformer = MergeTransformer(tables_container)
     cluster_transformer = ClusterTransformer(tables_container)
 
@@ -111,8 +113,10 @@ def transpile(
     except Exception as e:
         raise ValueError(f"Parse error: {e}\nQuery: {giql}") from e
 
-    # Apply transformations (MERGE first, then CLUSTER)
+    # Apply transformations (COVERAGE first, then MERGE, then CLUSTER)
     try:
+        # COVERAGE transformation (independent, applied first)
+        ast = coverage_transformer.transform(ast)
         # MERGE transformation (which may internally use CLUSTER)
         ast = merge_transformer.transform(ast)
         # CLUSTER transformation for any standalone CLUSTER expressions

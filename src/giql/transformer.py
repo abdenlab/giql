@@ -11,8 +11,18 @@ from giql.constants import DEFAULT_END_COL
 from giql.constants import DEFAULT_START_COL
 from giql.constants import DEFAULT_STRAND_COL
 from giql.expressions import GIQLCluster
+from giql.expressions import GIQLCoverage
 from giql.expressions import GIQLMerge
 from giql.table import Tables
+
+# Mapping from COVERAGE stat parameter to SQL aggregate function
+COVERAGE_STAT_MAP = {
+    "count": "COUNT",
+    "mean": "AVG",
+    "sum": "SUM",
+    "min": "MIN",
+    "max": "MAX",
+}
 
 
 class ClusterTransformer:
@@ -571,5 +581,473 @@ class MergeTransformer:
         final_query.order_by(
             exp.Ordered(this=exp.column(start_col, quoted=True)), append=True, copy=False
         )
+
+        return final_query
+
+
+class CoverageTransformer:
+    """Transforms queries containing COVERAGE into binned coverage queries.
+
+    COVERAGE tiles the genome into fixed-width bins and aggregates overlapping
+    intervals per bin:
+
+        SELECT COVERAGE(interval, 1000) FROM features
+
+    Into:
+
+        WITH __giql_bins AS (
+            SELECT chrom, bin_start AS start, bin_start + 1000 AS "end"
+            FROM (
+                SELECT DISTINCT chrom, MAX("end") AS __max_end
+                FROM features GROUP BY chrom
+            ) AS __giql_chroms,
+            LATERAL generate_series(0, __max_end, 1000) AS t(bin_start)
+        )
+        SELECT bins.chrom, bins.start, bins."end", COUNT(source.*)
+        FROM __giql_bins AS bins
+        LEFT JOIN features AS source
+          ON source.start < bins."end"
+          AND source."end" > bins.start
+          AND source.chrom = bins.chrom
+        GROUP BY bins.chrom, bins.start, bins."end"
+        ORDER BY bins.chrom, bins.start
+    """
+
+    def __init__(self, tables: Tables):
+        """Initialize transformer.
+
+        :param tables:
+            Table configurations for column mapping
+        """
+        self.tables = tables
+
+    def _get_table_name(self, query: exp.Select) -> str | None:
+        """Extract table name from query's FROM clause.
+
+        :param query:
+            Query to extract table name from
+        :return:
+            Table name if FROM contains a simple table, None otherwise
+        """
+        from_clause = query.args.get("from_")
+        if not from_clause:
+            return None
+        if isinstance(from_clause.this, exp.Table):
+            return from_clause.this.name
+        return None
+
+    def _get_table_alias(self, query: exp.Select) -> str | None:
+        """Extract table alias from query's FROM clause.
+
+        :param query:
+            Query to extract alias from
+        :return:
+            Table alias if present, None otherwise
+        """
+        from_clause = query.args.get("from_")
+        if not from_clause:
+            return None
+        if isinstance(from_clause.this, exp.Table):
+            return from_clause.this.alias
+        return None
+
+    def _get_genomic_columns(self, query: exp.Select) -> tuple[str, str, str]:
+        """Get genomic column names from table config or defaults.
+
+        :param query:
+            Query to extract table and column info from
+        :return:
+            Tuple of (chrom_col, start_col, end_col)
+        """
+        table_name = self._get_table_name(query)
+
+        chrom_col = DEFAULT_CHROM_COL
+        start_col = DEFAULT_START_COL
+        end_col = DEFAULT_END_COL
+
+        if table_name:
+            table = self.tables.get(table_name)
+            if table:
+                chrom_col = table.chrom_col
+                start_col = table.start_col
+                end_col = table.end_col
+
+        return chrom_col, start_col, end_col
+
+    def transform(self, query: exp.Expression) -> exp.Expression:
+        """Transform query if it contains COVERAGE expressions.
+
+        :param query:
+            Parsed query AST
+        :return:
+            Transformed query AST
+        """
+        if not isinstance(query, exp.Select):
+            return query
+
+        # Recursively transform CTEs
+        if query.args.get("with_"):
+            cte = query.args["with_"]
+            for cte_expr in cte.expressions:
+                if isinstance(cte_expr, exp.CTE):
+                    cte_expr.set("this", self.transform(cte_expr.this))
+
+        # Recursively transform subqueries in FROM/JOIN/WHERE
+        for key in ("from_", "where"):
+            if query.args.get(key):
+                self._transform_subqueries_in_node(query.args[key])
+        if query.args.get("joins"):
+            for join in query.args["joins"]:
+                self._transform_subqueries_in_node(join)
+
+        # Find COVERAGE expressions in SELECT
+        coverage_exprs = self._find_coverage_expressions(query)
+        if not coverage_exprs:
+            return query
+
+        if len(coverage_exprs) > 1:
+            raise ValueError("Multiple COVERAGE expressions not yet supported")
+
+        return self._transform_for_coverage(query, coverage_exprs[0])
+
+    def _transform_subqueries_in_node(self, node: exp.Expression):
+        """Recursively transform subqueries within an expression node.
+
+        :param node:
+            Expression node to search for subqueries
+        """
+        for subquery in node.find_all(exp.Subquery):
+            if isinstance(subquery.this, exp.Select):
+                transformed = self.transform(subquery.this)
+                subquery.set("this", transformed)
+
+    def _find_coverage_expressions(self, query: exp.Select) -> list[GIQLCoverage]:
+        """Find all COVERAGE expressions in query.
+
+        :param query:
+            Query to search
+        :return:
+            List of COVERAGE expressions
+        """
+        coverage_exprs = []
+        for expression in query.expressions:
+            if isinstance(expression, GIQLCoverage):
+                coverage_exprs.append(expression)
+            elif isinstance(expression, exp.Alias):
+                if isinstance(expression.this, GIQLCoverage):
+                    coverage_exprs.append(expression.this)
+        return coverage_exprs
+
+    def _transform_for_coverage(
+        self, query: exp.Select, coverage_expr: GIQLCoverage
+    ) -> exp.Select:
+        """Transform query to compute COVERAGE using bins CTE + JOIN + GROUP BY.
+
+        :param query:
+            Original query
+        :param coverage_expr:
+            COVERAGE expression to transform
+        :return:
+            Transformed query
+        """
+        # Extract parameters
+        resolution_expr = coverage_expr.args.get("resolution")
+        if isinstance(resolution_expr, exp.Literal):
+            resolution = int(resolution_expr.this)
+        else:
+            try:
+                resolution = int(str(resolution_expr.this))
+            except (ValueError, AttributeError):
+                raise ValueError("COVERAGE resolution must be an integer literal")
+
+        stat_expr = coverage_expr.args.get("stat")
+        if stat_expr:
+            if isinstance(stat_expr, exp.Literal):
+                stat = stat_expr.this.strip("'\"").lower()
+            else:
+                stat = str(stat_expr).strip("'\"").lower()
+        else:
+            stat = "count"
+
+        if stat not in COVERAGE_STAT_MAP:
+            raise ValueError(
+                f"Unknown COVERAGE stat '{stat}'. "
+                f"Must be one of: {', '.join(COVERAGE_STAT_MAP)}"
+            )
+
+        sql_agg = COVERAGE_STAT_MAP[stat]
+
+        # Extract target parameter
+        target_expr = coverage_expr.args.get("target")
+        if target_expr:
+            if isinstance(target_expr, exp.Literal):
+                target_col = target_expr.this.strip("'\"")
+            else:
+                target_col = str(target_expr).strip("'\"")
+        else:
+            target_col = None
+
+        # Get column names and table info
+        chrom_col, start_col, end_col = self._get_genomic_columns(query)
+        table_name = self._get_table_name(query)
+        table_alias = self._get_table_alias(query)
+        source_ref = table_alias or table_name or "source"
+
+        # Build __giql_chroms subquery:
+        #   SELECT DISTINCT chrom, MAX("end") AS __max_end FROM <table> GROUP BY chrom
+        chroms_select = exp.Select()
+        chroms_select.select(
+            exp.column(chrom_col, quoted=True),
+            copy=False,
+        )
+        chroms_select.select(
+            exp.alias_(
+                exp.Max(this=exp.column(end_col, quoted=True)),
+                "__max_end",
+                quoted=False,
+            ),
+            append=True,
+            copy=False,
+        )
+
+        if table_name:
+            chroms_select.from_(exp.to_table(table_name), copy=False)
+
+        # Apply WHERE from original query to the chroms subquery too,
+        # qualifying unqualified column references with the table name
+        if query.args.get("where"):
+            chroms_where = query.args["where"].copy()
+            if table_name:
+                for col in chroms_where.find_all(exp.Column):
+                    if not col.table:
+                        col.set("table", exp.Identifier(this=table_name))
+            chroms_select.set("where", chroms_where)
+
+        chroms_select.group_by(exp.column(chrom_col, quoted=True), copy=False)
+
+        chroms_subquery = exp.Subquery(
+            this=chroms_select,
+            alias=exp.TableAlias(this=exp.Identifier(this="__giql_chroms")),
+        )
+
+        # Build bins CTE using raw SQL for generate_series + LATERAL
+        # since SQLGlot doesn't natively support generate_series
+        bins_select = exp.Select()
+        bins_select.select(
+            exp.column(chrom_col, table="__giql_chroms", quoted=True),
+            copy=False,
+        )
+        bins_select.select(
+            exp.alias_(
+                exp.column("bin_start"),
+                start_col,
+                quoted=True,
+            ),
+            append=True,
+            copy=False,
+        )
+        bins_select.select(
+            exp.alias_(
+                exp.Add(
+                    this=exp.column("bin_start"),
+                    expression=exp.Literal.number(resolution),
+                ),
+                end_col,
+                quoted=True,
+            ),
+            append=True,
+            copy=False,
+        )
+
+        # FROM __giql_chroms subquery
+        bins_select.from_(chroms_subquery, copy=False)
+
+        # CROSS JOIN LATERAL generate_series(0, __max_end, resolution) AS t(bin_start)
+        lateral_join = exp.Join(
+            this=exp.Lateral(
+                this=exp.Anonymous(
+                    this="generate_series",
+                    expressions=[
+                        exp.Literal.number(0),
+                        exp.column("__max_end"),
+                        exp.Literal.number(resolution),
+                    ],
+                ),
+                alias=exp.TableAlias(
+                    this=exp.Identifier(this="t"),
+                    columns=[exp.Identifier(this="bin_start")],
+                ),
+            ),
+            kind="CROSS",
+        )
+        bins_select.append("joins", lateral_join)
+
+        # Wrap bins_select as a CTE named __giql_bins
+        bins_cte = exp.CTE(
+            this=bins_select,
+            alias=exp.TableAlias(this=exp.Identifier(this="__giql_bins")),
+        )
+        with_clause = exp.With(expressions=[bins_cte])
+
+        # Build the aggregate expression
+        if stat == "count":
+            if target_col:
+                agg_expr = exp.Anonymous(
+                    this="COUNT",
+                    expressions=[
+                        exp.column(target_col, table=source_ref, quoted=True),
+                    ],
+                )
+            else:
+                agg_expr = exp.Anonymous(
+                    this="COUNT",
+                    expressions=[
+                        exp.Column(
+                            this=exp.Star(),
+                            table=exp.Identifier(this=source_ref),
+                        )
+                    ],
+                )
+        else:
+            if target_col:
+                agg_expr = exp.Anonymous(
+                    this=sql_agg,
+                    expressions=[
+                        exp.column(target_col, table=source_ref, quoted=True),
+                    ],
+                )
+            else:
+                agg_expr = exp.Anonymous(
+                    this=sql_agg,
+                    expressions=[
+                        exp.Sub(
+                            this=exp.column(end_col, table=source_ref, quoted=True),
+                            expression=exp.column(
+                                start_col, table=source_ref, quoted=True
+                            ),
+                        )
+                    ],
+                )
+
+        # Build main SELECT
+        final_query = exp.Select()
+
+        # Add bin coordinate columns
+        final_query.select(
+            exp.column(chrom_col, table="bins", quoted=True),
+            copy=False,
+        )
+        final_query.select(
+            exp.column(start_col, table="bins", quoted=True),
+            append=True,
+            copy=False,
+        )
+        final_query.select(
+            exp.column(end_col, table="bins", quoted=True),
+            append=True,
+            copy=False,
+        )
+
+        # Replace COVERAGE(...) in select list with aggregate, and add other columns
+        for expression in query.expressions:
+            if isinstance(expression, GIQLCoverage):
+                final_query.select(
+                    exp.alias_(agg_expr, "value", quoted=False),
+                    append=True,
+                    copy=False,
+                )
+            elif isinstance(expression, exp.Alias) and isinstance(
+                expression.this, GIQLCoverage
+            ):
+                final_query.select(
+                    exp.alias_(agg_expr, expression.alias, quoted=False),
+                    append=True,
+                    copy=False,
+                )
+            else:
+                final_query.select(expression, append=True, copy=False)
+
+        # FROM __giql_bins AS bins
+        final_query.from_(
+            exp.Table(
+                this=exp.Identifier(this="__giql_bins"),
+                alias=exp.TableAlias(this=exp.Identifier(this="bins")),
+            ),
+            copy=False,
+        )
+
+        # LEFT JOIN source ON overlap conditions
+        source_table = exp.to_table(table_name) if table_name else exp.to_table("source")
+        source_table.set(
+            "alias", exp.TableAlias(this=exp.Identifier(this=source_ref))
+        )
+
+        join_condition = exp.And(
+            this=exp.And(
+                this=exp.LT(
+                    this=exp.column(start_col, table=source_ref, quoted=True),
+                    expression=exp.column(end_col, table="bins", quoted=True),
+                ),
+                expression=exp.GT(
+                    this=exp.column(end_col, table=source_ref, quoted=True),
+                    expression=exp.column(start_col, table="bins", quoted=True),
+                ),
+            ),
+            expression=exp.EQ(
+                this=exp.column(chrom_col, table=source_ref, quoted=True),
+                expression=exp.column(chrom_col, table="bins", quoted=True),
+            ),
+        )
+
+        # Merge original WHERE into the JOIN ON condition so that
+        # LEFT JOIN still produces zero-coverage bins (WHERE would filter
+        # them out because source columns are NULL for non-matching bins)
+        if query.args.get("where"):
+            where_condition = query.args["where"].this.copy()
+            # Qualify unqualified column references with source_ref
+            for col in where_condition.find_all(exp.Column):
+                if not col.table:
+                    col.set("table", exp.Identifier(this=source_ref))
+            join_condition = exp.And(
+                this=join_condition,
+                expression=where_condition,
+            )
+
+        left_join = exp.Join(
+            this=source_table,
+            on=join_condition,
+            kind="LEFT",
+        )
+        final_query.append("joins", left_join)
+
+        # GROUP BY bins.chrom, bins.start, bins.end
+        final_query.group_by(
+            exp.column(chrom_col, table="bins", quoted=True),
+            copy=False,
+        )
+        final_query.group_by(
+            exp.column(start_col, table="bins", quoted=True),
+            append=True,
+            copy=False,
+        )
+        final_query.group_by(
+            exp.column(end_col, table="bins", quoted=True),
+            append=True,
+            copy=False,
+        )
+
+        # ORDER BY bins.chrom, bins.start
+        final_query.order_by(
+            exp.Ordered(this=exp.column(chrom_col, table="bins", quoted=True)),
+            copy=False,
+        )
+        final_query.order_by(
+            exp.Ordered(this=exp.column(start_col, table="bins", quoted=True)),
+            append=True,
+            copy=False,
+        )
+
+        # Attach the WITH clause
+        final_query.set("with_", with_clause)
 
         return final_query
