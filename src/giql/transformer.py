@@ -1746,24 +1746,19 @@ class CoverageTransformer:
         bins_select.from_(chroms_subquery, copy=False)
 
         # CROSS JOIN LATERAL generate_series(0, __max_end, resolution) AS t(bin_start)
-        generate_series_sql = (
-            f"generate_series(0, __max_end, {resolution}) AS t(bin_start)"
-        )
         lateral_join = exp.Join(
             this=exp.Lateral(
-                this=exp.Subquery(
-                    this=exp.Anonymous(
-                        this="generate_series",
-                        expressions=[
-                            exp.Literal.number(0),
-                            exp.column("__max_end"),
-                            exp.Literal.number(resolution),
-                        ],
-                    ),
-                    alias=exp.TableAlias(
-                        this=exp.Identifier(this="t"),
-                        columns=[exp.Identifier(this="bin_start")],
-                    ),
+                this=exp.Anonymous(
+                    this="generate_series",
+                    expressions=[
+                        exp.Literal.number(0),
+                        exp.column("__max_end"),
+                        exp.Literal.number(resolution),
+                    ],
+                ),
+                alias=exp.TableAlias(
+                    this=exp.Identifier(this="t"),
+                    columns=[exp.Identifier(this="bin_start")],
                 ),
             ),
             kind="CROSS",
