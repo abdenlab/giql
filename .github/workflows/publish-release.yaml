@@ -12,6 +12,12 @@ on:
       - src/**
       - pyproject.toml
 
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   bump-version:
     name: Bump version
@@ -23,16 +29,19 @@ jobs:
       version: ${{ steps.bump-version.outputs.version }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           token: ${{ secrets.MY_TOKEN }}
           ref: ${{ github.head_ref }}
       - name: Determine version segment to bump
         id: determine-version-segment
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_REF: ${{ github.head_ref }}
         run: |
-          case ${{ github.base_ref }} in
+          case "$BASE_REF" in
             master)
-              case ${{ github.head_ref }} in
+              case "$HEAD_REF" in
                 release)
                   echo "segment=minor" >> $GITHUB_OUTPUT
                   ;;
@@ -45,7 +54,7 @@ jobs:
               echo "segment=patch" >> $GITHUB_OUTPUT
               ;;
             *)
-              echo "Error: Unsupported base branch ${{ github.base_ref }}" >&2
+              echo "Error: Unsupported base branch $BASE_REF" >&2
               exit 1
               ;;
           esac
@@ -67,30 +76,34 @@ jobs:
       contents: write
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           token: ${{ secrets.MY_TOKEN }}
       - name: Create tag
         id: create-tag
+        env:
+          NEW_VERSION: ${{ needs.bump-version.outputs.version }}
         run: |
-          new_version=${{ needs.bump-version.outputs.version }}
-          echo "Tagging $new_version"
-          git tag $new_version
-          git push origin $new_version
-          echo "version=$new_version" >> $GITHUB_OUTPUT
+          echo "Tagging $NEW_VERSION"
+          git tag "$NEW_VERSION"
+          git push origin "$NEW_VERSION"
+          echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
 
   build-release:
     name: Build release
-    needs: 
+    needs:
       - bump-version
       - tag-version
     runs-on: ubuntu-latest
+    permissions: {}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
       - uses: ./.github/actions/build-release
         with:
           version: ${{ needs.bump-version.outputs.version }}
-      
+
   publish-github-release:
     name: Publish release to GitHub
     needs:
@@ -102,7 +115,9 @@ jobs:
       contents: write
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
       - uses: ./.github/actions/publish-github-release
         with:
           version: ${{ needs.bump-version.outputs.version }}
@@ -117,7 +132,9 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
       - uses: ./.github/actions/publish-pypi-release
         with:
           version: ${{ needs.bump-version.outputs.version }}
@@ -125,14 +142,17 @@ jobs:
 
   drop-release:
     name: Drop release
-    needs: build-release
+    needs:
+      - build-release
+      - publish-github-release
+      - publish-pypi-release
     runs-on: ubuntu-latest
-    if: github.event.pull_request.merged == true && github.head_ref == 'release' && github.base_ref == 'master'
+    if: always() && !contains(needs.*.result, 'failure') && github.event.pull_request.merged == true && github.head_ref == 'release' && github.base_ref == 'master'
     permissions:
       contents: write
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           token: ${{ secrets.MY_TOKEN }}
       - name: Drop release branch
