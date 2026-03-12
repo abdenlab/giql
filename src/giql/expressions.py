@@ -152,12 +152,14 @@ class GIQLCoverage(exp.Func):
         COVERAGE(interval, 1000)
         COVERAGE(interval, 500, stat := 'mean')
         COVERAGE(interval, resolution := 1000)
+        COVERAGE(interval, 1000, stat := 'mean', target := 'score')
     """
 
     arg_types = {
         "this": True,  # genomic column
         "resolution": True,  # bin width (positional or named)
         "stat": False,  # aggregation: 'count', 'mean', 'sum', 'min', 'max'
+        "target": False,  # column to aggregate (default: interval length)
     }
 
     @classmethod
