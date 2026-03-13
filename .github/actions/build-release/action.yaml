@@ -9,23 +9,25 @@ runs:
   using: composite
   steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       with:
         fetch-tags: true
         persist-credentials: false
         ref: ${{ inputs.version }}
 
     - name: Install uv & prepare python
-      uses: astral-sh/setup-uv@v5
+      uses: astral-sh/setup-uv@e58605a9b6da7c637471fab8847a5e5a6b8df081 # v5
       with:
         enable-cache: false
 
     - name: Build distribution artifacts
       shell: bash
-      run: uv build --out-dir dist-${{ inputs.version }}
+      env:
+        VERSION: ${{ inputs.version }}
+      run: uv build --out-dir "dist-${VERSION}"
 
     - name: Store distribution artifacts
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
       with:
         name: dist-${{ inputs.version }}
         path: dist-${{ inputs.version }}/

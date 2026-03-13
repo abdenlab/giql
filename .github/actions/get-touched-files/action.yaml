@@ -14,7 +14,7 @@ runs:
   using: composite
   steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       with:
         fetch-depth: 0
         persist-credentials: false
@@ -22,10 +22,12 @@ runs:
     - name: Get touched files
       id: get-touched-files
       shell: bash
+      env:
+        INPUT_PATHSPEC: ${{ inputs.pathspec }}
       run: |
-        eval "pathspec=('${{ inputs.pathspec }}')"
-        echo "pathspec: '${pathspec[@]}'"
-        touched=$(git diff --name-only HEAD origin/master -- ${pathspec[@]})
+        IFS=' ' read -ra pathspec <<< "$INPUT_PATHSPEC"
+        echo "pathspec: '${pathspec[*]}'"
+        touched=$(git diff --name-only HEAD origin/master -- "${pathspec[@]}")
         touched=$(echo "$touched" | tr '\n' ' ' | xargs)
         echo "touched: '$touched'"
         echo "touched=$touched" >> $GITHUB_OUTPUT

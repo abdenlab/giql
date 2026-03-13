@@ -3,7 +3,13 @@ description: Confirm that the required secrets are defined in the repository
 
 on:
   workflow_dispatch:
-    
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
 jobs:
   validate-secrets:
     name: Validate secrets
@@ -15,8 +21,9 @@ jobs:
       - name: Check ${{ matrix.secret_name }} secret
         env:
           SECRET_VALUE: ${{ secrets[matrix.secret_name] }}
+          SECRET_NAME: ${{ matrix.secret_name }}
         if: ${{ env.SECRET_VALUE == '' }}
         run: |
-          echo 'The secret "${{ matrix.secret_name }}" has not been defined'
+          echo "The secret \"$SECRET_NAME\" has not been defined"
           echo 'Go to "settings \> secrets \> actions" to define it'
           exit 1
