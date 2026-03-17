@@ -1,7 +1,8 @@
 [run]
 source = src/giql
-omit = 
+omit =
     src/giql/__init__.py
+    src/giql/engines/__init__.py
 
 [report]
 show_missing = true
