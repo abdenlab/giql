@@ -216,29 +216,41 @@ class ClusterTransformer:
         # Build ORDER BY for window
         order_by = [exp.Ordered(this=exp.column(start_col, quoted=True))]
 
-        # Create LAG window spec
-        lag_window = exp.Window(
-            this=exp.Anonymous(
-                this="LAG", expressions=[exp.column(end_col, quoted=True)]
-            ),
+        # Running MAX of end over all preceding rows.
+        #
+        # This replaces the previous LAG(end) approach which only checked
+        # the immediately preceding row. LAG is incorrect when a short
+        # interval is nested inside a longer one — the short interval's
+        # end is smaller, causing subsequent intervals to incorrectly
+        # start a new cluster even though the longer interval still
+        # covers them. Running MAX tracks the true "active region" end.
+        max_prev_end_window = exp.Window(
+            this=exp.Max(this=exp.column(end_col, quoted=True)),
             partition_by=partition_cols,
             order=exp.Order(expressions=order_by),
+            spec=exp.WindowSpec(
+                kind="ROWS",
+                start="UNBOUNDED",
+                start_side="PRECEDING",
+                end=exp.Literal.number(1),
+                end_side="PRECEDING",
+            ),
         )
 
         # Add distance offset if specified
         if distance > 0:
-            lag_with_distance = exp.Add(
-                this=lag_window, expression=exp.Literal.number(distance)
+            max_with_distance = exp.Add(
+                this=max_prev_end_window, expression=exp.Literal.number(distance)
             )
         else:
-            lag_with_distance = lag_window
+            max_with_distance = max_prev_end_window
 
         # Create CASE expression for is_new_cluster
         case_expr = exp.Case(
             ifs=[
                 exp.If(
                     this=exp.GTE(
-                        this=lag_with_distance,
+                        this=max_with_distance,
                         expression=exp.column(start_col, quoted=True),
                     ),
                     true=exp.Literal.number(0),
