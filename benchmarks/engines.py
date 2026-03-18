@@ -39,6 +39,12 @@ def run_datafusion_intersect_join(engine) -> None:
     )
 
 
+def run_datafusion_intersect_pairs(engine) -> None:
+    engine.query(
+        "SELECT peaks.*, b.* FROM peaks JOIN b ON peaks.interval INTERSECTS b.interval"
+    )
+
+
 def run_datafusion_merge(engine) -> None:
     engine.query("SELECT MERGE(interval) FROM peaks")
 
@@ -94,6 +100,13 @@ def run_polarsbio_intersect_join(parquet_a: Path, parquet_b: Path) -> None:
     ).select(["chrom_1", "start_1", "end_1"]).unique().collect()
 
 
+def run_polarsbio_intersect_pairs(parquet_a: Path, parquet_b: Path) -> None:
+    import polars_bio as pb
+
+    reset_polarsbio()
+    pb.overlap(str(parquet_a), str(parquet_b)).collect()
+
+
 def run_polarsbio_merge(parquet_path: Path) -> None:
     import polars_bio as pb
 
@@ -122,6 +135,14 @@ def run_bedtools_intersect_join(bed_a: Path, bed_b: Path) -> None:
     a = pybedtools.BedTool(str(bed_a))
     b = pybedtools.BedTool(str(bed_b))
     a.intersect(b, u=True).saveas()
+
+
+def run_bedtools_intersect_pairs(bed_a: Path, bed_b: Path) -> None:
+    import pybedtools
+
+    a = pybedtools.BedTool(str(bed_a))
+    b = pybedtools.BedTool(str(bed_b))
+    a.intersect(b, wa=True, wb=True).saveas()
 
 
 def run_bedtools_merge(bed_path: Path) -> None:

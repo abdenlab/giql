@@ -16,18 +16,21 @@ from benchmarks.engines import (
     run_bedtools_cluster_unsorted,
     run_bedtools_intersect_filter,
     run_bedtools_intersect_join,
+    run_bedtools_intersect_pairs,
     run_bedtools_merge,
     run_bedtools_merge_unsorted,
     run_datafusion_cluster,
     run_datafusion_cluster_unsorted,
     run_datafusion_intersect_filter,
     run_datafusion_intersect_join,
+    run_datafusion_intersect_pairs,
     run_datafusion_merge,
     run_datafusion_merge_unsorted,
     reset_polarsbio,
     run_polarsbio_cluster,
     run_polarsbio_intersect_filter,
     run_polarsbio_intersect_join,
+    run_polarsbio_intersect_pairs,
     run_polarsbio_merge,
 )
 from benchmarks.operations import ALL_OPS, QUERY_REGION_BED
@@ -178,6 +181,8 @@ def run_benchmark(
                             fn: Callable[[], None] = lambda: run_datafusion_intersect_filter(_make_engine())
                         elif op_key == "intersect_join":
                             fn = lambda: run_datafusion_intersect_join(_make_engine())
+                        elif op_key == "intersect_pairs":
+                            fn = lambda: run_datafusion_intersect_pairs(_make_engine())
                         elif op_key == "merge":
                             merge_fn = run_datafusion_merge_unsorted if unsorted else run_datafusion_merge
                             fn = lambda f=merge_fn: f(_make_engine())
@@ -222,6 +227,8 @@ def run_benchmark(
                             fn = lambda p=primary, q=query_parquet: run_polarsbio_intersect_filter(p.parquet_path, q)
                         elif op_key == "intersect_join":
                             fn = lambda p=primary, s=secondary: run_polarsbio_intersect_join(p.parquet_path, s.parquet_path)
+                        elif op_key == "intersect_pairs":
+                            fn = lambda p=primary, s=secondary: run_polarsbio_intersect_pairs(p.parquet_path, s.parquet_path)
                         elif op_key == "merge":
                             fn = lambda p=primary: run_polarsbio_merge(p.parquet_path)
                         elif op_key == "cluster":
@@ -273,6 +280,8 @@ def run_benchmark(
                             fn = _bt_wrap(lambda p=primary, q=query_bed: run_bedtools_intersect_filter(p.bed_path, q))
                         elif op_key == "intersect_join":
                             fn = _bt_wrap(lambda p=primary, s=secondary: run_bedtools_intersect_join(p.bed_path, s.bed_path))
+                        elif op_key == "intersect_pairs":
+                            fn = _bt_wrap(lambda p=primary, s=secondary: run_bedtools_intersect_pairs(p.bed_path, s.bed_path))
                         elif op_key == "merge":
                             bt_merge = run_bedtools_merge_unsorted if unsorted else run_bedtools_merge
                             fn = _bt_wrap(lambda p=primary, f=bt_merge: f(p.bed_path))

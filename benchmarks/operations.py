@@ -29,6 +29,12 @@ ALL_OPS: dict[str, Operation] = {
         needs_secondary=True,
         datafusion_supported=True,
     ),
+    "intersect_pairs": Operation(
+        name="intersect_pairs",
+        label="INTERSECTS pairs",
+        needs_secondary=True,
+        datafusion_supported=True,
+    ),
     "merge": Operation(
         name="merge",
         label="MERGE",
