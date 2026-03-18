@@ -60,10 +60,18 @@ def run_datafusion_cluster_unsorted(engine) -> None:
     )
 
 
-def setup_polarsbio() -> None:
-    """Configure polars-bio for 0-based half-open coordinates. Call once."""
-    import polars_bio as pb
+def reset_polarsbio() -> None:
+    """Reset polars-bio's global session and re-apply config.
 
+    polars-bio uses a singleton BioSessionContext backed by DataFusion.
+    Clearing the singleton forces a fresh session on the next call,
+    preventing plan-cache or table-registration carry-over between reps.
+    """
+    import polars_bio as pb
+    import polars_bio.context as ctx
+
+    instances = ctx.Context.__closure__[1].cell_contents
+    instances.clear()
     pb.set_option("datafusion.bio.coordinate_system_zero_based", True)
     pb.set_option("datafusion.bio.show_progress", False)
 
@@ -71,6 +79,7 @@ def setup_polarsbio() -> None:
 def run_polarsbio_intersect_filter(parquet_path: Path, query_parquet: Path) -> None:
     import polars_bio as pb
 
+    reset_polarsbio()
     pb.overlap(
         str(parquet_path), str(query_parquet),
     ).select(["chrom_1", "start_1", "end_1"]).unique().collect()
@@ -79,6 +88,7 @@ def run_polarsbio_intersect_filter(parquet_path: Path, query_parquet: Path) -> N
 def run_polarsbio_intersect_join(parquet_a: Path, parquet_b: Path) -> None:
     import polars_bio as pb
 
+    reset_polarsbio()
     pb.overlap(
         str(parquet_a), str(parquet_b),
     ).select(["chrom_1", "start_1", "end_1"]).unique().collect()
@@ -87,12 +97,14 @@ def run_polarsbio_intersect_join(parquet_a: Path, parquet_b: Path) -> None:
 def run_polarsbio_merge(parquet_path: Path) -> None:
     import polars_bio as pb
 
+    reset_polarsbio()
     pb.merge(str(parquet_path)).collect()
 
 
 def run_polarsbio_cluster(parquet_path: Path) -> None:
     import polars_bio as pb
 
+    reset_polarsbio()
     pb.cluster(str(parquet_path)).collect()
 
 

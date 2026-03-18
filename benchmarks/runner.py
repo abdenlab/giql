@@ -24,11 +24,11 @@ from benchmarks.engines import (
     run_datafusion_intersect_join,
     run_datafusion_merge,
     run_datafusion_merge_unsorted,
+    reset_polarsbio,
     run_polarsbio_cluster,
     run_polarsbio_intersect_filter,
     run_polarsbio_intersect_join,
     run_polarsbio_merge,
-    setup_polarsbio,
 )
 from benchmarks.operations import ALL_OPS, QUERY_REGION_BED
 
@@ -127,7 +127,7 @@ def run_benchmark(
     results: list[BenchmarkResult] = []
 
     if has_polarsbio:
-        setup_polarsbio()
+        reset_polarsbio()
 
     with tempfile.TemporaryDirectory() as tmpdir:
         workdir = Path(tmpdir)
