@@ -11,7 +11,7 @@ from giql.generators import BaseGIQLGenerator
 from giql.table import Table
 from giql.table import Tables
 from giql.transformer import ClusterTransformer
-from giql.transformer import IntersectsSweepTransformer
+from giql.transformer import IntersectsJoinTransformer
 from giql.transformer import MergeTransformer
 
 
@@ -100,7 +100,7 @@ def transpile(
     tables_container = _build_tables(tables)
 
     # Initialize transformers with table configurations
-    intersects_sweep_transformer = IntersectsSweepTransformer(tables_container)
+    intersects_join_transformer = IntersectsJoinTransformer(tables_container)
     merge_transformer = MergeTransformer(tables_container)
     cluster_transformer = ClusterTransformer(tables_container)
 
@@ -115,8 +115,8 @@ def transpile(
 
     # Apply transformations
     try:
-        # INTERSECTS sweep-line optimization for semi-joins
-        ast = intersects_sweep_transformer.transform(ast)
+        # INTERSECTS join optimization (sweep-line or binned equi-join)
+        ast = intersects_join_transformer.transform(ast)
         # MERGE transformation (which may internally use CLUSTER)
         ast = merge_transformer.transform(ast)
         # CLUSTER transformation for any standalone CLUSTER expressions

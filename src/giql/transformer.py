@@ -590,25 +590,17 @@ class MergeTransformer:
         return final_query
 
 
-class IntersectsSweepTransformer:
-    """Transforms INTERSECTS semi-joins into sweep-line window queries.
+class IntersectsJoinTransformer:
+    """Transforms INTERSECTS joins into optimized queries.
 
-    When a query matches the pattern:
-
-        SELECT DISTINCT a.* FROM a
-        JOIN b ON a.interval INTERSECTS b.interval
-
-    It is rewritten from an O(n*m) nested-loop join into an
-    O((n+m) log(n+m)) sweep-line query using window functions.
-
-    The sweep-line works by:
-    1. UNION ALL both tables with a flag column
-    2. Sort by start position
-    3. Use running MAX of right-side end positions (left-to-right)
-       and running MIN of right-side start positions (right-to-left)
-       to detect overlaps in a single pass per direction
-    4. Join matching rows back to the original table
+    Rewrites INTERSECTS joins into binned equi-joins. Each interval is
+    expanded into rows for each fixed-size genome bin it touches
+    (via UNNEST + range), then hash-joined on (chrom, bin). This
+    converts the O(n*m) nested-loop into O(n+m+k) where k is the
+    number of output pairs.
     """
+
+    _BIN_SIZE = 10000
 
     def __init__(self, tables: Tables):
         self.tables = tables
@@ -617,20 +609,23 @@ class IntersectsSweepTransformer:
         if not isinstance(query, exp.Select):
             return query
 
-        match = self._detect_semi_join(query)
-        if match is None:
+        join_info = self._detect_intersects_join(query)
+        if join_info is None:
             return query
 
-        return self._build_sweep_query(*match)
+        left_table, right_table, left_ref, right_ref = join_info
 
-    def _detect_semi_join(self, query: exp.Select):
-        """Detect SELECT DISTINCT <table>.* ... JOIN ... ON INTERSECTS.
+        return self._build_binned_query(
+            query, left_table, right_table, left_ref, right_ref,
+        )
 
-        Returns (select_table, other_table) or None.
+    def _detect_intersects_join(self, query: exp.Select):
+        """Detect any JOIN with an INTERSECTS column-to-column condition.
+
+        Returns (left_table, right_table, left_ref, right_ref) or None,
+        where left/right_table are resolved table names and left/right_ref
+        are the aliases used in the original query.
         """
-        if not query.args.get("distinct"):
-            return None
-
         joins = query.args.get("joins", [])
         if len(joins) != 1:
             return None
@@ -640,7 +635,6 @@ class IntersectsSweepTransformer:
         if not on_condition:
             return None
 
-        # Find Intersects in the ON condition
         intersects_expr = None
         if isinstance(on_condition, Intersects):
             intersects_expr = on_condition
@@ -653,13 +647,11 @@ class IntersectsSweepTransformer:
         if intersects_expr is None:
             return None
 
-        # Extract table references from Intersects operands
         left_ref = self._get_table_ref(intersects_expr.this)
         right_ref = self._get_table_ref(intersects_expr.expression)
         if left_ref is None or right_ref is None:
             return None
 
-        # Resolve aliases to actual table names
         from_clause = query.args.get("from_")
         if not from_clause or not isinstance(from_clause.this, exp.Table):
             return None
@@ -683,47 +675,12 @@ class IntersectsSweepTransformer:
         if left_table is None or right_table is None:
             return None
 
-        # Determine which table the SELECT references
-        select_table = self._get_select_table(query, alias_map)
-        if select_table is None:
-            return None
-
-        if select_table == left_table:
-            other_table = right_table
-        elif select_table == right_table:
-            other_table = left_table
-        else:
-            return None
-
-        return (select_table, other_table)
+        return (left_table, right_table, left_ref, right_ref)
 
     def _get_table_ref(self, expr):
         """Extract table name/alias from a column reference."""
         if isinstance(expr, exp.Column) and expr.table:
             return expr.table
-        return None
-
-    def _get_select_table(self, query, alias_map):
-        """Determine which single table the SELECT columns reference."""
-        tables_referenced = set()
-        for expr in query.expressions:
-            if isinstance(expr, exp.Column):
-                if expr.table:
-                    resolved = alias_map.get(expr.table)
-                    if resolved:
-                        tables_referenced.add(resolved)
-                    else:
-                        return None
-                elif isinstance(expr.this, exp.Star):
-                    # Unqualified * — check table prefix
-                    return None
-                else:
-                    return None
-            else:
-                return None
-
-        if len(tables_referenced) == 1:
-            return tables_referenced.pop()
         return None
 
     def _get_cols(self, table_name):
@@ -733,55 +690,61 @@ class IntersectsSweepTransformer:
             return table.chrom_col, table.start_col, table.end_col
         return DEFAULT_CHROM_COL, DEFAULT_START_COL, DEFAULT_END_COL
 
-    def _build_sweep_query(self, select_table, other_table):
-        """Build sweep-line CTE query as SQL and parse to AST."""
-        s_chrom, s_start, s_end = self._get_cols(select_table)
-        o_chrom, o_start, o_end = self._get_cols(other_table)
+    def _select_refs(self, query, left_ref, right_ref):
+        """Determine which table refs appear in the SELECT clause."""
+        refs = set()
+        for expr in query.expressions:
+            if isinstance(expr, exp.Column) and expr.table:
+                refs.add(expr.table)
+        return refs
+
+    def _build_binned_query(
+        self, query, left_table, right_table, left_ref, right_ref,
+    ):
+        """Build binned equi-join query."""
+        l_chrom, l_start, l_end = self._get_cols(left_table)
+        r_chrom, r_start, r_end = self._get_cols(right_table)
+        b = self._BIN_SIZE
+
+        # Reconstruct the original SELECT clause
+        select_clause = ", ".join(e.sql() for e in query.expressions)
+
+        # Determine which bin columns appear in output to EXCLUDE them
+        select_refs = self._select_refs(query, left_ref, right_ref)
+        exclude_cols = []
+        if left_ref in select_refs or not select_refs:
+            exclude_cols.append("__giql_bin_l")
+        if right_ref in select_refs or not select_refs:
+            exclude_cols.append("__giql_bin_r")
+        # If SELECT uses unqualified *, both bins appear
+        for expr in query.expressions:
+            if isinstance(expr, exp.Star) and not expr.table:
+                exclude_cols = ["__giql_bin_l", "__giql_bin_r"]
+                break
+        exclude_list = ", ".join(exclude_cols) if exclude_cols else ""
+        exclude_clause = f" EXCLUDE ({exclude_list})" if exclude_list else ""
 
         sql = (
-            "WITH __giql_combined AS ("
-            f'SELECT "{s_chrom}" AS __giql_chrom, '
-            f'"{s_start}" AS __giql_start, '
-            f'"{s_end}" AS __giql_end, '
-            f"TRUE AS __giql_is_left "
-            f"FROM {select_table} "
-            "UNION ALL "
-            f'SELECT "{o_chrom}" AS __giql_chrom, '
-            f'"{o_start}" AS __giql_start, '
-            f'"{o_end}" AS __giql_end, '
-            f"FALSE AS __giql_is_left "
-            f"FROM {other_table}"
-            "), "
-            "__giql_sweep AS ("
-            "SELECT *, "
-            "MAX(CASE WHEN NOT __giql_is_left THEN __giql_end END) "
-            "OVER (PARTITION BY __giql_chrom "
-            "ORDER BY __giql_start ASC "
-            "ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) "
-            "AS __giql_max_right_end, "
-            "MIN(CASE WHEN NOT __giql_is_left THEN __giql_start END) "
-            "OVER (PARTITION BY __giql_chrom "
-            "ORDER BY __giql_start DESC "
-            "ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) "
-            "AS __giql_min_right_start "
-            "FROM __giql_combined"
-            "), "
-            "__giql_hits AS ("
-            "SELECT DISTINCT __giql_chrom, __giql_start, __giql_end "
-            "FROM __giql_sweep "
-            "WHERE __giql_is_left AND ("
-            "(__giql_max_right_end IS NOT NULL "
-            "AND __giql_max_right_end > __giql_start) "
-            "OR (__giql_min_right_start IS NOT NULL "
-            "AND __giql_min_right_start < __giql_end))"
-            ") "
-            f"SELECT DISTINCT {select_table}.* "
-            f"FROM {select_table} "
-            f'JOIN __giql_hits ON {select_table}."{s_chrom}" '
-            "= __giql_hits.__giql_chrom "
-            f'AND {select_table}."{s_start}" '
-            "= __giql_hits.__giql_start "
-            f'AND {select_table}."{s_end}" '
-            "= __giql_hits.__giql_end"
+            f"WITH __giql_left AS ("
+            f"SELECT *, "
+            f'UNNEST(range(CAST("{l_start}" / {b} AS BIGINT), '
+            f'CAST(("{l_end}" - 1) / {b} + 1 AS BIGINT))) '
+            f"AS __giql_bin_l "
+            f"FROM {left_table}), "
+            f"__giql_right AS ("
+            f"SELECT *, "
+            f'UNNEST(range(CAST("{r_start}" / {b} AS BIGINT), '
+            f'CAST(("{r_end}" - 1) / {b} + 1 AS BIGINT))) '
+            f"AS __giql_bin_r "
+            f"FROM {right_table}) "
+            f"SELECT DISTINCT *{exclude_clause} FROM ("
+            f"SELECT {select_clause} "
+            f"FROM __giql_left AS {left_ref} "
+            f"JOIN __giql_right AS {right_ref} "
+            f'ON {left_ref}."{l_chrom}" = {right_ref}."{r_chrom}" '
+            f"AND {left_ref}.__giql_bin_l = {right_ref}.__giql_bin_r "
+            f'WHERE {left_ref}."{l_start}" < {right_ref}."{r_end}" '
+            f'AND {left_ref}."{l_end}" > {right_ref}."{r_start}"'
+            f")"
         )
         return parse_one(sql)
