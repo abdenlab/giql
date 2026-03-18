@@ -69,9 +69,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
             "Benchmark GIQL DataFusion engine vs bedtools. "
-            "The same DataFusionEngine instance is reused across all reps of a "
-            "(size, op) pair — DataFusion's planning cache may benefit later reps. "
-            "This is expected behavior, not an artifact."
+            "A fresh DataFusionEngine is created for each timed repetition "
+            "to avoid plan-caching artifacts."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )

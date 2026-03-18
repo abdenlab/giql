@@ -73,7 +73,7 @@ def run_bedtools_intersect_join(bed_a: Path, bed_b: Path) -> None:
 
     a = pybedtools.BedTool(str(bed_a))
     b = pybedtools.BedTool(str(bed_b))
-    a.intersect(b).saveas()
+    a.intersect(b, u=True).saveas()
 
 
 def run_bedtools_merge(bed_path: Path) -> None:

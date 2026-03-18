@@ -41,16 +41,17 @@ class BenchmarkResult(NamedTuple):
 def time_reps(fn: Callable[[], None], n_reps: int) -> tuple[float, float]:
     """Time n_reps calls to fn, returning (mean_s, std_s).
 
-    No warmup rep is discarded — I/O-bound operations are affected by the OS
-    page cache, and including the cold-start rep reflects real-world behavior.
+    One untimed warmup call is executed first to populate the OS page cache,
+    then n_reps timed calls are measured.
     """
+    fn()  # warmup — not timed
     times: list[float] = []
     for _ in range(n_reps):
         t0 = perf_counter()
         fn()
         times.append(perf_counter() - t0)
     mean = sum(times) / len(times)
-    variance = sum((t - mean) ** 2 for t in times) / len(times)
+    variance = sum((t - mean) ** 2 for t in times) / max(len(times) - 1, 1)
     return mean, math.sqrt(variance)
 
 
@@ -131,13 +132,6 @@ def run_benchmark(
         for primary, secondary in dataset_pairs:
             size = primary.n_intervals
 
-            # Create DataFusion engines once per table-set, reused across all ops and reps.
-            df_engine_single = None
-            df_engine_pair = None
-            if has_datafusion:
-                df_engine_single = make_datafusion_engine(primary)
-                df_engine_pair = make_datafusion_engine(primary, secondary)
-
             for op_key in ops:
                 if op_key not in ALL_OPS:
                     continue
@@ -145,18 +139,23 @@ def run_benchmark(
 
                 # --- DataFusion ---
                 if has_datafusion and op.datafusion_supported:
-                    engine = df_engine_pair if op.needs_secondary else df_engine_single
+                    # Build a fresh engine for each timed call to avoid plan caching.
+                    def _make_engine(need_secondary=op.needs_secondary):
+                        if need_secondary:
+                            return make_datafusion_engine(primary, secondary)
+                        return make_datafusion_engine(primary)
+
                     try:
                         if op_key == "intersect_filter":
-                            fn: Callable[[], None] = lambda e=engine: run_datafusion_intersect_filter(e)
+                            fn: Callable[[], None] = lambda: run_datafusion_intersect_filter(_make_engine())
                         elif op_key == "intersect_join":
-                            fn = lambda e=engine: run_datafusion_intersect_join(e)
+                            fn = lambda: run_datafusion_intersect_join(_make_engine())
                         elif op_key == "merge":
                             merge_fn = run_datafusion_merge_unsorted if unsorted else run_datafusion_merge
-                            fn = lambda e=engine, f=merge_fn: f(e)
+                            fn = lambda f=merge_fn: f(_make_engine())
                         elif op_key == "cluster":
                             cluster_fn = run_datafusion_cluster_unsorted if unsorted else run_datafusion_cluster
-                            fn = lambda e=engine, f=cluster_fn: f(e)
+                            fn = lambda f=cluster_fn: f(_make_engine())
                         else:
                             fn = None  # type: ignore[assignment]
 
@@ -193,16 +192,23 @@ def run_benchmark(
                     try:
                         import pybedtools  # noqa: F401
 
+                        def _bt_wrap(inner):
+                            """Wrap a bedtools callable to clean up temp files after each rep."""
+                            def wrapped():
+                                inner()
+                                pybedtools.cleanup(remove_all=False)
+                            return wrapped
+
                         if op_key == "intersect_filter":
-                            fn = lambda p=primary, q=query_bed: run_bedtools_intersect_filter(p.bed_path, q)
+                            fn = _bt_wrap(lambda p=primary, q=query_bed: run_bedtools_intersect_filter(p.bed_path, q))
                         elif op_key == "intersect_join":
-                            fn = lambda p=primary, s=secondary: run_bedtools_intersect_join(p.bed_path, s.bed_path)
+                            fn = _bt_wrap(lambda p=primary, s=secondary: run_bedtools_intersect_join(p.bed_path, s.bed_path))
                         elif op_key == "merge":
                             bt_merge = run_bedtools_merge_unsorted if unsorted else run_bedtools_merge
-                            fn = lambda p=primary, f=bt_merge: f(p.bed_path)
+                            fn = _bt_wrap(lambda p=primary, f=bt_merge: f(p.bed_path))
                         elif op_key == "cluster":
                             bt_cluster = run_bedtools_cluster_unsorted if unsorted else run_bedtools_cluster
-                            fn = lambda p=primary, f=bt_cluster: f(p.bed_path)
+                            fn = _bt_wrap(lambda p=primary, f=bt_cluster: f(p.bed_path))
                         else:
                             fn = None  # type: ignore[assignment]
 
@@ -217,7 +223,6 @@ def run_benchmark(
                                 n_reps=n_reps,
                                 status="ok",
                             ))
-                            pybedtools.cleanup(remove_all=False)
                         else:
                             results.append(BenchmarkResult(
                                 operation=op_key, engine="bedtools", size=size,
