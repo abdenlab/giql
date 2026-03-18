@@ -24,13 +24,18 @@ from benchmarks.engines import (
     run_datafusion_intersect_join,
     run_datafusion_merge,
     run_datafusion_merge_unsorted,
+    run_polarsbio_cluster,
+    run_polarsbio_intersect_filter,
+    run_polarsbio_intersect_join,
+    run_polarsbio_merge,
+    setup_polarsbio,
 )
 from benchmarks.operations import ALL_OPS, QUERY_REGION_BED
 
 
 class BenchmarkResult(NamedTuple):
     operation: str
-    engine: str    # "datafusion" | "bedtools"
+    engine: str    # "datafusion" | "polars-bio" | "bedtools"
     size: int
     mean_s: float
     std_s: float
@@ -63,12 +68,29 @@ def _make_query_bed(workdir: Path) -> Path:
     return path
 
 
+def _make_query_parquet(workdir: Path) -> Path:
+    """Write a single-interval Parquet file for the intersect filter region."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    chrom, start, end = QUERY_REGION_BED
+    path = workdir / "query_region.parquet"
+    table = pa.table({
+        "chrom": pa.array([chrom], type=pa.string()),
+        "start": pa.array([start], type=pa.int32()),
+        "end": pa.array([end], type=pa.int32()),
+    })
+    pq.write_table(table, path)
+    return path
+
+
 def run_benchmark(
     sizes: list[int],
     ops: list[str],
     n_reps: int,
     input_path: Path | None,
     has_datafusion: bool,
+    has_polarsbio: bool,
     has_bedtools: bool,
     *,
     row_group_per_chrom: bool = False,
@@ -89,6 +111,8 @@ def run_benchmark(
         When given, runs once at the file's actual size; sizes is ignored.
     has_datafusion :
         Whether the DataFusion backend is available.
+    has_polarsbio :
+        Whether the polars-bio backend is available.
     has_bedtools :
         Whether the bedtools backend is available.
     row_group_per_chrom :
@@ -102,9 +126,13 @@ def run_benchmark(
     """
     results: list[BenchmarkResult] = []
 
+    if has_polarsbio:
+        setup_polarsbio()
+
     with tempfile.TemporaryDirectory() as tmpdir:
         workdir = Path(tmpdir)
         query_bed = _make_query_bed(workdir)
+        query_parquet = _make_query_parquet(workdir)
 
         if input_path is not None:
             if input_path.suffix == ".bed":
@@ -187,6 +215,48 @@ def run_benchmark(
                         mean_s=0.0, std_s=0.0, n_reps=0, status="na",
                     ))
 
+                # --- polars-bio ---
+                if has_polarsbio:
+                    try:
+                        if op_key == "intersect_filter":
+                            fn = lambda p=primary, q=query_parquet: run_polarsbio_intersect_filter(p.parquet_path, q)
+                        elif op_key == "intersect_join":
+                            fn = lambda p=primary, s=secondary: run_polarsbio_intersect_join(p.parquet_path, s.parquet_path)
+                        elif op_key == "merge":
+                            fn = lambda p=primary: run_polarsbio_merge(p.parquet_path)
+                        elif op_key == "cluster":
+                            fn = lambda p=primary: run_polarsbio_cluster(p.parquet_path)
+                        else:
+                            fn = None  # type: ignore[assignment]
+
+                        if fn is not None:
+                            mean_s, std_s = time_reps(fn, n_reps)
+                            results.append(BenchmarkResult(
+                                operation=op_key,
+                                engine="polars-bio",
+                                size=size,
+                                mean_s=mean_s,
+                                std_s=std_s,
+                                n_reps=n_reps,
+                                status="ok",
+                            ))
+                        else:
+                            results.append(BenchmarkResult(
+                                operation=op_key, engine="polars-bio", size=size,
+                                mean_s=0.0, std_s=0.0, n_reps=0, status="na",
+                            ))
+                    except Exception as exc:
+                        results.append(BenchmarkResult(
+                            operation=op_key, engine="polars-bio", size=size,
+                            mean_s=0.0, std_s=0.0, n_reps=0,
+                            status=f"error:{exc!s}",
+                        ))
+                else:
+                    results.append(BenchmarkResult(
+                        operation=op_key, engine="polars-bio", size=size,
+                        mean_s=0.0, std_s=0.0, n_reps=0, status="na",
+                    ))
+
                 # --- bedtools ---
                 if has_bedtools:
                     try:
@@ -248,16 +318,19 @@ def print_results_table(results: list[BenchmarkResult]) -> None:
     # Column widths
     col_op = 20
     col_size = 12
-    col_df = 20
-    col_bt = 20
+    col_df = 18
+    col_pb = 18
+    col_bt = 18
     col_sp = 10
 
     header = (
         "Operation".ljust(col_op)
         + "Size".rjust(col_size)
         + "DataFusion (s)".rjust(col_df)
+        + "polars-bio (s)".rjust(col_pb)
+        + "vs GIQL".rjust(col_sp)
         + "bedtools (s)".rjust(col_bt)
-        + "Speedup".rjust(col_sp)
+        + "vs GIQL".rjust(col_sp)
     )
     sep = "-" * len(header)
 
@@ -275,41 +348,43 @@ def print_results_table(results: list[BenchmarkResult]) -> None:
             grouped[key] = {}
         grouped[key][r.engine] = r
 
+    def fmt_time(r: BenchmarkResult | None) -> str:
+        if r is None or r.status == "na":
+            return "N/A"
+        if r.status.startswith("error:"):
+            return "ERROR"
+        return f"{r.mean_s:.4f} ± {r.std_s:.4f}"
+
+    def fmt_speedup(df_r: BenchmarkResult | None, other: BenchmarkResult | None) -> str:
+        if (
+            df_r and other
+            and df_r.status == "ok" and other.status == "ok"
+            and df_r.mean_s > 0
+        ):
+            ratio = other.mean_s / df_r.mean_s
+            return f"{ratio:.1f}x"
+        return ""
+
     for key in seen:
         op_key, size = key
         engines = grouped[key]
         label = ALL_OPS[op_key].label if op_key in ALL_OPS else op_key
         df_r = engines.get("datafusion")
+        pb_r = engines.get("polars-bio")
         bt_r = engines.get("bedtools")
-
-        def fmt_time(r: BenchmarkResult | None) -> str:
-            if r is None or r.status == "na":
-                return "N/A"
-            if r.status.startswith("error:"):
-                return "ERROR"
-            return f"{r.mean_s:.4f} ± {r.std_s:.4f}"
-
-        df_str = fmt_time(df_r)
-        bt_str = fmt_time(bt_r)
-
-        speedup_str = ""
-        if (
-            df_r and bt_r
-            and df_r.status == "ok" and bt_r.status == "ok"
-            and df_r.mean_s > 0
-        ):
-            speedup_str = f"{bt_r.mean_s / df_r.mean_s:.2f}x"
 
         print(
             label.ljust(col_op)
             + f"{size:,}".rjust(col_size)
-            + df_str.rjust(col_df)
-            + bt_str.rjust(col_bt)
-            + speedup_str.rjust(col_sp)
+            + fmt_time(df_r).rjust(col_df)
+            + fmt_time(pb_r).rjust(col_pb)
+            + fmt_speedup(df_r, pb_r).rjust(col_sp)
+            + fmt_time(bt_r).rjust(col_bt)
+            + fmt_speedup(df_r, bt_r).rjust(col_sp)
         )
 
     print(sep)
-    print("Speedup > 1 means DataFusion is faster.")
+    print("vs GIQL > 1 means GIQL DataFusion is faster.")
 
 
 def write_results_csv(results: list[BenchmarkResult], path: Path) -> None:

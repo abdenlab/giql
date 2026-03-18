@@ -22,9 +22,10 @@ if str(_repo_root) not in sys.path:
 from benchmarks.operations import ALL_OPS
 
 
-def _detect_backends() -> tuple[bool, bool]:
-    """Detect available backends. Returns (has_datafusion, has_bedtools)."""
+def _detect_backends() -> tuple[bool, bool, bool]:
+    """Detect available backends. Returns (has_datafusion, has_polarsbio, has_bedtools)."""
     has_datafusion = False
+    has_polarsbio = False
     has_bedtools = False
 
     try:
@@ -38,6 +39,16 @@ def _detect_backends() -> tuple[bool, bool]:
         )
 
     try:
+        import polars_bio  # noqa: F401
+
+        has_polarsbio = True
+    except ImportError:
+        warnings.warn(
+            "polars-bio not available — polars-bio benchmarks will be skipped.",
+            stacklevel=1,
+        )
+
+    try:
         import pybedtools  # noqa: F401
 
         has_bedtools = True
@@ -47,7 +58,7 @@ def _detect_backends() -> tuple[bool, bool]:
             stacklevel=1,
         )
 
-    return has_datafusion, has_bedtools
+    return has_datafusion, has_polarsbio, has_bedtools
 
 
 def _parse_sizes(s: str) -> list[int]:
@@ -68,7 +79,7 @@ def _parse_ops(s: str) -> list[str]:
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "Benchmark GIQL DataFusion engine vs bedtools. "
+            "Benchmark GIQL DataFusion engine vs polars-bio vs bedtools. "
             "A fresh DataFusionEngine is created for each timed repetition "
             "to avoid plan-caching artifacts."
         ),
@@ -128,9 +139,9 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    has_datafusion, has_bedtools = _detect_backends()
-    if not has_datafusion and not has_bedtools:
-        sys.exit("No backends available. Install datafusion and/or pybedtools.")
+    has_datafusion, has_polarsbio, has_bedtools = _detect_backends()
+    if not has_datafusion and not has_polarsbio and not has_bedtools:
+        sys.exit("No backends available. Install datafusion, polars-bio, and/or pybedtools.")
 
     ops = _parse_ops(args.ops)
 
@@ -152,6 +163,7 @@ def main() -> None:
         n_reps=args.reps,
         input_path=input_path,
         has_datafusion=has_datafusion,
+        has_polarsbio=has_polarsbio,
         has_bedtools=has_bedtools,
         row_group_per_chrom=args.row_group_per_chrom,
         unsorted=args.unsorted,
