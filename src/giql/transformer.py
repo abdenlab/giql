@@ -463,20 +463,18 @@ class MergeTransformer:
     def _transform_for_merge(
         self, query: exp.Select, merge_expr: GIQLMerge
     ) -> exp.Select:
-        """Transform query to compute MERGE using CLUSTER + GROUP BY.
+        """Transform query to compute MERGE using forward-fill CTEs.
 
-        :param query:
-            Original query
-        :param merge_expr:
-            MERGE expression to transform
-        :return:
-            Transformed query with clustering and aggregation
+        Uses a two-CTE approach instead of nested subqueries so
+        DataFusion can reuse the sort order between passes:
+
+        1. Flag merge-group boundaries via running MAX of end positions
+        2. Forward-fill group starts via running MAX of boundary markers
+        3. GROUP BY group_start to produce merged intervals
         """
-        # Extract MERGE parameters (same as CLUSTER)
         distance_expr = merge_expr.args.get("distance")
         stranded_expr = merge_expr.args.get("stranded")
 
-        # Get column names from table config or use defaults
         (
             chrom_col,
             start_col,
@@ -484,37 +482,22 @@ class MergeTransformer:
             strand_col,
         ) = self.cluster_transformer._get_genomic_columns(query)
 
-        # Build CLUSTER expression with same parameters
-        cluster_kwargs = {"this": merge_expr.this}
+        # Extract source table from FROM clause
+        from_clause = query.args.get("from_")
+        if not from_clause:
+            raise ValueError("MERGE query must have a FROM clause")
+        source = from_clause.this.sql()
+
+        # Handle distance parameter
         if distance_expr:
-            cluster_kwargs["distance"] = distance_expr
-        if stranded_expr:
-            cluster_kwargs["stranded"] = stranded_expr
+            try:
+                distance = int(str(distance_expr.this))
+            except (ValueError, AttributeError):
+                distance = 0
+        else:
+            distance = 0
 
-        cluster_expr = GIQLCluster(**cluster_kwargs)
-
-        # Create intermediate query with CLUSTER
-        # Start with original query's FROM/WHERE/etc
-        cluster_query = exp.Select()
-        cluster_query.select(exp.Star(), copy=False)
-        cluster_query.select(
-            exp.alias_(cluster_expr, "__giql_cluster_id", quoted=False),
-            append=True,
-            copy=False,
-        )
-
-        # Copy FROM, WHERE from original
-        # Use copy() to avoid sharing references between queries
-        if query.args.get("from_"):
-            cluster_query.set("from_", query.args["from_"].copy())
-        if query.args.get("where"):
-            cluster_query.set("where", query.args["where"].copy())
-
-        # Apply CLUSTER transformation to get the CTE-based query
-        cluster_query = self.cluster_transformer.transform(cluster_query)
-
-        # Build GROUP BY columns
-        group_by_cols = [exp.column(chrom_col)]
+        distance_adj = f" + {distance}" if distance > 0 else ""
 
         # Handle stranded parameter
         if stranded_expr:
@@ -523,71 +506,51 @@ class MergeTransformer:
             elif isinstance(stranded_expr, exp.Literal):
                 stranded = str(stranded_expr.this).upper() == "TRUE"
             else:
-                stranded = str(stranded_expr).upper() in ("TRUE", "1", "YES")
+                stranded = str(stranded_expr).upper() in (
+                    "TRUE", "1", "YES",
+                )
         else:
             stranded = False
 
+        partition = f'"{chrom_col}"'
+        group_by = f'"{chrom_col}"'
+        select_cols = f'"{chrom_col}"'
         if stranded:
-            group_by_cols.append(exp.column(strand_col, quoted=True))
+            partition += f', "{strand_col}"'
+            group_by += f', "{strand_col}"'
+            select_cols += f', "{strand_col}"'
 
-        group_by_cols.append(exp.column("__giql_cluster_id"))
-
-        # Build SELECT expressions for merged intervals
-        select_exprs = []
-
-        # Add group-by columns (non-aggregated)
-        select_exprs.append(exp.column(chrom_col, quoted=True))
-        if stranded:
-            select_exprs.append(exp.column(strand_col, quoted=True))
-
-        # Add merged interval bounds
-        select_exprs.append(
-            exp.alias_(
-                exp.Min(this=exp.column(start_col, quoted=True)), start_col, quoted=False
-            )
+        sql = (
+            "WITH __giql_flagged AS ("
+            f"SELECT {select_cols}, "
+            f'"{start_col}", "{end_col}", '
+            f'CASE WHEN MAX("{end_col}"){distance_adj} '
+            f"OVER (PARTITION BY {partition} "
+            f'ORDER BY "{start_col}" '
+            f"ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) "
+            f'>= "{start_col}" '
+            f'THEN NULL ELSE "{start_col}" END '
+            f"AS __giql_group_start "
+            f"FROM {source}"
+            "), "
+            "__giql_filled AS ("
+            f"SELECT {select_cols}, "
+            f'"{start_col}", "{end_col}", '
+            f"MAX(__giql_group_start) "
+            f"OVER (PARTITION BY {partition} "
+            f'ORDER BY "{start_col}" '
+            f"ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) "
+            f"AS __giql_group_start "
+            f"FROM __giql_flagged"
+            ") "
+            f"SELECT {select_cols}, "
+            f'MIN("{start_col}") AS "{start_col}", '
+            f'MAX("{end_col}") AS "{end_col}" '
+            f"FROM __giql_filled "
+            f"GROUP BY {group_by}, __giql_group_start "
+            f'ORDER BY "{chrom_col}", "{start_col}"'
         )
-        select_exprs.append(
-            exp.alias_(
-                exp.Max(this=exp.column(end_col, quoted=True)), end_col, quoted=False
-            )
-        )
-
-        # Process other columns from original SELECT
-        for expression in query.expressions:
-            # Skip the MERGE expression itself
-            if isinstance(expression, GIQLMerge):
-                continue
-            elif isinstance(expression, exp.Alias) and isinstance(
-                expression.this, GIQLMerge
-            ):
-                continue
-            # Include other columns (they should be aggregates or in GROUP BY)
-            else:
-                select_exprs.append(expression)
-
-        # Build final query
-        final_query = exp.Select()
-        final_query.select(*select_exprs, copy=False)
-
-        # FROM the clustered subquery
-        subquery = exp.Subquery(
-            this=cluster_query,
-            alias=exp.TableAlias(this=exp.Identifier(this="clustered")),
-        )
-        final_query.from_(subquery, copy=False)
-
-        # Add GROUP BY
-        final_query.group_by(*group_by_cols, copy=False)
-
-        # Add ORDER BY (chromosome, start)
-        final_query.order_by(
-            exp.Ordered(this=exp.column(chrom_col, quoted=True)), copy=False
-        )
-        final_query.order_by(
-            exp.Ordered(this=exp.column(start_col, quoted=True)), append=True, copy=False
-        )
-
-        return final_query
+        return parse_one(sql)
 
 
 class IntersectsJoinTransformer:
