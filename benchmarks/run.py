@@ -87,8 +87,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--sizes",
-        default="10000,100000,1000000",
-        help="Comma-separated dataset sizes (ignored if --input given). Default: 10000,100000,1000000",
+        default="10000,100000,1000000,10000000",
+        help="Comma-separated dataset sizes (ignored if --input given). Default: 10000,100000,1000000,10000000",
     )
     parser.add_argument(
         "--input",
