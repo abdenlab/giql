@@ -181,7 +181,7 @@ Find features upstream (5') of reference positions using signed distances:
 
 .. note::
 
-   With ``signed=true``, negative distances indicate upstream features
+   With ``signed := true``, negative distances indicate upstream features
    and positive distances indicate downstream features.
 
 Downstream Features

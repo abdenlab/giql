@@ -14,15 +14,11 @@ from giql.expressions import GIQLCluster
 class TestClusterParsing:
     """Tests for parsing CLUSTER function syntax."""
 
-    def test_parse_cluster_with_named_param(self):
-        """Test that := syntax works for named parameters.
-
-        Given:
-            A GIQL query with CLUSTER(interval, stranded := true)
-        When:
-            Parsing the query
-        Then:
-            It should create GIQLCluster node with stranded in args
+    def test_from_arg_list_with_property_eq_syntax(self):
+        """
+        GIVEN a GIQL query with CLUSTER(interval, stranded := true)
+        WHEN parsing the query
+        THEN should create GIQLCluster node with stranded in args
         """
         # Act
         ast = parse_one(
@@ -38,15 +34,11 @@ class TestClusterParsing:
         )
         assert cluster_expr.args.get("stranded") is not None, "Missing stranded parameter"
 
-    def test_from_arg_list_with_eq_ignores_named_param(self):
-        """Test that = syntax is not treated as named parameter assignment.
-
-        Given:
-            A GIQL query with CLUSTER(interval, stranded=true) using = syntax
-        When:
-            Parsing the query
-        Then:
-            It should not treat stranded as a named parameter
+    def test_from_arg_list_with_eq_as_positional(self):
+        """
+        GIVEN a GIQL query with CLUSTER(interval, stranded=true) using = syntax
+        WHEN parsing the query
+        THEN should not treat stranded as a named parameter
         """
         # Act
         ast = parse_one(
@@ -63,14 +55,10 @@ class TestClusterParsing:
         )
 
     def test_from_arg_list_with_kwarg_syntax(self):
-        """Test that => (SQL-standard) syntax works for named parameters.
-
-        Given:
-            A GIQL query with CLUSTER(interval, stranded => true) using => syntax
-        When:
-            Parsing the query
-        Then:
-            It should parse stranded as a named parameter
+        """
+        GIVEN a GIQL query with CLUSTER(interval, stranded => true) using => syntax
+        WHEN parsing the query
+        THEN should parse stranded as a named parameter
         """
         # Act
         ast = parse_one(

@@ -59,15 +59,11 @@ class TestDistanceParsing:
         second_arg = select_expr.args["expression"]
         assert "chr1" in str(second_arg).lower(), "Expected chromosome in literal range"
 
-    def test_from_arg_list_with_eq_ignores_named_param(self):
-        """Test that = syntax is not treated as named parameter assignment.
-
-        Given:
-            A GIQL query with DISTANCE(a.interval, b.interval, stranded=true) using = syntax
-        When:
-            Parsing the query
-        Then:
-            It should not treat stranded as a named parameter
+    def test_from_arg_list_with_eq_as_positional(self):
+        """
+        GIVEN a GIQL query with DISTANCE(a.interval, b.interval, stranded=true) using = syntax
+        WHEN parsing the query
+        THEN should not treat stranded as a named parameter
         """
         # Act
         ast = parse_one(
@@ -83,14 +79,10 @@ class TestDistanceParsing:
         )
 
     def test_from_arg_list_with_kwarg_syntax(self):
-        """Test that => (SQL-standard) syntax works for named parameters.
-
-        Given:
-            A GIQL query with DISTANCE(a.interval, b.interval, stranded => true) using => syntax
-        When:
-            Parsing the query
-        Then:
-            It should parse stranded as a named parameter
+        """
+        GIVEN a GIQL query with DISTANCE(a.interval, b.interval, stranded => true) using => syntax
+        WHEN parsing the query
+        THEN should parse stranded as a named parameter
         """
         # Act
         ast = parse_one(

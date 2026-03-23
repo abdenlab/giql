@@ -14,15 +14,28 @@ from giql.expressions import GIQLMerge
 class TestMergeParsing:
     """Tests for parsing MERGE function syntax."""
 
-    def test_from_arg_list_with_eq_ignores_named_param(self):
-        """Test that = syntax is not treated as named parameter assignment.
+    def test_from_arg_list_with_property_eq_syntax(self):
+        """
+        GIVEN a GIQL query with MERGE(interval, stranded := true)
+        WHEN parsing the query
+        THEN should parse stranded as a named parameter
+        """
+        # Act
+        ast = parse_one(
+            "SELECT MERGE(interval, stranded := true) FROM peaks",
+            dialect=GIQLDialect,
+        )
 
-        Given:
-            A GIQL query with MERGE(interval, stranded=true) using = syntax
-        When:
-            Parsing the query
-        Then:
-            It should not treat stranded as a named parameter
+        # Assert
+        merge_expr = ast.expressions[0]
+        assert isinstance(merge_expr, GIQLMerge)
+        assert merge_expr.args.get("stranded") is not None, "Missing stranded parameter"
+
+    def test_from_arg_list_with_eq_as_positional(self):
+        """
+        GIVEN a GIQL query with MERGE(interval, stranded=true) using = syntax
+        WHEN parsing the query
+        THEN should not treat stranded as a named parameter
         """
         # Act
         ast = parse_one(
@@ -38,14 +51,10 @@ class TestMergeParsing:
         )
 
     def test_from_arg_list_with_kwarg_syntax(self):
-        """Test that => (SQL-standard) syntax works for named parameters.
-
-        Given:
-            A GIQL query with MERGE(interval, stranded => true) using => syntax
-        When:
-            Parsing the query
-        Then:
-            It should parse stranded as a named parameter
+        """
+        GIVEN a GIQL query with MERGE(interval, stranded => true) using => syntax
+        WHEN parsing the query
+        THEN should parse stranded as a named parameter
         """
         # Act
         ast = parse_one(

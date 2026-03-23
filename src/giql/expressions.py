@@ -73,6 +73,21 @@ class SpatialSetPredicate(exp.Expression):
     }
 
 
+def _split_named_and_positional(args):
+    """Separate named parameters (:= and =>) from positional arguments."""
+    kwargs = {}
+    positional_args = []
+    for arg in args:
+        if isinstance(arg, (exp.PropertyEQ, exp.Kwarg)):
+            param_name = (
+                arg.this.name if hasattr(arg.this, "name") else str(arg.this)
+            )
+            kwargs[param_name.lower()] = arg.expression
+        else:
+            positional_args.append(arg)
+    return kwargs, positional_args
+
+
 class GIQLCluster(exp.Func):
     """CLUSTER window function for assigning cluster IDs to overlapping intervals.
 
@@ -93,33 +108,11 @@ class GIQLCluster(exp.Func):
 
     @classmethod
     def from_arg_list(cls, args):
-        """Parse argument list, handling named parameters.
-
-        :param args:
-            List of arguments from parser
-        :return:
-            GIQLCluster instance with properly mapped arguments
-        """
-        kwargs = {}
-        positional_args = []
-
-        # Separate named (:= PropertyEQ, => Kwarg) and positional arguments
-        for arg in args:
-            if isinstance(arg, (exp.PropertyEQ, exp.Kwarg)):
-                # Named parameter: extract name and value
-                param_name = (
-                    arg.this.name if hasattr(arg.this, "name") else str(arg.this)
-                )
-                kwargs[param_name.lower()] = arg.expression
-            else:
-                positional_args.append(arg)
-
-        # Map positional arguments
+        kwargs, positional_args = _split_named_and_positional(args)
         if len(positional_args) > 0:
             kwargs["this"] = positional_args[0]
         if len(positional_args) > 1:
             kwargs["distance"] = positional_args[1]
-
         return cls(**kwargs)
 
 
@@ -143,31 +136,11 @@ class GIQLMerge(exp.Func):
 
     @classmethod
     def from_arg_list(cls, args):
-        """Parse argument list, handling named parameters.
-
-        :param args: List of arguments from parser
-        :return: GIQLMerge instance with properly mapped arguments
-        """
-        kwargs = {}
-        positional_args = []
-
-        # Separate named (:= PropertyEQ, => Kwarg) and positional arguments
-        for arg in args:
-            if isinstance(arg, (exp.PropertyEQ, exp.Kwarg)):
-                # Named parameter: extract name and value
-                param_name = (
-                    arg.this.name if hasattr(arg.this, "name") else str(arg.this)
-                )
-                kwargs[param_name.lower()] = arg.expression
-            else:
-                positional_args.append(arg)
-
-        # Map positional arguments
+        kwargs, positional_args = _split_named_and_positional(args)
         if len(positional_args) > 0:
             kwargs["this"] = positional_args[0]
         if len(positional_args) > 1:
             kwargs["distance"] = positional_args[1]
-
         return cls(**kwargs)
 
 
@@ -194,33 +167,11 @@ class GIQLDistance(exp.Func):
 
     @classmethod
     def from_arg_list(cls, args):
-        """Parse argument list, handling named parameters.
-
-        :param args:
-            List of arguments from parser
-        :return:
-            GIQLDistance instance with properly mapped arguments
-        """
-        kwargs = {}
-        positional_args = []
-
-        # Separate named (:= PropertyEQ, => Kwarg) and positional arguments
-        for arg in args:
-            if isinstance(arg, (exp.PropertyEQ, exp.Kwarg)):
-                # Named parameter: extract name and value
-                param_name = (
-                    arg.this.name if hasattr(arg.this, "name") else str(arg.this)
-                )
-                kwargs[param_name.lower()] = arg.expression
-            else:
-                positional_args.append(arg)
-
-        # Map positional arguments
+        kwargs, positional_args = _split_named_and_positional(args)
         if len(positional_args) >= 1:
             kwargs["this"] = positional_args[0]
         if len(positional_args) >= 2:
             kwargs["expression"] = positional_args[1]
-
         return cls(**kwargs)
 
 
@@ -248,29 +199,7 @@ class GIQLNearest(exp.Func):
 
     @classmethod
     def from_arg_list(cls, args):
-        """Parse argument list, handling named parameters.
-
-        :param args:
-            List of arguments from parser
-        :return:
-            GIQLNearest instance with properly mapped arguments
-        """
-        kwargs = {}
-        positional_args = []
-
-        # Separate named (:= PropertyEQ, => Kwarg) and positional arguments
-        for arg in args:
-            if isinstance(arg, (exp.PropertyEQ, exp.Kwarg)):
-                # Named parameter: extract name and value
-                param_name = (
-                    arg.this.name if hasattr(arg.this, "name") else str(arg.this)
-                )
-                kwargs[param_name.lower()] = arg.expression
-            else:
-                positional_args.append(arg)
-
-        # Map positional arguments
+        kwargs, positional_args = _split_named_and_positional(args)
         if len(positional_args) >= 1:
             kwargs["this"] = positional_args[0]
-
         return cls(**kwargs)

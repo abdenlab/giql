@@ -60,7 +60,7 @@ Return Value
 ~~~~~~~~~~~~
 
 Integer cluster ID. Intervals in the same cluster have the same ID.
-IDs are assigned per-chromosome (and per-strand if ``stranded=true``).
+IDs are assigned per-chromosome (and per-strand if ``stranded := true``).
 
 Examples
 ~~~~~~~~
@@ -222,7 +222,7 @@ Returns merged interval coordinates:
 - ``chrom`` - Chromosome of the merged region
 - ``start`` - Start position of the merged region
 - ``end`` - End position of the merged region
-- ``strand`` - Strand (if ``stranded=true``)
+- ``strand`` - Strand (if ``stranded := true``)
 
 Examples
 ~~~~~~~~

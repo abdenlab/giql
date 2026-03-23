@@ -197,15 +197,11 @@ class TestNearestParsing:
         k_param = nearest_expr.args.get("k")
         assert k_param is not None, "Missing k parameter"
 
-    def test_from_arg_list_with_eq_ignores_named_param(self):
-        """Test that = syntax is not treated as named parameter assignment.
-
-        Given:
-            A GIQL query with NEAREST(genes, k=3) using = syntax
-        When:
-            Parsing the query
-        Then:
-            It should not treat k as a named parameter
+    def test_from_arg_list_with_eq_as_positional(self):
+        """
+        GIVEN a GIQL query with NEAREST(genes, k=3) using = syntax
+        WHEN parsing the query
+        THEN should not treat k as a named parameter
         """
         # Act
         ast = parse_one(
@@ -224,14 +220,10 @@ class TestNearestParsing:
         )
 
     def test_from_arg_list_with_kwarg_syntax(self):
-        """Test that => (SQL-standard) syntax works for named parameters.
-
-        Given:
-            A GIQL query with NEAREST(genes, k => 3) using => syntax
-        When:
-            Parsing the query
-        Then:
-            It should parse k as a named parameter
+        """
+        GIVEN a GIQL query with NEAREST(genes, k => 3) using => syntax
+        WHEN parsing the query
+        THEN should parse k as a named parameter
         """
         # Act
         ast = parse_one(
