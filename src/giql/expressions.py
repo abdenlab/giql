@@ -81,8 +81,8 @@ class GIQLCluster(exp.Func):
     Examples:
         CLUSTER(interval)
         CLUSTER(interval, 1000)
-        CLUSTER(interval, stranded=true)
-        CLUSTER(interval, 1000, stranded=true)
+        CLUSTER(interval, stranded := true)
+        CLUSTER(interval, 1000, stranded := true)
     """
 
     arg_types = {
@@ -103,12 +103,12 @@ class GIQLCluster(exp.Func):
         kwargs = {}
         positional_args = []
 
-        # Separate named (EQ) and positional arguments
+        # Separate named (:= PropertyEQ, => Kwarg) and positional arguments
         for arg in args:
-            if isinstance(arg, exp.EQ):
+            if isinstance(arg, (exp.PropertyEQ, exp.Kwarg)):
                 # Named parameter: extract name and value
                 param_name = (
-                    arg.this.name if isinstance(arg.this, exp.Column) else str(arg.this)
+                    arg.this.name if hasattr(arg.this, "name") else str(arg.this)
                 )
                 kwargs[param_name.lower()] = arg.expression
             else:
@@ -132,7 +132,7 @@ class GIQLMerge(exp.Func):
     Examples:
         MERGE(interval)
         MERGE(interval, 1000)
-        MERGE(interval, stranded=true)
+        MERGE(interval, stranded := true)
     """
 
     arg_types = {
@@ -151,12 +151,12 @@ class GIQLMerge(exp.Func):
         kwargs = {}
         positional_args = []
 
-        # Separate named (EQ) and positional arguments
+        # Separate named (:= PropertyEQ, => Kwarg) and positional arguments
         for arg in args:
-            if isinstance(arg, exp.EQ):
+            if isinstance(arg, (exp.PropertyEQ, exp.Kwarg)):
                 # Named parameter: extract name and value
                 param_name = (
-                    arg.this.name if isinstance(arg.this, exp.Column) else str(arg.this)
+                    arg.this.name if hasattr(arg.this, "name") else str(arg.this)
                 )
                 kwargs[param_name.lower()] = arg.expression
             else:
@@ -180,9 +180,9 @@ class GIQLDistance(exp.Func):
     Examples:
         DISTANCE(a.interval, b.interval)
         DISTANCE(a.interval, 'chr1:1000-2000')
-        DISTANCE(a.interval, b.interval, stranded=true)
-        DISTANCE(a.interval, b.interval, signed=true)
-        DISTANCE(a.interval, b.interval, stranded=true, signed=true)
+        DISTANCE(a.interval, b.interval, stranded := true)
+        DISTANCE(a.interval, b.interval, signed := true)
+        DISTANCE(a.interval, b.interval, stranded := true, signed := true)
     """
 
     arg_types = {
@@ -204,12 +204,12 @@ class GIQLDistance(exp.Func):
         kwargs = {}
         positional_args = []
 
-        # Separate named (EQ) and positional arguments
+        # Separate named (:= PropertyEQ, => Kwarg) and positional arguments
         for arg in args:
-            if isinstance(arg, exp.EQ):
+            if isinstance(arg, (exp.PropertyEQ, exp.Kwarg)):
                 # Named parameter: extract name and value
                 param_name = (
-                    arg.this.name if isinstance(arg.this, exp.Column) else str(arg.this)
+                    arg.this.name if hasattr(arg.this, "name") else str(arg.this)
                 )
                 kwargs[param_name.lower()] = arg.expression
             else:
@@ -231,10 +231,10 @@ class GIQLNearest(exp.Func):
     (PostgreSQL/DuckDB) or window functions (SQLite).
 
     Examples:
-        NEAREST(genes, k=3)
-        NEAREST(genes, reference=peaks.interval, k=5)
-        NEAREST(genes, reference='chr1:1000-2000', k=3)
-        NEAREST(genes, k=5, max_distance=100000, stranded=true)
+        NEAREST(genes, k := 3)
+        NEAREST(genes, reference := peaks.interval, k := 5)
+        NEAREST(genes, reference := 'chr1:1000-2000', k := 3)
+        NEAREST(genes, k := 5, max_distance := 100000, stranded := true)
     """
 
     arg_types = {
@@ -258,12 +258,12 @@ class GIQLNearest(exp.Func):
         kwargs = {}
         positional_args = []
 
-        # Separate named (EQ) and positional arguments
+        # Separate named (:= PropertyEQ, => Kwarg) and positional arguments
         for arg in args:
-            if isinstance(arg, exp.EQ):
+            if isinstance(arg, (exp.PropertyEQ, exp.Kwarg)):
                 # Named parameter: extract name and value
                 param_name = (
-                    arg.this.name if isinstance(arg.this, exp.Column) else str(arg.this)
+                    arg.this.name if hasattr(arg.this, "name") else str(arg.this)
                 )
                 kwargs[param_name.lower()] = arg.expression
             else:
