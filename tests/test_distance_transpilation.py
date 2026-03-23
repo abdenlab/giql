@@ -71,13 +71,13 @@ class TestDistanceTranspilation:
 
     def test_distance_transpilation_signed_duckdb(self):
         """
-        GIVEN a GIQL query with DISTANCE(..., signed=true)
+        GIVEN a GIQL query with DISTANCE(..., signed := true)
         WHEN transpiling to DuckDB SQL
         THEN should generate CASE expression with signed distances
             (negative for upstream, positive for downstream)
         """
         sql = """
-        SELECT DISTANCE(a.interval, b.interval, signed=true) as dist
+        SELECT DISTANCE(a.interval, b.interval, signed := true) as dist
         FROM features_a a CROSS JOIN features_b b
         """
 
