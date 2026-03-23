@@ -1,92 +1,123 @@
 ---
 name: test
 description: >
-  Generate comprehensive test specifications for Python modules with 100%
-  coverage of public APIs. Use this skill whenever the user says "/test",
-  "generate test specs", "create test plan", "write test specifications", or
-  similar. Analyzes module structure and produces Given-When-Then test case
-  tables organized by public class and function.
+  Analyze code changes for an issue, evaluate existing test coverage, plan
+  and implement tests. Use this skill whenever the user says "/test <number>",
+  "write tests for #N", "test #N", or similar. Accepts an issue number,
+  resolves the branch, diffs against the base, evaluates existing tests, and
+  writes new or updated tests to achieve comprehensive coverage.
 ---
 
-The key words MUST, MUST NOT, SHALL, SHALL NOT, SHOULD, SHOULD NOT,
-REQUIRED, RECOMMENDED, MAY, and OPTIONAL in this document are to be
-interpreted as described in RFC 2119.
+The key words MUST, MUST NOT, SHALL, SHALL NOT, SHOULD, SHOULD NOT, REQUIRED, RECOMMENDED, MAY, and OPTIONAL in this document are to be interpreted as described in RFC 2119.
 
 # Test Skill
 
-Generate comprehensive test specifications for Python modules with 100%
-coverage of public APIs.
+Analyze code changes associated with an issue, evaluate existing test coverage, and plan and implement tests to achieve comprehensive coverage of public APIs.
 
 ## Pipeline Context
 
-This skill is part of the development workflow pipeline:
-`/issue` → `/pr` → `/implement` → `/commit` → `/pr` (update).
-This skill is a **supporting tool** invoked by `/pr` to generate test
-case tables.
+This skill is part of the development workflow pipeline: `/issue` → `/implement` → `/test` → `/commit` → `/pr`. This skill is the **third** stage. The implement, test, and commit steps are iterative — they can be invoked multiple times for a given issue.
 
 ## Arguments
 
-A list of target modules or file references MUST be provided as
-arguments (e.g., `/test src/giql/transpile.py`). If no arguments
-are provided, the user MUST be asked which modules to analyze.
+An issue number MUST be provided as the sole argument (e.g., `/test 103`).
+
+> **Test guide:** Determine the language of the changed source files from their file extensions, then read the corresponding test guide before generating test specifications:
+>
+> | Language | Guide |
+> |----------|-------|
+> | Python (`.py`) | `@llm/guides/testguide-python.md` |
+>
+> If no guide exists for the detected language, inform the user and stop.
 
 ## Workflow
 
-### 1. Identify target modules
+### TL;DR
 
-Analyze referenced files or use the provided arguments to determine
-which Python modules need test specifications.
+1. Resolve issue, PR, and branch
+2. Analyze code changes
+3. Evaluate existing tests
+4. Generate test plan
+5. Enter plan mode
+6. Implement tests after approval
+7. Prompt the user to move onto the commit step
 
-### 2. Analyze module structure
+### 1. Resolve issue, PR, and branch
 
-For each module:
+Perform the same resolution logic as the implement skill:
 
-- **CRITICAL**: MUST NOT consider any existing tests when creating the
-  test plan. Analyze only the source module itself.
-- Identify all public classes (no underscore prefix).
-- Identify all public functions (no underscore prefix).
-- Identify all public methods in each class.
-- Note dunder methods that need idiomatic testing.
+```bash
+gh repo view --json isFork,parent
+gh issue view <number> --repo <target>
+```
 
-### 3. Generate test specifications
+Read the issue title, body, and labels. If the issue does not exist or is closed, inform the user and stop.
 
-For each Python module, create `specs/test_<module_name>.md` with this
-structure:
+Check for an existing PR:
 
-- Module header: `## Module: <module_name>.py`
-- For each public class:
-  - Section header: `### Public Class: <ClassName>`
-  - Test table (see Table Format below)
-  - Include: basic cases, variations, edge cases, property-based tests
-- For each public function:
-  - Section header: `### Public Function: <function_name>()`
-  - Test table (see Table Format below)
-- Test Implementation Notes section
-- Test Organization section (showing test file structure)
-- Summary Statistics section
+```bash
+gh pr list --repo <target> --search "Closes #<number>" --json number,headRefName --jq '.[0]'
+```
 
-**Naming convention**: If source module is `foo_bar.py`, spec file is
-`specs/test_foo_bar.md`.
+If a PR exists, note its number for context. Check out the branch:
 
-Create `specs/QUICK_REFERENCE.md` with an at-a-glance summary:
+```bash
+git fetch origin <branch>
+git checkout <branch>
+```
 
-- Test spec file locations (links to each `test_*.md` file)
-- Test suite class names per module
-- Coverage statistics per module
-- Quick navigation to each module/class/function
+If the branch does not exist, inform the user that the implement skill must be run first and stop. The test skill MUST NOT create branches.
 
-### 4. Validate test specifications
+### 2. Analyze code changes
 
-- All tests focus on public APIs only (no underscore-prefixed symbols).
-- All tests use Given-When-Then format.
-- Dunder methods tested idiomatically (not called directly).
-- Edge cases grouped with normal cases.
-- Property-based tests grouped with their target object.
-- 100% coverage of public APIs achieved.
+Determine the base branch and diff against it:
 
-### 5. Report completion
+```bash
+git merge-base HEAD $(git rev-parse --abbrev-ref @{upstream} 2>/dev/null || echo main)
+git diff <merge-base>..HEAD --name-only
+git diff <merge-base>..HEAD
+```
 
-Provide paths to generated files and summary statistics.
+Read every changed source file to understand what was implemented. Note which modules have new or modified public APIs.
+
+### 3. Evaluate existing tests
+
+Read the current test files for all affected modules. For each existing test:
+
+- Determine which behaviors are already covered and whether the coverage is satisfactory.
+- Identify tests that can be **modified** to cover new behavior rather than duplicating coverage.
+- Identify tests that **no longer apply** due to removed or significantly changed functionality — flag these for removal or rewriting.
+- Note gaps that require **new** test cases.
+
+### 4. Generate test plan
+
+Generate a Given-When-Then test plan internally. This plan is an agent planning artifact — do NOT write spec files to disk. The plan MUST:
+
+- Account for existing coverage: mark behaviors already tested, propose modifications to existing tests where appropriate, flag stale tests for removal or rewriting, and only add new test cases for genuinely uncovered behavior.
+- Achieve 100% coverage of new or changed public APIs.
+- Follow the structure in [Table Format](#table-format) below.
+- Follow the project test guide conventions.
+
+### 5. Enter plan mode
+
+Call `EnterPlanMode` to present the test plan to the user for approval. The plan MUST clearly distinguish between:
+
+- **Existing tests to keep** — already cover the behavior correctly
+- **Existing tests to modify** — need updates to cover changed behavior
+- **Existing tests to remove** — no longer apply due to removed or changed functionality
+- **New tests to add** — cover genuinely uncovered behavior
+
+### 6. Implement tests after approval
+
+Once the user approves the plan, implement the test files:
+
+- Modify existing test files where the plan calls for updates or removals.
+- Add new test cases where the plan identifies coverage gaps.
+- Follow the project test guide for file naming, class organization, and test conventions.
+
+### 7. Prompt the user to move onto the commit step
+
+The user MUST be prompted with the next pipeline step: "Ready to commit? Run `/commit` to stage and commit the changes." DO NOT proceed on your own.
 
 ## Table Format
 
@@ -97,13 +128,10 @@ Each test table MUST have these columns:
 
 **Column descriptions**:
 
-- **Test Suite**: Test class name (e.g., `TestRangeParser`). Property-based
-  tests use the SAME test class, not a separate
-  `TestRangeParserProperties` class.
-- **Test ID**: Sequential ID (e.g., WT-001, WT-002, PBT-001 for
-  property-based).
+- **Test Suite**: Test class name (e.g., `TestParser`). Property-based tests use the SAME test class, not a separate properties class.
+- **Test ID**: Sequential ID (e.g., PA-001, PA-002, PBT-001 for property-based).
 - **Given**: Setup conditions (public state only).
-- **When**: Action taken (public API only, using Python idioms).
+- **When**: Action taken (public API only, using language idioms).
 - **Then**: Observable outcome (public behavior only).
 - **Coverage Target**: What this test covers.
 
@@ -111,86 +139,111 @@ Each test table MUST have these columns:
 
 ### Coverage and Scope
 
-- MUST achieve 100% test coverage of all public APIs.
-- MUST test ONLY public functions, methods, and classes (no underscore
-  prefix).
+- MUST achieve 100% test coverage of all new or changed public APIs.
+- MUST test ONLY public functions, methods, and classes (no underscore prefix).
 - MUST NOT manipulate or validate any private/internal state.
-- MUST NOT reference private functions/methods/variables in test
-  specifications.
-- Private functions SHOULD achieve coverage naturally through public API
-  usage.
+- MUST NOT reference private functions/methods/variables in test specifications.
+- Private functions SHOULD achieve coverage naturally through public API usage.
 
 ### Test Design Principles
 
 - Tests MUST focus on observable behavior, not implementation details.
-- Tests SHOULD remain valid even if internal implementation is
-  completely refactored.
+- Tests SHOULD remain valid even if internal implementation is completely refactored.
 - MUST use "Given-When-Then" format for all test cases.
-- Similar behaviors with many scenarios SHOULD use property-based tests
-  (Hypothesis).
+- Similar behaviors with many scenarios SHOULD use property-based tests.
 - SHOULD avoid excessive test case overlap in assertions.
 
 ### Idiomatic Testing
 
-MUST test dunder methods idiomatically, MUST NOT call them directly:
-
-- `__init__`/`__post_init__`: Test via class instantiation.
-- `__enter__`/`__exit__`: Test via `with` statements.
-- `__call__`: Test by calling the object as a function.
-- Other dunder methods: Use their natural Python idiom.
+MUST test language idioms using their natural syntax, not by calling special methods directly. Consult the project test guide for language-specific rules.
 
 ### Test Organization
 
-- MUST group tests by module (e.g., `test_<module_name>.py`).
+- MUST group tests by module.
 - MUST organize within test file by public API (class/function).
-- MUST group property-based tests with their target object IN THE SAME
-  test class.
-  - BAD: Separate `TestWorkTaskProperties` class.
-  - GOOD: Property-based tests in `TestWorkTask` with PBT-xxx test IDs.
+- MUST group property-based tests with their target object IN THE SAME test class.
+  - BAD: Separate properties class (e.g., `TestParserProperties`).
+  - GOOD: Property-based tests in the same class with PBT-xxx test IDs.
 - MUST group edge cases with their target function/class.
-- SHOULD follow progression: basic cases, variations, edge cases,
-  property-based tests.
+- SHOULD follow progression: basic cases, variations, edge cases, property-based tests.
+
+## Integration Test Specifications
+
+When the user requests integration specs or targets an `integration/` directory, generate cross-boundary scenario specifications instead of per-module API coverage. Integration specs validate that assembled subsystems work together — they are orthogonal to unit specs, not a replacement.
+
+### Discover existing dimensions
+
+Before proposing any changes, MUST read the existing integration test infrastructure to discover:
+
+- The current dimension definitions (enumerations or equivalent) and their members
+- Cross-dimension constraints (which combinations are structurally invalid)
+- Permanent exclusions (documented limitations that will not be fixed) vs temporary expected failures (bugs with open issues)
+- The scenario model, builder, and invocation dispatcher
+- Any expected-failure conditions in the test files and the issues they reference
+
+### Extending vs adding dimensions
+
+New work SHOULD extend existing dimensions with new members rather than adding new dimensions. A new dimension MUST only be added when the feature or subsystem being tested is genuinely orthogonal to all existing dimensions — i.e., it cannot be expressed as a new member of any existing dimension. When in doubt, prefer a new member over a new dimension; the combinatorial explosion of pairwise coverage grows with each new dimension.
+
+When adding a new member to an existing dimension:
+
+1. Add the member to the dimension definition
+2. Update the filter function if the new member has cross-dimension constraints
+3. Update the builder to resolve the new member to its concrete runtime value
+4. Update the invocation dispatcher if the new member changes how results are produced or asserted
+5. The pairwise covering array and exploration strategy automatically pick up the new member
+
+### Spec generation
+
+- **Scope**: Integration specs focus on interactions between components, not exhaustive coverage of a single module's API surface
+- **Dimensions column**: Integration spec tables include a "Dimensions" column listing which scenario axes are exercised (e.g., "D1=COROUTINE, D2=DEFAULT, D3=NONE")
+- **Pairwise coverage**: Scenarios are generated combinatorially via pairwise covering arrays, not enumerated manually — the spec describes the dimensions and constraints, not individual test cases
+- **Stochastic exploration**: A random strategy draws from per-dimension value sets with conditional filtering, providing coverage beyond the deterministic pairwise array
+- **Table format**: Use the same table columns as unit specs, but replace "Coverage Target" with "Dimensions" to indicate which scenario axes each test exercises
+
+Consult the language-specific test guide for implementation details (libraries, data structures, parametrization mechanisms).
 
 ## Good and Bad Examples
+
+See the project test guide for language-specific good/bad examples.
 
 ### Good Examples
 
 | Test Suite | Test ID | Given | When | Then | Coverage Target |
 |------------|---------|-------|------|------|-----------------|
-| TestRangeParser | RP-001 | A valid UCSC range string | `RangeParser.parse()` is called | A ParsedRange with correct chrom, start, end is returned | Basic parsing |
-| TestRangeParser | RP-004 | A range with 1-based closed coordinates | Range is converted via `to_zero_based_half_open()` | Coordinates are adjusted correctly | Coordinate conversion |
-| TestRangeParser | PBT-001 | Any range with valid chrom, start < end | Parse then format back to string then re-parse | Original ParsedRange equals re-parsed result in all public attributes | Parse round-trip property |
+| TestParser | PA-001 | Valid parameters for a Parser | Parser is instantiated | A "parser-created" event is emitted | Instantiation and event emission |
+| TestParser | PA-004 | A Parser is used as a context manager | Context is entered using the language's context manager syntax | Context manager provides access to parser execution | Context manager entry |
+| TestParser | PBT-001 | Any Parser with valid serializable data | Serialize then deserialize | Original object equals deserialized object in all public attributes | Serialization round-trip property |
 
 ### Bad Examples
 
 | Test Suite | Test ID | Given | When | Then | Coverage Target |
 |------------|---------|-------|------|------|-----------------|
-| TestRangeParser | BAD-001 | _cached_result is set to None | `__post_init__` is called | Internal cache is empty | Private state |
-| TestRangeParser | BAD-002 | _normalize is called with args | _split_range strips prefix | Args are modified | Private function |
-| TestRangeParser | BAD-003 | A RangeParser | __init__() is called directly | Returns parser instance | Calling dunder directly |
-| TestRangeParserProperties | PBT-001 | Any range with valid data | Parse then re-parse | Original equals re-parsed | Separate property test class |
+| TestParser | BAD-001 | _internal_state is set to None | Constructor hook is called directly | Field is None | Private state |
+| TestParser | BAD-002 | _dispatch is called with args | _resolve strips self parameter | Args are modified | Private function |
+| TestParser | BAD-003 | A Parser | Context manager entry method is called directly | Returns run method | Calling special method directly |
+| TestParserProperties | PBT-001 | Any Parser with valid data | Serialize then deserialize | Original equals deserialized | Separate property test class |
 
 ## Validation Checklist
 
-A test specification is valid if and only if:
+A test plan is valid if and only if:
 
 - Describes only publicly observable behavior.
-- Uses natural Python idioms (with statements, instantiation, etc.).
+- Uses natural language idioms (context managers, instantiation, etc.).
 - Groups related tests together (by module, then by API).
 - Includes edge cases with normal cases.
 - Has clear Given-When-Then structure.
 - Would remain valid even if all private code is rewritten.
 - Focuses on "what" not "how".
+- Accounts for existing test coverage (no unnecessary duplication).
+- Flags stale tests for removal.
 
 ## Key Rules
 
-- **Ignore existing tests**: MUST NOT consider any existing test files
-  when creating test specifications.
+- **Evaluate existing tests**: MUST read existing test files and account for current coverage before planning new tests.
 - **Public APIs only**: No underscore-prefixed symbols in test specs.
 - **Behavior not implementation**: Tests validate what, not how.
-- **Idiomatic testing**: Use Python idioms, not direct dunder calls.
-- **Comprehensive coverage**: 100% of public APIs must be covered.
-- **Clear organization**: Group by module, class/function, test
-  progression.
-- **Separate files**: One spec file per Python module in `specs/`
-  directory.
+- **Idiomatic testing**: Use language idioms, not direct special method calls.
+- **Comprehensive coverage**: 100% of new or changed public APIs must be covered.
+- **Clear organization**: Group by module, class/function, test progression.
+- **No spec files**: The test plan is an internal planning artifact, not a physical document.

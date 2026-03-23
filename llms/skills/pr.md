@@ -1,184 +1,162 @@
 ---
 name: pr
 description: >
-  Create a branch and draft PR from a GitHub issue. Use this skill whenever the
-  user says "/pr <number>", "create a PR for issue #N", "start working on #N",
-  or similar. Takes an issue number as argument, fetches the issue, creates a
-  branch, and opens a draft PR with an implementation plan. Also use this skill
-  to update an existing draft PR when the implementation plan changes or code
-  is committed.
+  Review committed changes on a branch and create a draft pull request. Use
+  this skill whenever the user says "/pr <number>", "create a PR for #N",
+  "open a PR", or similar. Accepts an issue number, reviews the branch diff,
+  and drafts a PR description based on what was actually implemented.
 ---
 
-The key words MUST, MUST NOT, SHALL, SHALL NOT, SHOULD, SHOULD NOT,
-REQUIRED, RECOMMENDED, MAY, and OPTIONAL in this document are to be
-interpreted as described in RFC 2119.
+The key words MUST, MUST NOT, SHALL, SHALL NOT, SHOULD, SHOULD NOT, REQUIRED, RECOMMENDED, MAY, and OPTIONAL in this document are to be interpreted as described in RFC 2119.
 
 # PR Skill
 
-Create a branch and draft pull request from an existing GitHub issue. The PR
-serves as the implementation plan — no code is written yet.
-
-## GitHub Interaction
-
-All interactions with GitHub repository artifacts (issues, pull requests, labels, comments, etc.) MUST use the GitHub MCP server tools as the primary interface. The `gh` CLI commands shown in this document serve as a fallback — they MUST only be used when the MCP server is unavailable or a required operation has no MCP equivalent.
+Review committed source and test changes on a branch and create a draft pull request with a description based on what was actually implemented.
 
 ## Pipeline Context
 
-This skill is part of the development workflow pipeline:
-`/issue` → `/pr` → `/implement` → `/commit` → `/pr` (update).
-This skill is the **second** stage, and is also invoked at the end to
-update the PR after implementation.
+This skill is part of the development workflow pipeline: `/issue` → `/implement` → `/test` → `/commit` → `/pr`. This skill is the **fifth** (final) stage. After review feedback is received, the user re-enters the loop at the implement skill to address comments, then optionally re-runs the test and commit skills before re-running the PR skill to update the description.
 
 ## Arguments
 
-An issue number MUST be provided as the sole argument (e.g., `/pr 96`).
+An issue number MUST be provided as the sole argument (e.g., `/pr 103`). The issue number is used to identify the branch (`<number>-<kebab-case-summary>`) and to link the PR via `Closes #<number>`.
 
 ## Workflow
 
-### 1. Fetch the issue
+### TL;DR
+
+1. Resolve target repository
+2. Identify the issue and branch
+3. Review the branch diff
+4. Draft the PR description
+5. Show draft for approval
+6. Push and create the draft PR
+7. Return the PR URL
+
+### 1. Resolve target repository
 
 ```bash
-gh issue view <number>
+gh repo view --json isFork,parent
 ```
 
-Read the issue title, body, and labels. If the issue does not exist or is
-closed, inform the user and stop.
+If `isFork` is `true`, extract `parent.owner.login` and `parent.name` to form the upstream repo identifier (`<owner>/<name>`). This upstream identifier becomes the **target repo** for all subsequent `gh` commands that reference issues or pull requests. The default PR base becomes the upstream repo's default branch and the PR will be opened against the upstream repo. If the repo is not a fork, the target repo is the current repo and no `--repo` flag is needed.
 
-### 2. Generate a branch name
+**User override:** If the user explicitly asks to target the fork — by saying "fork", "on the fork", "fork #N", or similar — the target repo MUST be set to the current (fork) repo instead of upstream. The user's explicit intent always takes precedence.
 
-Derive a short, descriptive branch name from the issue number and title:
+All `gh` commands in subsequent steps that reference issues or PRs MUST include `--repo <target>` when the target repo differs from the current repo.
 
-```
-<number>-<kebab-case-summary>
-```
+### 2. Identify the issue and branch
 
-Examples:
-- `96-fix-intersects-predicate-strand`
-- `102-add-nearest-k-parameter`
-
-The branch name MUST be under 50 characters. Filler words SHOULD be
-stripped.
-
-### 3. Create and checkout the branch
+Fetch the issue:
 
 ```bash
-git checkout -b <branch-name> main
+gh issue view <number> --repo <target>
 ```
 
-If the branch already exists, the user MUST be asked whether to switch to it
-or recreate it.
+Read the issue title, body, and labels. If the issue does not exist or is closed, inform the user and stop.
+
+Check out the branch. The branch name follows the convention `<number>-<kebab-case-summary>`:
+
+```bash
+git fetch origin
+git checkout <branch>
+```
+
+If the branch does not exist, inform the user that the implement skill must be run first and stop.
+
+Check for an existing PR:
+
+```bash
+gh pr list --repo <target> --search "Closes #<number>" --json number --jq '.[0].number'
+```
+
+If a PR already exists, this is an update — the description will be edited rather than a new PR created.
+
+### 3. Review the branch diff
+
+Determine the base and diff against it:
+
+```bash
+git merge-base HEAD $(git rev-parse --abbrev-ref @{upstream} 2>/dev/null || echo main)
+git log <merge-base>..HEAD --oneline
+git diff <merge-base>..HEAD
+git diff <merge-base>..HEAD --stat
+```
+
+Analyze all committed source and test changes. Understand what was implemented, what was refactored, what tests were added or modified.
 
 ### 4. Draft the PR description
 
-All PR description prose MUST be written in the imperative mood — "Add
-retry logic" not "Adds retry logic" or "Added retry logic". This applies
-to the title, summary, proposed changes, and implementation plan steps.
-The imperative mood MUST be maintained even when updating the description
-after work has been completed. Descriptions of the current state of the
-system are exempt and SHOULD use present tense — "The registry stores
-entries in memory" not "Store entries in memory".
+The PR title MUST match the associated issue title exactly with ` — Closes #<number>` appended to the end.
 
-Prose in PR descriptions MUST NOT be hard-wrapped at a fixed column width.
-Write each sentence or logical phrase as a single unwrapped line.
-Markdown renderers handle line wrapping automatically — manual line
-breaks inside paragraphs create unnecessary diffs and awkward rendering.
+All PR description prose MUST be written in the imperative mood — "Add retry logic" not "Adds retry logic" or "Added retry logic". This applies to the title, summary, and proposed changes. Descriptions of the current state of the system are exempt and SHOULD use present tense — "The registry stores entries in memory" not "Store entries in memory".
 
-The PR description MUST contain exactly four sections:
+Prose in PR descriptions MUST NOT be hard-wrapped at a fixed column width. Write each sentence or logical phrase as a single unwrapped line. Markdown renderers handle line wrapping automatically — manual line breaks inside paragraphs create unnecessary diffs and awkward rendering.
 
-**Summary** — A quick recap of the issue, the high-level approach, and any
-trade-offs worth noting. The summary MUST end with `Closes #<number>` to
-link the issue.
+The PR description MUST contain a **Summary** and **Proposed changes** section. A **Test cases** section MUST be included when the PR contains code changes; it MAY be omitted for PRs that only modify documentation, configuration, or other non-code files.
 
-**Proposed changes** — Subsections for each logical change. Design rationale
-and before/after code snippets SHOULD be included where useful.
+**Summary** — A recap of what was implemented, the high-level approach, and any trade-offs worth noting. The summary is based on the actual diff, not the issue body. The summary MUST end with `Closes #<number>` to link the issue.
 
-**Test cases** — The `/test` skill MUST be used to generate a
-Given-When-Then test case table for the affected modules. The table MUST be
-included in the PR description so reviewers can see expected behavior at a
-glance. The table format:
+**Proposed changes** — Subsections for each logical change, derived from the committed diff. Design rationale and before/after code snippets SHOULD be included where useful.
+
+**Test cases** (code changes only) — A Given-When-Then table summarizing the test coverage from committed test files. Read the test files and generate a table in this format:
 
 | Test Suite | Test ID | Given | When | Then | Coverage Target |
 |------------|---------|-------|------|------|-----------------|
-| `TestFoo` | FO-001 | A Foo with default config | `foo.bar()` is called | Returns None | Default behavior |
+| `TestParser` | PA-001 | A parser with default config | Empty input is processed | Returns an empty result | Default behavior |
 
-The first word of every plain-language table entry MUST be capitalized.
-Table entries MUST NOT end with punctuation (no trailing periods, commas,
-etc.). Code spans in entries (e.g., `` `foo.bar()` is called ``) are exempt
-from the capitalization rule.
-
-**Implementation plan** — Sequenced steps for the implementation,
-formatted as an ordered checkbox list. Test-first ordering SHOULD be
-preferred when applicable. Each step MUST describe a concrete output
-(writing code, tests, documentation, schema changes, etc.). Steps
-MUST NOT include running tests, linting, or other verification tasks
-— these are handled automatically by CI/CD. Example format:
-
-```markdown
-1. - [ ] Add `version` field to `Ack` in `worker.proto`; regenerate bindings
-2. - [ ] Write discovery-time version filter tests (VP-001 through VP-004)
-3. - [ ] Implement major-version filter in `proxy.py`
-```
-
-When code is committed and the PR description is updated to reflect
-the implemented state, completed steps MUST be checked off:
-
-```markdown
-1. - [x] Add `version` field to `Ack` in `worker.proto`; regenerate bindings
-2. - [x] Write discovery-time version filter tests (VP-001 through VP-004)
-3. - [ ] Implement major-version filter in `proxy.py`
-```
+The first word of every plain-language table entry MUST be capitalized. Table entries MUST NOT end with punctuation (no trailing periods, commas, etc.). Code spans in entries (e.g., `` `foo.bar()` is called ``) are exempt from the capitalization rule.
 
 ### 5. Show draft for approval
 
-The full PR (title, body, branch name) MUST be presented to the user. The
-PR MUST NOT be created until the user explicitly approves.
+The full PR (title, body, branch name) MUST be presented to the user. The PR MUST NOT be created until the user explicitly approves.
 
 ### 6. Push and create the draft PR
 
-GitHub requires at least one commit of difference between the base and head
-branches to create a PR. Since the branch has no code yet, an empty commit
-MUST be created as a placeholder (it can be rebased away when real work
-starts):
+Push the branch if not already pushed:
 
 ```bash
-git commit --allow-empty -m "chore: Open draft PR for #<number>"
 git push -u origin <branch-name>
+```
+
+**Creating a new PR:**
+
+A heredoc MUST be used for the body to avoid shell escaping issues:
+
+```bash
 gh pr create --draft --title "<title>" --body "$(cat <<'EOF'
 <body>
 EOF
 )"
 ```
 
-The PR MUST be created as a **draft** since no code has been written yet.
+When the repo is a fork (detected in step 1), add `--repo <upstream-owner>/<upstream-name>` so the PR is opened against the upstream repo.
+
+The PR MUST always be created as a **draft**. The user marks it ready for review when satisfied.
+
+After the PR is created, link the issue to the PR in the Development sidebar:
+
+```bash
+gh issue develop <issue-number> --repo <target> --branch <branch-name>
+```
+
+If the command is not available in the installed `gh` version, the `Closes #<number>` reference in the PR body serves as the fallback.
+
+**Updating an existing PR:**
+
+If a PR already exists (detected in step 2), update the description instead of creating a new PR:
+
+```bash
+gh pr edit <pr-number> --repo <target> --body "$(cat <<'EOF'
+<updated body>
+EOF
+)"
+```
+
+The `--repo <target>` flag MUST be included when the target repo differs from the current repo.
 
 ### 7. Return the PR URL
 
-The PR URL returned by `gh pr create` MUST be printed so the user can
-access it directly.
+The PR URL MUST be printed so the user can access it directly.
 
-The user SHOULD be prompted with the next pipeline step: "Ready to
-implement? Run `/implement <number>` to start coding against this
-plan."
-
-## Keeping the PR consistent
-
-The PR description is a living document. It MUST be re-evaluated and updated
-when:
-
-- **The user requests changes to the proposed implementation plan.** The
-  test cases table MUST be regenerated to reflect the revised plan before
-  showing the updated draft for approval.
-- **Code is committed to the branch.** This skill MUST be re-run against
-  the actual code being pushed: update the summary, proposed changes, and
-  test cases to match what was implemented rather than what was planned. Use
-  `gh pr edit` to update the existing PR body:
-
-  ```bash
-  gh pr edit <number> --body "$(cat <<'EOF'
-  <updated body>
-  EOF
-  )"
-  ```
-
-The PR description MUST always accurately reflect the current state —
-planned or implemented — and MUST NOT drift from reality.
+The user MUST be informed that the draft PR is created and can be marked ready for review via `gh pr ready <number>`. Note that if review feedback is received, they can re-enter the implementation loop by running the implement skill again.
