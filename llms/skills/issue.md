@@ -7,26 +7,29 @@ description: >
   issue is drafted interactively from the conversation.
 ---
 
-The key words MUST, MUST NOT, SHALL, SHALL NOT, SHOULD, SHOULD NOT,
-REQUIRED, RECOMMENDED, MAY, and OPTIONAL in this document are to be
-interpreted as described in RFC 2119.
+The key words MUST, MUST NOT, SHALL, SHALL NOT, SHOULD, SHOULD NOT, REQUIRED, RECOMMENDED, MAY, and OPTIONAL in this document are to be interpreted as described in RFC 2119.
 
 # Issue Skill
 
-Create a well-structured GitHub issue, either from a prepared `.issue.md`
-file or interactively from conversation context.
-
-## GitHub Interaction
-
-All interactions with GitHub repository artifacts (issues, pull requests, labels, comments, etc.) MUST use the GitHub MCP server tools as the primary interface. The `gh` CLI commands shown in this document serve as a fallback — they MUST only be used when the MCP server is unavailable or a required operation has no MCP equivalent.
+Create a well-structured GitHub issue, either from a prepared `.issue.md` file or interactively from conversation context.
 
 ## Pipeline Context
 
-This skill is part of the development workflow pipeline:
-`/issue` → `/pr` → `/implement` → `/commit` → `/pr` (update).
-This skill is the **first** stage.
+This skill is part of the development workflow pipeline: `/issue` → `/implement` → `/test` → `/commit` → `/pr`. This skill is the **first** stage. The implement, test, and commit steps are iterative — they can be invoked multiple times for a given issue.
 
 ## Workflow
+
+### TL;DR
+
+1. Determine the source
+2. Resolve target repository
+3. Draft interactively
+4. Suggest labels
+5. Show draft for approval
+6. Push the issue
+7. Clean up `.issue.md` (if applicable)
+8. Return the issue URL
+9. Prompt the user to move onto the implement step
 
 ### 1. Determine the source
 
@@ -36,43 +39,45 @@ Check whether `.issue.md` exists in the repository root:
 test -f .issue.md && echo "exists" || echo "missing"
 ```
 
-- **If `.issue.md` exists** — read it. The first `# heading` MUST be parsed
-  as the issue title and the remaining content as the body. Proceed to
-  step 3.
-- **If `.issue.md` does not exist** — draft the issue interactively
-  (step 2).
+- **If `.issue.md` exists** — read it. The first `# heading` MUST be parsed as the issue title and the remaining content as the body. Proceed to step 3.
+- **If `.issue.md` does not exist** — draft the issue interactively (step 2).
 
-### 2. Draft interactively
+### 2. Resolve target repository
 
-Based on conversation context, determine the issue type and draft using the
-matching template. All templates share the same structure — only the field
-names and auto-label differ.
+```bash
+gh repo view --json isFork,parent
+```
 
-Issue titles MUST be written in the imperative mood. Issue body prose
-SHOULD use the imperative mood for proposed actions and present tense
-for descriptions of current system state.
+If `isFork` is `true`, extract `parent.owner.login` and `parent.name` to form the upstream repo identifier (`<owner>/<name>`). This upstream identifier becomes the **target repo** for all subsequent `gh` commands that reference issues or pull requests. If the repo is not a fork, the target repo is the current repo and no `--repo` flag is needed.
 
-Prose in issue bodies MUST NOT be hard-wrapped at a fixed column width.
-Write each sentence or logical phrase as a single unwrapped line.
-Markdown renderers handle line wrapping automatically — manual line
-breaks inside paragraphs create unnecessary diffs and awkward rendering.
+**User override:** If the user explicitly asks to target the fork — by saying "fork", "on the fork", "fork #N", or similar — the target repo MUST be set to the current (fork) repo instead of upstream. The user's explicit intent always takes precedence.
+
+All `gh` commands in subsequent steps that reference issues or PRs MUST include `--repo <target>` when the target repo differs from the current repo.
+
+### 3. Draft interactively
+
+Based on conversation context, determine the issue type and draft using the matching template. All templates share the same structure — only the field names and auto-label differ.
+
+Issue titles MUST be written in the imperative mood. Issue body prose SHOULD use the imperative mood for proposed actions and present tense for descriptions of current system state.
+
+Prose in issue bodies MUST NOT be hard-wrapped at a fixed column width. Write each sentence or logical phrase as a single unwrapped line. Markdown renderers handle line wrapping automatically — manual line breaks inside paragraphs create unnecessary diffs and awkward rendering.
 
 **Bug** (label: `bug`):
 
 ```markdown
 # <title>
 
-## Summary
+## Description
 
 <What is the bug? Steps to reproduce if applicable.>
+
+## Expected behavior
+
+<What did you expect to happen?>
 
 ## Root cause
 
 <What is causing the bug? Include relevant code snippets.>
-
-## Affected code
-
-<Which files, modules, or components are affected?>
 ```
 
 **Feature** (label: `feature`):
@@ -80,7 +85,7 @@ breaks inside paragraphs create unnecessary diffs and awkward rendering.
 ```markdown
 # <title>
 
-## Summary
+## Description
 
 <What is the feature? Describe the desired behavior.>
 
@@ -88,9 +93,9 @@ breaks inside paragraphs create unnecessary diffs and awkward rendering.
 
 <Why is this feature needed? What problem does it solve?>
 
-## Affected code
+## Expected outcome
 
-<Which files, modules, or components would be affected?>
+<What should be true when this is done?>
 ```
 
 **Refactor** (label: `refactor`):
@@ -98,7 +103,7 @@ breaks inside paragraphs create unnecessary diffs and awkward rendering.
 ```markdown
 # <title>
 
-## Summary
+## Description
 
 <What should be restructured and what does the end state look like?>
 
@@ -106,9 +111,9 @@ breaks inside paragraphs create unnecessary diffs and awkward rendering.
 
 <Why is this restructuring needed?>
 
-## Affected code
+## Expected outcome
 
-<Which files, modules, or components are affected?>
+<What should be true when this is done?>
 ```
 
 **Test** (label: `test`):
@@ -116,7 +121,7 @@ breaks inside paragraphs create unnecessary diffs and awkward rendering.
 ```markdown
 # <title>
 
-## Summary
+## Description
 
 <What needs to be tested or what test infrastructure is needed?>
 
@@ -124,9 +129,9 @@ breaks inside paragraphs create unnecessary diffs and awkward rendering.
 
 <Why is this test work needed? What gap does it fill?>
 
-## Affected code
+## Expected outcome
 
-<Which files, modules, or components are affected?>
+<What should be true when this is done?>
 ```
 
 **CI/CD** (label: `cicd`):
@@ -134,7 +139,7 @@ breaks inside paragraphs create unnecessary diffs and awkward rendering.
 ```markdown
 # <title>
 
-## Summary
+## Description
 
 <What CI/CD change is needed?>
 
@@ -142,9 +147,9 @@ breaks inside paragraphs create unnecessary diffs and awkward rendering.
 
 <Why is this change needed? What does it improve?>
 
-## Affected code
+## Expected outcome
 
-<Which workflows, pipelines, or config files are affected?>
+<What should be true when this is done?>
 ```
 
 **Build** (label: `build`):
@@ -152,7 +157,7 @@ breaks inside paragraphs create unnecessary diffs and awkward rendering.
 ```markdown
 # <title>
 
-## Summary
+## Description
 
 <What build system or dependency change is needed?>
 
@@ -160,19 +165,20 @@ breaks inside paragraphs create unnecessary diffs and awkward rendering.
 
 <Why is this change needed?>
 
-## Affected code
+## Expected outcome
 
-<Which build files, configs, or dependencies are affected?>
+<What should be true when this is done?>
 ```
 
-The **Affected code** section MAY be omitted if it is not relevant.
+For issue types backed by a GitHub form template (Bug, Feature), the **Expected outcome** / **Expected behavior** section is required by the form and MUST be included. For fallback-only templates (Refactor, Test, CI/CD, Build), the section MAY be omitted if it is not relevant.
+
+When the project defines a GitHub issue form template in `.github/ISSUE_TEMPLATE/` that matches the issue type (e.g., `bug.yaml` for bugs, `feature.yaml` for features), the skill MUST mirror the form template's section structure instead of using the built-in Markdown template above. The built-in Markdown templates serve as a fallback for issue types that do not have a corresponding GitHub form template.
 
 The draft MUST be shown to the user and iterated until they approve.
 
-### 3. Suggest labels
+### 4. Suggest labels
 
-The issue content MUST be analyzed and one or more labels suggested from
-the repository's label set:
+The issue content MUST be analyzed and one or more labels suggested from the repository's label set:
 
 | Label | Use when |
 |-------|----------|
@@ -183,45 +189,41 @@ the repository's label set:
 | `cicd` | CI/CD pipeline changes |
 | `build` | Build system or dependency changes |
 
-Each label SHOULD only be applied when the issue's **primary focus** matches
-that category. For example, a bug fix will naturally include tests as part
-of its implementation — that MUST NOT warrant the `test` label. The `test`
-label is reserved for issues whose core purpose is adding, fixing, or
-improving tests or test infrastructure.
+Each label SHOULD only be applied when the issue's **primary focus** matches that category. For example, a bug fix will naturally include tests as part of its implementation — that MUST NOT warrant the `test` label. The `test` label is reserved for issues whose core purpose is adding, fixing, or improving tests or test infrastructure.
 
 The suggested labels MUST be shown alongside the draft for user approval.
 
-### 4. Show draft for approval
+### 5. Show draft for approval
 
-The full issue (title, body, labels) MUST be presented to the user. The
-issue MUST NOT be pushed until the user explicitly approves.
+The full issue (title, body, labels) MUST be presented to the user. The issue MUST NOT be pushed until the user explicitly approves.
 
-### 5. Push the issue
+### 6. Push the issue
 
 A heredoc MUST be used for the body to avoid shell escaping issues:
 
 ```bash
-gh issue create --title "<title>" --label "<label1>,<label2>" --body "$(cat <<'EOF'
+gh issue create --repo <target> --title "<title>" --label "<label1>,<label2>" --body "$(cat <<'EOF'
 <body>
 EOF
 )"
 ```
 
-The `--assignee` flag MUST NOT be used — issues are not auto-assigned.
+The `--repo <target>` flag MUST be included when the target repo differs from the current repo (as resolved in step 2). The `--assignee` flag MUST NOT be used — issues are not auto-assigned.
 
-### 6. Clean up `.issue.md`
+### 7. Clean up `.issue.md`
 
-If the issue was created from `.issue.md`, the user MUST be asked whether to
-delete the file now that the issue has been pushed. If they agree:
+If the issue was created from `.issue.md`, the user MUST be asked whether to delete the file now that the issue has been pushed. If they agree:
 
 ```bash
 rm .issue.md
 ```
 
-### 7. Return the issue URL
+### 8. Return the issue URL
 
-The issue URL returned by `gh issue create` MUST be printed so the user can
-access it directly.
+The issue URL returned by `gh issue create` MUST be printed so the user can access it directly.
 
-The user SHOULD be prompted with the next pipeline step: "Ready to plan
-this? Run `/pr <number>` to create a branch and draft PR."
+The user SHOULD be prompted with the next pipeline step: "Ready to implement? Run `/implement <number>` to create a branch and start planning."
+
+### 9. Prompt the user to move onto the implement step
+
+The user MUST be prompted with the next pipeline step: "Ready to implement? Run `/implement <number>` to create a branch and start planning." When working from a fork, note that `<number>` refers to the issue on the upstream repo. DO NOT proceed on your own.

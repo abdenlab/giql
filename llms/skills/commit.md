@@ -11,23 +11,27 @@ description: >
   unrelated changes into a single commit.
 ---
 
-The key words MUST, MUST NOT, SHALL, SHALL NOT, SHOULD, SHOULD NOT,
-REQUIRED, RECOMMENDED, MAY, and OPTIONAL in this document are to be
-interpreted as described in RFC 2119.
+The key words MUST, MUST NOT, SHALL, SHALL NOT, SHOULD, SHOULD NOT, REQUIRED, RECOMMENDED, MAY, and OPTIONAL in this document are to be interpreted as described in RFC 2119.
 
 # Commit Skill
 
-This skill transforms a messy working tree into a clean sequence of atomic,
-well-described commits on a staging branch. It MUST NOT touch the original
-branch until the user is satisfied.
+This skill transforms a messy working tree into a clean sequence of atomic, well-described commits on a staging branch. It MUST NOT touch the original branch until the user is satisfied.
 
 ## Pipeline Context
 
-This skill is part of the development workflow pipeline:
-`/issue` → `/pr` → `/implement` → `/commit` → `/pr` (update).
-This skill is the **fourth** stage.
+This skill is part of the development workflow pipeline: `/issue` → `/implement` → `/test` → `/commit` → `/pr`. This skill is the **fourth** stage. The implement, test, and commit steps are iterative — they can be invoked multiple times for a given issue.
 
 ## Workflow
+
+### TL;DR
+
+1. Verify git state
+2. Create a staging branch
+3. Analyze the full diff
+4. Plan the commits
+5. Stage and commit sequentially
+6. Review and present
+7. Prompt the user to move onto the PR step
 
 ### 1. Verify git state
 
@@ -38,10 +42,7 @@ git diff HEAD
 
 If the working tree is clean (nothing to commit), tell the user and stop.
 
-Untracked files SHOULD be checked for new source files, config files, etc.
-The user MUST be asked before including untracked files unless their
-inclusion is obvious. Build artifacts, cache directories, and anything in
-.gitignore MUST be ignored.
+Untracked files SHOULD be checked for new source files, config files, etc. The user MUST be asked before including untracked files unless their inclusion is obvious. Build artifacts, cache directories, and anything in .gitignore MUST be ignored.
 
 ### 2. Create a staging branch
 
@@ -57,8 +58,7 @@ Create and switch to a staging branch:
 git checkout -b {current-branch-name}-staging
 ```
 
-If a staging branch already exists from a previous run, the user MUST be
-asked whether to delete and recreate it or continue from where it left off.
+If a staging branch already exists from a previous run, the user MUST be asked whether to delete and recreate it or continue from where it left off.
 
 ### 3. Analyze the full diff
 
@@ -68,13 +68,11 @@ git diff HEAD --name-only
 ```
 
 The diff MUST be read carefully. For each changed file, note:
-- What kind of change is it (new functionality, bug fix, docs, style/formatting,
-  refactoring, performance, tests, build/tooling, CI, reversion)?
+- What kind of change is it (new functionality, bug fix, docs, style/formatting, refactoring, performance, tests, build/tooling, CI, reversion)?
 - Which other changed files is it logically related to?
 - Does it mix concerns that should be separated?
 
-A commit plan MUST be built before touching anything. The goal is a sequence
-of commits where each one represents exactly one logical change.
+A commit plan MUST be built before touching anything. The goal is a sequence of commits where each one represents exactly one logical change.
 
 ### 4. Plan the commits
 
@@ -91,13 +89,9 @@ Group files and hunks into commits. The categories to use as a guide:
 - **CI** — workflow files, pipeline config
 - **Reversions** — reverting prior work, with clear reference to what and why
 
-Mixed changes in a single file are common and MUST be handled with partial
-staging (see below). Splitting a file's changes across commits is exactly
-the right thing to do when the changes are of different kinds.
+Mixed changes in a single file are common and MUST be handled with partial staging (see below). Splitting a file's changes across commits is exactly the right thing to do when the changes are of different kinds.
 
-Logical ordering MUST be considered: if commit B depends on commit A, A
-comes first. Generally: refactoring before feature work, build changes
-before code that uses them, tests after (or alongside) the code they test.
+Logical ordering MUST be considered: if commit B depends on commit A, A comes first. Generally: refactoring before feature work, build changes before code that uses them, tests after (or alongside) the code they test.
 
 ### 5. Stage and commit sequentially
 
@@ -110,9 +104,7 @@ git add path/to/file.py
 
 **Staging specific hunks from a file** (when a file mixes concerns):
 
-Use `git add -p path/to/file.py` in interactive mode to select only the relevant
-hunks. Since this skill runs non-interactively, use the `-e` (edit) hunk approach
-or use patch files instead:
+Use `git add -p path/to/file.py` in interactive mode to select only the relevant hunks. Since this skill runs non-interactively, use the `-e` (edit) hunk approach or use patch files instead:
 
 ```bash
 # Generate a patch for just the relevant hunks, then apply selectively
@@ -132,8 +124,7 @@ After staging, the staged diff MUST be verified before committing:
 git diff --cached
 ```
 
-Then commit. The message MUST be written to a temp file to avoid shell
-escaping issues:
+Then commit. The message MUST be written to a temp file to avoid shell escaping issues:
 
 ```bash
 cat > /tmp/commit_msg.txt << 'EOF'
@@ -156,10 +147,7 @@ After all commits:
 git log {original-branch}..HEAD --oneline
 ```
 
-The resulting commit list MUST be shown to the user for approval. If they
-want changes — different grouping, reworded messages, splitting or
-squashing — use `git rebase -i HEAD~N` on the staging branch to make
-adjustments.
+The resulting commit list MUST be shown to the user for approval. If they want changes — different grouping, reworded messages, splitting or squashing — use `git rebase -i HEAD~N` on the staging branch to make adjustments.
 
 When the user is satisfied, remind them they can merge back:
 
@@ -169,14 +157,13 @@ git merge --ff-only {original-branch}-staging
 git branch -d {original-branch}-staging
 ```
 
-Or if they prefer to review as a PR first, they can push the staging branch
-and open a pull request against the original branch.
-
-If the current branch is associated with a PR, the user SHOULD be
-prompted with the next pipeline step: "Ready to update the PR? Run
-`/pr <number>` to sync the PR description with the committed changes."
+Or if they prefer to review as a PR first, they can push the staging branch and open a pull request against the original branch.
 
 ---
+
+### 7. Prompt the user to move onto the PR step
+
+The user MUST be prompted with the next pipeline step: "Ready to create the PR? Run `/pr <number>` to review the changes and open a draft pull request." DO NOT proceed on your own.
 
 ## Commit Message Style Guide
 
@@ -192,8 +179,7 @@ Every commit message MUST follow these rules.
 <footer>
 ```
 
-The subject is REQUIRED. Body and footer are OPTIONAL but RECOMMENDED for
-anything non-trivial.
+The subject is REQUIRED. Body and footer are OPTIONAL but RECOMMENDED for anything non-trivial.
 
 ### Subject line
 
@@ -216,10 +202,9 @@ anything non-trivial.
 
 ### Footer
 
-- Issue references: Fixes #42, Closes #38, References #100
-- Breaking changes: BREAKING CHANGE: description of the break
-- Signed-off-by if the project uses DCO: Signed-off-by: Name <email>
 - Co-author lines MUST NOT be added
+- Issue references — e.g. "Fixes #42", "Closes #38", "References #100", etc. — MUST NOT be added
+- Breaking changes: BREAKING CHANGE: description of the break
 
 ### What to avoid
 
@@ -263,21 +248,12 @@ the whole file and added a test
 
 ## Edge Cases
 
-**Untracked files:** The user MUST be asked before staging new files that
-are not obviously part of the work. Files that MAY be local scratch work
-MUST NOT be automatically added.
+**Untracked files:** The user MUST be asked before staging new files that are not obviously part of the work. Files that MAY be local scratch work MUST NOT be automatically added.
 
-**Binary files:** Binary files MUST be noted explicitly and the user MUST be
-asked whether to include them.
+**Binary files:** Binary files MUST be noted explicitly and the user MUST be asked whether to include them.
 
-**Large diffs:** For very large changesets, the commit plan MUST be narrated
-to the user before executing and confirmation MUST be obtained.
+**Large diffs:** For very large changesets, the commit plan MUST be narrated to the user before executing and confirmation MUST be obtained.
 
-**Merge conflicts or unusual repo state:** Execution MUST stop and the
-situation MUST be explained rather than worked around. A confused repo state
-needs human judgment.
+**Merge conflicts or unusual repo state:** Execution MUST stop and the situation MUST be explained rather than worked around. A confused repo state needs human judgment.
 
-**Already-staged changes:** If the user has already staged some changes with
-git add, those MUST be incorporated into the plan. Already-staged changes
-MUST NOT be blindly unstaged. `git diff --cached` MUST be run first to see
-what is already staged.
+**Already-staged changes:** If the user has already staged some changes with git add, those MUST be incorporated into the plan. Already-staged changes MUST NOT be blindly unstaged. `git diff --cached` MUST be run first to see what is already staged.
