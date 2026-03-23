@@ -9,7 +9,7 @@ SECRET="pypi-token"
 ARGS=()
 while [[ "$#" -gt 0 ]]; do
     case $1 in
-        -s|--source) 
+        -s|--source)
             # Set source directory
             if [[ -z "$2" ]]; then
                 echo "Error: --source requires a value."
@@ -31,8 +31,11 @@ echo "Publishing artifacts in '$SOURCE' directory..."
 # Parse arguments
 case ${#ARGS[@]} in
     0)
-        # Attempt to retrieve token from default keychain
-        if command -v ks &> /dev/null; then
+        # Check for token from environment variable first
+        if [[ -n "${PYPI_TOKEN:-}" ]]; then
+            echo "Publishing with token from environment..."
+            TOKEN="$PYPI_TOKEN"
+        elif command -v ks &> /dev/null; then
             if [[ -n $(ks -k $KEYCHAIN ls | grep "\b$SECRET\b") ]]; then
                 echo "Publishing with token from keychain..."
                 TOKEN=$(ks -k $KEYCHAIN show $SECRET)

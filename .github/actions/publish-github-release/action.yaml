@@ -10,13 +10,13 @@ runs:
   using: composite
   steps:
     - name: Download distribution artifacts
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
       with:
         name: dist-${{ inputs.version }}
         path: dist-${{ inputs.version }}/
 
     - name: Sign the artifacts with Sigstore
-      uses: sigstore/gh-action-sigstore-python@v3.0.0
+      uses: sigstore/gh-action-sigstore-python@f514d46b907ebcd5bedc05145c03b69c1edd8b46 # v3.0.0
       with:
         inputs: ./dist-${{ inputs.version }}/*.tar.gz ./dist-${{ inputs.version }}/*.whl
 
@@ -24,19 +24,20 @@ runs:
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
+        VERSION: ${{ inputs.version }}
       run: |
-        if [[ "${{ inputs.version }}" == *rc* ]]; then
-          prerelease_flag="--prerelease"
-        else
-          prerelease_flag=""
+        args=()
+        if [[ "$VERSION" == *rc* ]]; then
+          args+=(--prerelease)
         fi
-        gh release create ${{ inputs.version }} --verify-tag \
-          --repo ${{ github.repository }} \
+        gh release create "$VERSION" --verify-tag \
+          --repo "${{ github.repository }}" \
           --generate-notes \
-          $prerelease_flag
- 
+          "${args[@]}"
+
     - name: Upload artifact signatures to GitHub release
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
-      run: gh release upload ${{ inputs.version }} dist-${{ inputs.version }}/** --repo ${{ github.repository }}
+        VERSION: ${{ inputs.version }}
+      run: gh release upload "$VERSION" dist-"${VERSION}"/** --repo "${{ github.repository }}"

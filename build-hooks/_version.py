@@ -3,14 +3,16 @@ from __future__ import annotations
 import enum
 import functools
 import re
-from typing import TYPE_CHECKING
-from typing import Callable
-from typing import Generic
-from typing import MutableSequence
-from typing import Optional
-from typing import Type
-from typing import TypeVar
-from typing import overload
+from typing import (
+    TYPE_CHECKING,
+    Callable,
+    Generic,
+    MutableSequence,
+    Optional,
+    Type,
+    TypeVar,
+    overload,
+)
 
 try:
     from typing import Self
@@ -245,6 +247,8 @@ class PreReleaseVersionSegment:
             return False
         elif not isinstance(other, PreReleaseVersionSegment):
             return super().__lt__(other)
+        elif not other.__PreReleaseVersionSegment_value__:
+            return True
         elif len(self.__PreReleaseVersionSegment_value__) < len(
             other.__PreReleaseVersionSegment_value__
         ):
