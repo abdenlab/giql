@@ -27,14 +27,14 @@ class TestNearestTranspilation:
 
     def test_nearest_basic_k3(self, tables_with_peaks_and_genes):
         """
-        GIVEN a GIQL query with NEAREST(genes, k=3)
+        GIVEN a GIQL query with NEAREST(genes, k := 3)
         WHEN transpiling to SQL
         THEN should generate LATERAL join with DISTANCE and LIMIT 3
         """
         sql = """
         SELECT *
         FROM peaks
-        CROSS JOIN LATERAL NEAREST(genes, reference=peaks.interval, k=3)
+        CROSS JOIN LATERAL NEAREST(genes, reference := peaks.interval, k := 3)
         """
 
         ast = parse_one(sql, dialect=GIQLDialect)
@@ -55,14 +55,14 @@ class TestNearestTranspilation:
 
     def test_nearest_with_max_distance(self, tables_with_peaks_and_genes):
         """
-        GIVEN a GIQL query with NEAREST(genes, k=5, max_distance=100000)
+        GIVEN a GIQL query with NEAREST(genes, k := 5, max_distance := 100000)
         WHEN transpiling to SQL
         THEN should generate LATERAL join with distance filter
         """
         sql = """
         SELECT *
         FROM peaks
-        CROSS JOIN LATERAL NEAREST(genes, reference=peaks.interval, k=5, max_distance=100000)
+        CROSS JOIN LATERAL NEAREST(genes, reference := peaks.interval, k := 5, max_distance := 100000)
         """
 
         ast = parse_one(sql, dialect=GIQLDialect)
@@ -79,13 +79,13 @@ class TestNearestTranspilation:
 
     def test_nearest_standalone_literal(self, tables_with_peaks_and_genes):
         """
-        GIVEN a GIQL query with literal reference NEAREST(genes, reference='chr1:1000-2000', k=3)
+        GIVEN a GIQL query with literal reference NEAREST(genes, reference := 'chr1:1000-2000', k := 3)
         WHEN transpiling to SQL
         THEN should generate standalone query without LATERAL
         """
         sql = """
         SELECT *
-        FROM NEAREST(genes, reference='chr1:1000-2000', k=3)
+        FROM NEAREST(genes, reference := 'chr1:1000-2000', k := 3)
         """
 
         ast = parse_one(sql, dialect=GIQLDialect)
@@ -103,14 +103,14 @@ class TestNearestTranspilation:
 
     def test_nearest_with_stranded(self, tables_with_peaks_and_genes):
         """
-        GIVEN a GIQL query with NEAREST(genes, k=3, stranded=true)
+        GIVEN a GIQL query with NEAREST(genes, k := 3, stranded := true)
         WHEN transpiling to SQL
         THEN should generate SQL with strand filtering
         """
         sql = """
         SELECT *
         FROM peaks
-        CROSS JOIN LATERAL NEAREST(genes, reference=peaks.interval, k=3, stranded=true)
+        CROSS JOIN LATERAL NEAREST(genes, reference := peaks.interval, k := 3, stranded := true)
         """
 
         ast = parse_one(sql, dialect=GIQLDialect)
@@ -127,7 +127,7 @@ class TestNearestTranspilation:
 
     def test_nearest_with_signed(self, tables_with_peaks_and_genes):
         """
-        GIVEN a GIQL query with NEAREST(genes, k=3, signed=true)
+        GIVEN a GIQL query with NEAREST(genes, k := 3, signed := true)
         WHEN transpiling to SQL
         THEN should generate SQL with signed distance column
             (negative for upstream, positive for downstream)
@@ -135,7 +135,7 @@ class TestNearestTranspilation:
         sql = """
         SELECT *
         FROM peaks
-        CROSS JOIN LATERAL NEAREST(genes, reference=peaks.interval, k=3, signed=true)
+        CROSS JOIN LATERAL NEAREST(genes, reference := peaks.interval, k := 3, signed := true)
         """
 
         ast = parse_one(sql, dialect=GIQLDialect)

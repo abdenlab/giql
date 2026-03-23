@@ -87,7 +87,7 @@ For each peak, find the 3 nearest genes:
        nearest.name AS gene,
        nearest.distance
    FROM peaks
-   CROSS JOIN LATERAL NEAREST(genes, reference=peaks.interval, k=3) AS nearest
+   CROSS JOIN LATERAL NEAREST(genes, reference := peaks.interval, k := 3) AS nearest
    ORDER BY peaks.name, nearest.distance
 
 **Use case:** Annotate ChIP-seq peaks with nearby genes.
@@ -100,7 +100,7 @@ Find the 5 nearest genes to a specific genomic coordinate:
 .. code-block:: sql
 
    SELECT name, distance
-   FROM NEAREST(genes, reference='chr1:1000000-1001000', k=5)
+   FROM NEAREST(genes, reference := 'chr1:1000000-1001000', k := 5)
    ORDER BY distance
 
 **Use case:** Explore the genomic neighborhood of a position of interest.
@@ -119,9 +119,9 @@ Find nearest features within a maximum distance:
    FROM peaks
    CROSS JOIN LATERAL NEAREST(
        genes,
-       reference=peaks.interval,
-       k=5,
-       max_distance=100000
+       reference := peaks.interval,
+       k := 5,
+       max_distance := 100000
    ) AS nearest
    ORDER BY peaks.name, nearest.distance
 
@@ -145,9 +145,9 @@ Find nearest features on the same strand only:
    FROM peaks
    CROSS JOIN LATERAL NEAREST(
        genes,
-       reference=peaks.interval,
-       k=3,
-       stranded=true
+       reference := peaks.interval,
+       k := 3,
+       stranded := true
    ) AS nearest
    ORDER BY peaks.name, nearest.distance
 
@@ -170,9 +170,9 @@ Find features upstream (5') of reference positions using signed distances:
    FROM peaks
    CROSS JOIN LATERAL NEAREST(
        genes,
-       reference=peaks.interval,
-       k=10,
-       signed=true
+       reference := peaks.interval,
+       k := 10,
+       signed := true
    ) AS nearest
    WHERE nearest.distance < 0
    ORDER BY peaks.name, nearest.distance DESC
@@ -181,7 +181,7 @@ Find features upstream (5') of reference positions using signed distances:
 
 .. note::
 
-   With ``signed=true``, negative distances indicate upstream features
+   With ``signed := true``, negative distances indicate upstream features
    and positive distances indicate downstream features.
 
 Downstream Features
@@ -198,9 +198,9 @@ Find features downstream (3') of reference positions:
    FROM peaks
    CROSS JOIN LATERAL NEAREST(
        genes,
-       reference=peaks.interval,
-       k=10,
-       signed=true
+       reference := peaks.interval,
+       k := 10,
+       signed := true
    ) AS nearest
    WHERE nearest.distance > 0
    ORDER BY peaks.name, nearest.distance
@@ -221,9 +221,9 @@ Find features within a specific distance window around the reference:
    FROM peaks
    CROSS JOIN LATERAL NEAREST(
        genes,
-       reference=peaks.interval,
-       k=10,
-       signed=true
+       reference := peaks.interval,
+       k := 10,
+       signed := true
    ) AS nearest
    WHERE nearest.distance BETWEEN -2000 AND 500
    ORDER BY peaks.name, ABS(nearest.distance)
@@ -247,11 +247,11 @@ Find nearby same-strand features:
    FROM peaks
    CROSS JOIN LATERAL NEAREST(
        genes,
-       reference=peaks.interval,
-       k=5,
-       max_distance=50000,
-       stranded=true,
-       signed=true
+       reference := peaks.interval,
+       k := 5,
+       max_distance := 50000,
+       stranded := true,
+       signed := true
    ) AS nearest
    WHERE nearest.distance BETWEEN -10000 AND 10000
    ORDER BY peaks.name, ABS(nearest.distance)
@@ -273,7 +273,7 @@ Calculate the average distance from peaks to their nearest gene:
            peaks.name AS peak,
            nearest.distance
        FROM peaks
-       CROSS JOIN LATERAL NEAREST(genes, reference=peaks.interval, k=1) AS nearest
+       CROSS JOIN LATERAL NEAREST(genes, reference := peaks.interval, k := 1) AS nearest
    )
    SELECT
        COUNT(*) AS peak_count,
@@ -297,7 +297,7 @@ Analyze distance patterns per chromosome:
            peaks.name AS peak,
            nearest.distance
        FROM peaks
-       CROSS JOIN LATERAL NEAREST(genes, reference=peaks.interval, k=1) AS nearest
+       CROSS JOIN LATERAL NEAREST(genes, reference := peaks.interval, k := 1) AS nearest
    )
    SELECT
        chrom,

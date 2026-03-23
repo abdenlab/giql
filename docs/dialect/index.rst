@@ -73,7 +73,7 @@ Calculate distances and find nearest features.
      - ``DISTANCE(a.interval, b.interval)``
    * - :ref:`NEAREST <nearest-operator>`
      - Find k-nearest genomic features
-     - ``NEAREST(genes, reference=peaks.interval, k=5)``
+     - ``NEAREST(genes, reference := peaks.interval, k := 5)``
 
 See :doc:`distance-operators` for detailed documentation.
 

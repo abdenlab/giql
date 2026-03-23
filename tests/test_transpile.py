@@ -264,7 +264,7 @@ class TestTranspileCluster:
         """
         sql = transpile(
             """
-            SELECT *, CLUSTER(interval, stranded=true) AS cluster_id
+            SELECT *, CLUSTER(interval, stranded := true) AS cluster_id
             FROM peaks
             """,
             tables=["peaks"],
@@ -332,7 +332,7 @@ class TestTranspileNearest:
         THEN should generate subquery with ORDER BY and LIMIT
         """
         sql = transpile(
-            "SELECT * FROM NEAREST(genes, reference='chr1:1000-2000', k=3)",
+            "SELECT * FROM NEAREST(genes, reference := 'chr1:1000-2000', k := 3)",
             tables=["genes"],
         )
 
@@ -348,7 +348,7 @@ class TestTranspileNearest:
         """
         sql = transpile(
             """
-            SELECT * FROM NEAREST(genes, reference='chr1:1000-2000', k=5, max_distance=100000)
+            SELECT * FROM NEAREST(genes, reference := 'chr1:1000-2000', k := 5, max_distance := 100000)
             """,
             tables=["genes"],
         )
@@ -367,7 +367,7 @@ class TestTranspileNearest:
             """
             SELECT *
             FROM peaks
-            CROSS JOIN LATERAL NEAREST(genes, reference=peaks.interval, k=3)
+            CROSS JOIN LATERAL NEAREST(genes, reference := peaks.interval, k := 3)
             """,
             tables=["peaks", "genes"],
         )

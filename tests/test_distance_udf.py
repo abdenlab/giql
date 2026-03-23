@@ -178,12 +178,12 @@ class TestStrandedDistance:
     def test_stranded_same_strand_plus(self):
         """
         GIVEN two intervals on the same chromosome and same '+' strand
-        WHEN DISTANCE() is calculated with stranded=true
+        WHEN DISTANCE() is calculated with stranded := true
         THEN the distance should be calculated normally (positive value)
         """
         sql = """
         SELECT
-            DISTANCE(a.interval, b.interval, stranded=true) as distance
+            DISTANCE(a.interval, b.interval, stranded := true) as distance
         FROM
             (SELECT 'chr1' as chrom, 100 as start, 200 as end, '+' as strand) a
         CROSS JOIN
@@ -205,12 +205,12 @@ class TestStrandedDistance:
     def test_stranded_same_strand_minus(self):
         """
         GIVEN two intervals on the same chromosome and same '-' strand
-        WHEN DISTANCE() is calculated with stranded=true
+        WHEN DISTANCE() is calculated with stranded := true
         THEN the distance should be negative (multiplied by -1)
         """
         sql = """
         SELECT
-            DISTANCE(a.interval, b.interval, stranded=true) as distance
+            DISTANCE(a.interval, b.interval, stranded := true) as distance
         FROM
             (SELECT 'chr1' as chrom, 100 as start, 200 as end, '-' as strand) a
         CROSS JOIN
@@ -232,12 +232,12 @@ class TestStrandedDistance:
     def test_stranded_different_strands_calculates_distance(self):
         """
         GIVEN two intervals on different strands ('+' and '-')
-        WHEN DISTANCE() is calculated with stranded=true
+        WHEN DISTANCE() is calculated with stranded := true
         THEN the distance should be calculated normally (positive, since first interval is '+')
         """
         sql = """
         SELECT
-            DISTANCE(a.interval, b.interval, stranded=true) as distance
+            DISTANCE(a.interval, b.interval, stranded := true) as distance
         FROM
             (SELECT 'chr1' as chrom, 100 as start, 200 as end, '+' as strand) a
         CROSS JOIN
@@ -259,12 +259,12 @@ class TestStrandedDistance:
     def test_stranded_different_strands_minus_first(self):
         """
         GIVEN two intervals on different strands ('-' first, then '+')
-        WHEN DISTANCE() is calculated with stranded=true
+        WHEN DISTANCE() is calculated with stranded := true
         THEN the distance should be negative (based on first interval's strand)
         """
         sql = """
         SELECT
-            DISTANCE(a.interval, b.interval, stranded=true) as distance
+            DISTANCE(a.interval, b.interval, stranded := true) as distance
         FROM
             (SELECT 'chr1' as chrom, 100 as start, 200 as end, '-' as strand) a
         CROSS JOIN
@@ -286,12 +286,12 @@ class TestStrandedDistance:
     def test_stranded_dot_strand_returns_null(self):
         """
         GIVEN intervals with '.' strand (unspecified)
-        WHEN DISTANCE() is calculated with stranded=true
+        WHEN DISTANCE() is calculated with stranded := true
         THEN the distance should be NULL
         """
         sql = """
         SELECT
-            DISTANCE(a.interval, b.interval, stranded=true) as distance
+            DISTANCE(a.interval, b.interval, stranded := true) as distance
         FROM
             (SELECT 'chr1' as chrom, 100 as start, 200 as end, '.' as strand) a
         CROSS JOIN
@@ -313,12 +313,12 @@ class TestStrandedDistance:
     def test_stranded_question_mark_strand_returns_null(self):
         """
         GIVEN intervals with '?' strand (unknown)
-        WHEN DISTANCE() is calculated with stranded=true
+        WHEN DISTANCE() is calculated with stranded := true
         THEN the distance should be NULL
         """
         sql = """
         SELECT
-            DISTANCE(a.interval, b.interval, stranded=true) as distance
+            DISTANCE(a.interval, b.interval, stranded := true) as distance
         FROM
             (SELECT 'chr1' as chrom, 100 as start, 200 as end, '?' as strand) a
         CROSS JOIN
@@ -340,12 +340,12 @@ class TestStrandedDistance:
     def test_stranded_null_strand_returns_null(self):
         """
         GIVEN intervals with NULL strand
-        WHEN DISTANCE() is calculated with stranded=true
+        WHEN DISTANCE() is calculated with stranded := true
         THEN the distance should be NULL
         """
         sql = """
         SELECT
-            DISTANCE(a.interval, b.interval, stranded=true) as distance
+            DISTANCE(a.interval, b.interval, stranded := true) as distance
         FROM
             (SELECT 'chr1' as chrom, 100 as start, 200 as end, NULL as strand) a
         CROSS JOIN
@@ -367,12 +367,12 @@ class TestStrandedDistance:
     def test_stranded_overlapping_intervals_minus_strand(self):
         """
         GIVEN two overlapping intervals on '-' strand
-        WHEN DISTANCE() is calculated with stranded=true
+        WHEN DISTANCE() is calculated with stranded := true
         THEN the distance should be 0 (overlaps have distance 0 regardless of strand)
         """
         sql = """
         SELECT
-            DISTANCE(a.interval, b.interval, stranded=true) as distance
+            DISTANCE(a.interval, b.interval, stranded := true) as distance
         FROM
             (SELECT 'chr1' as chrom, 100 as start, 200 as end, '-' as strand) a
         CROSS JOIN

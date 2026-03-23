@@ -378,7 +378,7 @@ class TestBaseGIQLGenerator:
         WHEN giqlnearest_sql is called
         THEN Subquery with ORDER BY distance LIMIT k is generated.
         """
-        sql = "SELECT * FROM NEAREST(genes, reference='chr1:1000-2000', k=3)"
+        sql = "SELECT * FROM NEAREST(genes, reference := 'chr1:1000-2000', k := 3)"
         ast = parse_one(sql, dialect=GIQLDialect)
 
         generator = BaseGIQLGenerator(tables=tables_with_peaks_and_genes)
@@ -413,7 +413,7 @@ class TestBaseGIQLGenerator:
         """
         sql = (
             "SELECT * FROM peaks "
-            "CROSS JOIN LATERAL NEAREST(genes, reference=peaks.interval, k=3)"
+            "CROSS JOIN LATERAL NEAREST(genes, reference := peaks.interval, k := 3)"
         )
         ast = parse_one(sql, dialect=GIQLDialect)
 
@@ -452,7 +452,7 @@ class TestBaseGIQLGenerator:
         sql = (
             "SELECT * FROM peaks "
             "CROSS JOIN LATERAL NEAREST("
-            "genes, reference=peaks.interval, k=5, max_distance=100000)"
+            "genes, reference := peaks.interval, k := 5, max_distance := 100000)"
         )
         ast = parse_one(sql, dialect=GIQLDialect)
 
@@ -491,14 +491,14 @@ class TestBaseGIQLGenerator:
 
     def test_giqlnearest_sql_stranded(self, tables_with_peaks_and_genes):
         """
-        GIVEN a GIQLNearest with stranded=True
+        GIVEN a GIQLNearest with stranded := true
         WHEN giqlnearest_sql is called
         THEN Strand matching is included in WHERE clause.
         """
         sql = (
             "SELECT * FROM peaks "
             "CROSS JOIN LATERAL NEAREST("
-            "genes, reference=peaks.interval, k=3, stranded=true)"
+            "genes, reference := peaks.interval, k := 3, stranded := true)"
         )
         ast = parse_one(sql, dialect=GIQLDialect)
 
@@ -545,14 +545,14 @@ class TestBaseGIQLGenerator:
 
     def test_giqlnearest_sql_signed(self, tables_with_peaks_and_genes):
         """
-        GIVEN a GIQLNearest with signed=True
+        GIVEN a GIQLNearest with signed := true
         WHEN giqlnearest_sql is called
         THEN Distance expression includes signed calculation.
         """
         sql = (
             "SELECT * FROM peaks "
             "CROSS JOIN LATERAL NEAREST("
-            "genes, reference=peaks.interval, k=3, signed=true)"
+            "genes, reference := peaks.interval, k := 3, signed := true)"
         )
         ast = parse_one(sql, dialect=GIQLDialect)
 
@@ -594,7 +594,7 @@ class TestBaseGIQLGenerator:
             SUPPORTS_LATERAL = False
 
         # Use query without explicit reference to trigger correlated mode
-        sql = "SELECT * FROM peaks CROSS JOIN LATERAL NEAREST(genes, k=3)"
+        sql = "SELECT * FROM peaks CROSS JOIN LATERAL NEAREST(genes, k := 3)"
         ast = parse_one(sql, dialect=GIQLDialect)
 
         generator = NoLateralGenerator(tables=tables_with_peaks_and_genes)
@@ -617,7 +617,7 @@ class TestBaseGIQLGenerator:
         """
         sql = (
             f"SELECT * FROM NEAREST("
-            f"genes, reference='chr1:1000-2000', k={k}, max_distance={max_distance})"
+            f"genes, reference := 'chr1:1000-2000', k := {k}, max_distance := {max_distance})"
         )
         ast = parse_one(sql, dialect=GIQLDialect)
 
@@ -656,12 +656,12 @@ class TestBaseGIQLGenerator:
 
     def test_giqldistance_sql_stranded(self, tables_with_two_tables):
         """
-        GIVEN a GIQLDistance with stranded=True
+        GIVEN a GIQLDistance with stranded := true
         WHEN giqldistance_sql is called
         THEN Strand-aware distance CASE expression is generated.
         """
         sql = (
-            "SELECT DISTANCE(a.interval, b.interval, stranded=true) as dist "
+            "SELECT DISTANCE(a.interval, b.interval, stranded := true) as dist "
             "FROM features_a a CROSS JOIN features_b b"
         )
         ast = parse_one(sql, dialect=GIQLDialect)
@@ -689,12 +689,12 @@ class TestBaseGIQLGenerator:
 
     def test_giqldistance_sql_signed(self, tables_with_two_tables):
         """
-        GIVEN a GIQLDistance with signed=True
+        GIVEN a GIQLDistance with signed := true
         WHEN giqldistance_sql is called
         THEN Signed distance CASE expression is generated.
         """
         sql = (
-            "SELECT DISTANCE(a.interval, b.interval, signed=true) as dist "
+            "SELECT DISTANCE(a.interval, b.interval, signed := true) as dist "
             "FROM features_a a CROSS JOIN features_b b"
         )
         ast = parse_one(sql, dialect=GIQLDialect)
@@ -714,13 +714,13 @@ class TestBaseGIQLGenerator:
 
     def test_giqldistance_sql_stranded_and_signed(self, tables_with_two_tables):
         """
-        GIVEN a GIQLDistance with both stranded and signed=True
+        GIVEN a GIQLDistance with both stranded and signed := true
         WHEN giqldistance_sql is called
         THEN Combined stranded+signed distance expression is generated.
         """
         sql = (
             "SELECT "
-            "DISTANCE(a.interval, b.interval, stranded=true, signed=true) as dist "
+            "DISTANCE(a.interval, b.interval, stranded := true, signed := true) as dist "
             "FROM features_a a CROSS JOIN features_b b"
         )
         ast = parse_one(sql, dialect=GIQLDialect)
@@ -831,13 +831,13 @@ class TestBaseGIQLGenerator:
         self, tables_with_peaks_and_genes
     ):
         """
-        GIVEN a GIQLNearest with stranded=True and literal reference containing strand
+        GIVEN a GIQLNearest with stranded := true and literal reference containing strand
         WHEN giqlnearest_sql is called
         THEN Strand from literal range is parsed and used in filtering.
         """
         sql = (
             "SELECT * FROM NEAREST("
-            "genes, reference='chr1:1000-2000:+', k=3, stranded=true)"
+            "genes, reference := 'chr1:1000-2000:+', k := 3, stranded := true)"
         )
         ast = parse_one(sql, dialect=GIQLDialect)
 
@@ -852,11 +852,11 @@ class TestBaseGIQLGenerator:
         self, tables_with_peaks_and_genes
     ):
         """
-        GIVEN a GIQLNearest in correlated mode with implicit reference and stranded=True
+        GIVEN a GIQLNearest in correlated mode with implicit reference and stranded := true
         WHEN giqlnearest_sql is called
         THEN Strand column is resolved from outer table and used.
         """
-        sql = "SELECT * FROM peaks CROSS JOIN LATERAL NEAREST(genes, k=3, stranded=true)"
+        sql = "SELECT * FROM peaks CROSS JOIN LATERAL NEAREST(genes, k := 3, stranded := true)"
         ast = parse_one(sql, dialect=GIQLDialect)
 
         generator = BaseGIQLGenerator(tables=tables_with_peaks_and_genes)
@@ -875,7 +875,7 @@ class TestBaseGIQLGenerator:
         tables = Tables()
         tables.register("genes_closed", Table("genes_closed", interval_type="closed"))
 
-        sql = "SELECT * FROM NEAREST(genes_closed, reference='chr1:1000-2000', k=3)"
+        sql = "SELECT * FROM NEAREST(genes_closed, reference := 'chr1:1000-2000', k := 3)"
         ast = parse_one(sql, dialect=GIQLDialect)
 
         generator = BaseGIQLGenerator(tables=tables)
@@ -959,7 +959,7 @@ class TestBaseGIQLGenerator:
         WHEN giqlnearest_sql is called
         THEN ValueError is raised with parse error details.
         """
-        sql = "SELECT * FROM NEAREST(genes, reference='invalid_range', k=3)"
+        sql = "SELECT * FROM NEAREST(genes, reference := 'invalid_range', k := 3)"
         ast = parse_one(sql, dialect=GIQLDialect)
 
         generator = BaseGIQLGenerator(tables=tables_with_peaks_and_genes)
@@ -973,7 +973,7 @@ class TestBaseGIQLGenerator:
         WHEN giqlnearest_sql is called
         THEN ValueError is raised because target table cannot be resolved.
         """
-        sql = "SELECT * FROM NEAREST(genes, reference='chr1:1000-2000', k=3)"
+        sql = "SELECT * FROM NEAREST(genes, reference := 'chr1:1000-2000', k := 3)"
         ast = parse_one(sql, dialect=GIQLDialect)
 
         # Generator with empty tables - table won't be found
@@ -988,7 +988,7 @@ class TestBaseGIQLGenerator:
         WHEN giqlnearest_sql is called
         THEN ValueError is raised listing available tables.
         """
-        sql = "SELECT * FROM NEAREST(unknown_table, reference='chr1:1000-2000', k=3)"
+        sql = "SELECT * FROM NEAREST(unknown_table, reference := 'chr1:1000-2000', k := 3)"
         ast = parse_one(sql, dialect=GIQLDialect)
 
         generator = BaseGIQLGenerator(tables=tables_with_peaks_and_genes)
@@ -1018,7 +1018,7 @@ class TestBaseGIQLGenerator:
         self, tables_with_peaks_and_genes
     ):
         """
-        GIVEN a GIQLNearest with stranded=True and unqualified column reference
+        GIVEN a GIQLNearest with stranded := true and unqualified column reference
         WHEN giqlnearest_sql is called
         THEN Strand column is resolved without table prefix.
         """
@@ -1075,7 +1075,7 @@ class TestBaseGIQLGenerator:
         THEN The parameter is parsed as True and strand-aware distance is calculated.
         """
         sql = (
-            f"SELECT DISTANCE(a.interval, b.interval, stranded={bool_repr}) as dist "
+            f"SELECT DISTANCE(a.interval, b.interval, stranded := {bool_repr}) as dist "
             "FROM features_a a, features_b b"
         )
         ast = parse_one(sql, dialect=GIQLDialect)
@@ -1100,7 +1100,7 @@ class TestBaseGIQLGenerator:
         THEN The parameter is parsed as False and basic distance is calculated.
         """
         sql = (
-            f"SELECT DISTANCE(a.interval, b.interval, stranded={bool_repr}) as dist "
+            f"SELECT DISTANCE(a.interval, b.interval, stranded := {bool_repr}) as dist "
             "FROM features_a a, features_b b"
         )
         ast = parse_one(sql, dialect=GIQLDialect)
@@ -1124,7 +1124,7 @@ class TestBaseGIQLGenerator:
         THEN The parameter is parsed as True and signed distance is calculated.
         """
         sql = (
-            f"SELECT DISTANCE(a.interval, b.interval, signed={bool_repr}) as dist "
+            f"SELECT DISTANCE(a.interval, b.interval, signed := {bool_repr}) as dist "
             "FROM features_a a, features_b b"
         )
         ast = parse_one(sql, dialect=GIQLDialect)
@@ -1148,7 +1148,7 @@ class TestBaseGIQLGenerator:
         THEN The parameter is parsed as False and unsigned distance is calculated.
         """
         sql = (
-            f"SELECT DISTANCE(a.interval, b.interval, signed={bool_repr}) as dist "
+            f"SELECT DISTANCE(a.interval, b.interval, signed := {bool_repr}) as dist "
             "FROM features_a a, features_b b"
         )
         ast = parse_one(sql, dialect=GIQLDialect)

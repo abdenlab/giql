@@ -92,7 +92,7 @@ Cluster intervals separately for each strand:
 
    SELECT
        *,
-       CLUSTER(interval, stranded=true) AS cluster_id
+       CLUSTER(interval, stranded := true) AS cluster_id
    FROM features
    ORDER BY chrom, strand, start
 
@@ -108,7 +108,7 @@ Combine strand awareness with distance tolerance:
 
    SELECT
        *,
-       CLUSTER(interval, 1000, stranded=true) AS cluster_id
+       CLUSTER(interval, 1000, stranded := true) AS cluster_id
    FROM features
    ORDER BY chrom, strand, start
 
@@ -225,7 +225,7 @@ Merge intervals separately by strand:
 
 .. code-block:: sql
 
-   SELECT MERGE(interval, stranded=true)
+   SELECT MERGE(interval, stranded := true)
    FROM features
 
 **Use case:** Create strand-aware consensus regions.
