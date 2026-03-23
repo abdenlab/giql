@@ -135,22 +135,22 @@ Syntax
    FROM source_table
    CROSS JOIN LATERAL NEAREST(
        target_table,
-       reference=source_table.interval,
-       k=5
+       reference := source_table.interval,
+       k := 5
    ) AS nearest
 
    -- With additional parameters
    NEAREST(
        target_table,
-       reference=interval,
-       k=5,
-       max_distance=100000,
-       stranded=true,
-       signed=true
+       reference := interval,
+       k := 5,
+       max_distance := 100000,
+       stranded := true,
+       signed := true
    )
 
    -- Standalone query with literal reference
-   SELECT * FROM NEAREST(genes, reference='chr1:1000000-1001000', k=5)
+   SELECT * FROM NEAREST(genes, reference := 'chr1:1000000-1001000', k := 5)
 
 Parameters
 ~~~~~~~~~~
@@ -195,7 +195,7 @@ Find the 3 nearest genes for each peak:
        nearest.name AS gene,
        nearest.distance
    FROM peaks
-   CROSS JOIN LATERAL NEAREST(genes, reference=peaks.interval, k=3) AS nearest
+   CROSS JOIN LATERAL NEAREST(genes, reference := peaks.interval, k := 3) AS nearest
    ORDER BY peaks.name, nearest.distance
 
 **Standalone Query:**
@@ -205,7 +205,7 @@ Find 5 nearest genes to a specific genomic location:
 .. code-block:: sql
 
    SELECT gene_name, distance
-   FROM NEAREST(genes, reference='chr1:1000000-1001000', k=5)
+   FROM NEAREST(genes, reference := 'chr1:1000000-1001000', k := 5)
    ORDER BY distance
 
 **Distance-Constrained Search:**
@@ -221,9 +221,9 @@ Find nearest features within 100kb:
    FROM peaks
    CROSS JOIN LATERAL NEAREST(
        genes,
-       reference=peaks.interval,
-       k=5,
-       max_distance=100000
+       reference := peaks.interval,
+       k := 5,
+       max_distance := 100000
    ) AS nearest
    ORDER BY peaks.name, nearest.distance
 
@@ -241,9 +241,9 @@ Find nearest same-strand features:
    FROM peaks
    CROSS JOIN LATERAL NEAREST(
        genes,
-       reference=peaks.interval,
-       k=3,
-       stranded=true
+       reference := peaks.interval,
+       k := 3,
+       stranded := true
    ) AS nearest
    ORDER BY peaks.name, nearest.distance
 
@@ -261,9 +261,9 @@ Find upstream features using signed distances:
    FROM peaks
    CROSS JOIN LATERAL NEAREST(
        genes,
-       reference=peaks.interval,
-       k=10,
-       signed=true
+       reference := peaks.interval,
+       k := 10,
+       signed := true
    ) AS nearest
    WHERE nearest.distance < 0
    ORDER BY peaks.name, nearest.distance DESC
@@ -278,9 +278,9 @@ Find upstream features using signed distances:
    FROM peaks
    CROSS JOIN LATERAL NEAREST(
        genes,
-       reference=peaks.interval,
-       k=10,
-       signed=true
+       reference := peaks.interval,
+       k := 10,
+       signed := true
    ) AS nearest
    WHERE nearest.distance > 0
    ORDER BY peaks.name, nearest.distance
@@ -298,11 +298,11 @@ Find nearby same-strand features within distance constraints:
    FROM peaks
    CROSS JOIN LATERAL NEAREST(
        genes,
-       reference=peaks.interval,
-       k=5,
-       max_distance=50000,
-       stranded=true,
-       signed=true
+       reference := peaks.interval,
+       k := 5,
+       max_distance := 50000,
+       stranded := true,
+       signed := true
    ) AS nearest
    WHERE nearest.distance BETWEEN -10000 AND 10000
    ORDER BY peaks.name, ABS(nearest.distance)

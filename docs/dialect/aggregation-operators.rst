@@ -38,10 +38,10 @@ Syntax
    CLUSTER(interval, distance) AS cluster_id
 
    -- Strand-specific clustering
-   CLUSTER(interval, stranded=true) AS cluster_id
+   CLUSTER(interval, stranded := true) AS cluster_id
 
    -- Combined parameters
-   CLUSTER(interval, distance, stranded=true) AS cluster_id
+   CLUSTER(interval, distance, stranded := true) AS cluster_id
 
 Parameters
 ~~~~~~~~~~
@@ -97,7 +97,7 @@ Cluster intervals separately by strand:
 
    SELECT
        *,
-       CLUSTER(interval, stranded=true) AS cluster_id
+       CLUSTER(interval, stranded := true) AS cluster_id
    FROM features
    ORDER BY chrom, strand, start
 
@@ -192,7 +192,7 @@ Syntax
    SELECT MERGE(interval, distance) FROM features
 
    -- Strand-specific merge
-   SELECT MERGE(interval, stranded=true) FROM features
+   SELECT MERGE(interval, stranded := true) FROM features
 
    -- Merge with additional aggregations
    SELECT
@@ -253,7 +253,7 @@ Merge intervals separately by strand:
 
 .. code-block:: sql
 
-   SELECT MERGE(interval, stranded=true)
+   SELECT MERGE(interval, stranded := true)
    FROM features
 
 **Merge with Feature Count:**
