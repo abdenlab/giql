@@ -168,13 +168,16 @@ def generate_dataset(
     name: str | None = None,
     seed: int = 42,
     *,
+    median_length: int = 500,
+    sigma: float = 1.0,
     row_group_per_chrom: bool = False,
     unsorted: bool = False,
 ) -> GenomicDataset:
     """Generate a synthetic genomic dataset with n intervals.
 
     Intervals are distributed proportionally to chromosome size, with
-    log-normal lengths (median ~500bp, clipped to [50, 50_000]).
+    log-normal lengths (median ~median_length bp, clipped to
+    [50, max(50_000, median_length*10)]).
 
     When unsorted is False (default), intervals are fully sorted by
     chromosome then start. When True, chromosomes remain contiguous
@@ -189,10 +192,13 @@ def generate_dataset(
     probs = chrom_sizes / chrom_sizes.sum()
 
     chrom_indices = rng.choice(len(chrom_names), size=n, p=probs)
+    upper_clip = max(50_000, median_length * 10)
     lengths = np.clip(
-        rng.lognormal(mean=math.log(500), sigma=1.0, size=n).astype(int),
+        rng.lognormal(
+            mean=math.log(median_length), sigma=sigma, size=n,
+        ).astype(int),
         50,
-        50_000,
+        upper_clip,
     )
 
     chroms: list[str] = []
