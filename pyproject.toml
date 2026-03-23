@@ -29,6 +29,7 @@ requires-python = ">=3.11"
 
 [project.optional-dependencies]
 datafusion = ["datafusion>=43.0.0"]
+experiments = ["optuna>=3.0.0", "wool", "matplotlib>=3.5.0"]
 mcp = ["fastmcp>=2.0.0"]
 
 [project.scripts]
