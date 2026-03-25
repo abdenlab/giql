@@ -24,7 +24,7 @@ class GenomicRange(exp.Expression):
     }
 
 
-class SpatialPredicate(exp.Binary):
+class SpatialPredicate(exp.Expression, exp.Binary):
     """Base class for spatial predicates."""
 
     pass
@@ -88,7 +88,7 @@ def _split_named_and_positional(args):
     return kwargs, positional_args
 
 
-class GIQLCluster(exp.Func):
+class GIQLCluster(exp.Expression, exp.Func):
     """CLUSTER window function for assigning cluster IDs to overlapping intervals.
 
     Implicitly partitions by chromosome and orders by start position.
@@ -116,7 +116,7 @@ class GIQLCluster(exp.Func):
         return cls(**kwargs)
 
 
-class GIQLMerge(exp.Func):
+class GIQLMerge(exp.Expression, exp.Func):
     """MERGE aggregate function for combining overlapping intervals.
 
     Merges overlapping or bookended intervals into single intervals.
@@ -144,7 +144,7 @@ class GIQLMerge(exp.Func):
         return cls(**kwargs)
 
 
-class GIQLDistance(exp.Func):
+class GIQLDistance(exp.Expression, exp.Func):
     """DISTANCE function for calculating genomic distances between intervals.
 
     Generates SQL CASE expression that computes distance between two genomic
@@ -175,7 +175,7 @@ class GIQLDistance(exp.Func):
         return cls(**kwargs)
 
 
-class GIQLNearest(exp.Func):
+class GIQLNearest(exp.Expression, exp.Func):
     """NEAREST function for finding k-nearest genomic features.
 
     Generates SQL for k-nearest neighbor queries using LATERAL joins

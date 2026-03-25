@@ -118,13 +118,14 @@ class GIQLDialect(Dialect):
                 self._match_r_paren()
 
                 return self.expression(
-                    SpatialSetPredicate,
-                    this=left,
-                    operator=operator,
-                    quantifier=quantifier,
-                    ranges=ranges,
+                    SpatialSetPredicate(
+                        this=left,
+                        operator=operator,
+                        quantifier=quantifier,
+                        ranges=ranges,
+                    )
                 )
             else:
                 # Simple spatial predicate
                 right = self._parse_term()
-                return self.expression(expr_class, this=left, expression=right)
+                return self.expression(expr_class(this=left, expression=right))

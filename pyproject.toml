@@ -15,7 +15,7 @@ authors = [
     { name = "Conrad Bzura", email = "conradbzura@gmail.com" },
 ]
 dependencies = [
-    "sqlglot>=20.0.0",
+    "sqlglot>=30.0.0",
 ]
 description = "Genomic Interval Query Language - SQL dialect for genomic range queries"
 dynamic = ["version"]
@@ -84,6 +84,6 @@ pytest = ">=7.0.0"
 pytest-cov = ">=4.0.0"
 duckdb = ">=1.4.0"
 pandas = ">=2.0.0"
-sqlglot = ">=20.0.0"
+sqlglot = ">=30.0.0"
 pip = "*"
 hypothesis = ">=6.148.2,<7"
