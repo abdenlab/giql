@@ -66,7 +66,7 @@ class Table:
                     coordinate_system="1based",
                     interval_type="closed",
                 ),
-            ]
+            ],
         )
     """
 

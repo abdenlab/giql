@@ -77,7 +77,7 @@ def transpile(
 
         sql = transpile(
             "SELECT * FROM peaks WHERE interval INTERSECTS 'chr1:1000-2000'",
-            tables=["peaks"]
+            tables=["peaks"],
         )
 
     Custom table configuration::
@@ -92,7 +92,7 @@ def transpile(
                     start_col="start",
                     end_col="end",
                 )
-            ]
+            ],
         )
     """
     # Build tables container

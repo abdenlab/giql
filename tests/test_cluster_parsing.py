@@ -32,7 +32,9 @@ class TestClusterParsing:
         assert isinstance(cluster_expr, GIQLCluster), (
             f"Expected GIQLCluster node, got {type(cluster_expr)}"
         )
-        assert cluster_expr.args.get("stranded") is not None, "Missing stranded parameter"
+        assert cluster_expr.args.get("stranded") is not None, (
+            "Missing stranded parameter"
+        )
 
     def test_from_arg_list_with_eq_as_positional(self):
         """

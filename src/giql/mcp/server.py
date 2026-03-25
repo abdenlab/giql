@@ -74,12 +74,21 @@ OPERATORS: dict[str, dict[str, Any]] = {
         "description": "Find the k-nearest genomic features to a reference position",
         "syntax": "CROSS JOIN LATERAL NEAREST(table, reference=interval, k=5)",
         "parameters": [
-            {"name": "target_table", "description": "Table to search for nearest features"},
+            {
+                "name": "target_table",
+                "description": "Table to search for nearest features",
+            },
             {"name": "reference", "description": "Reference position or column"},
             {"name": "k", "description": "Number of nearest neighbors (default: 1)"},
-            {"name": "max_distance", "description": "Maximum distance threshold (optional)"},
+            {
+                "name": "max_distance",
+                "description": "Maximum distance threshold (optional)",
+            },
             {"name": "stranded", "description": "Same-strand only (default: false)"},
-            {"name": "signed", "description": "Return signed distances (default: false)"},
+            {
+                "name": "signed",
+                "description": "Return signed distances (default: false)",
+            },
         ],
         "returns": "Rows from target table with distance column",
         "example": "SELECT * FROM peaks CROSS JOIN LATERAL NEAREST(genes, reference=peaks.interval, k=3) AS nearest",
@@ -91,7 +100,10 @@ OPERATORS: dict[str, dict[str, Any]] = {
         "syntax": "CLUSTER(interval) AS cluster_id",
         "parameters": [
             {"name": "interval", "description": "Genomic column to cluster"},
-            {"name": "distance", "description": "Max gap to consider same cluster (default: 0)"},
+            {
+                "name": "distance",
+                "description": "Max gap to consider same cluster (default: 0)",
+            },
             {"name": "stranded", "description": "Cluster by strand (default: false)"},
         ],
         "returns": "Integer cluster ID",
@@ -333,7 +345,10 @@ def explain_operator(name: str) -> dict[str, Any]:
     name_upper = name.upper().strip()
 
     if name_upper not in OPERATORS:
-        return {"error": f"Unknown operator: {name}", "available": list(OPERATORS.keys())}
+        return {
+            "error": f"Unknown operator: {name}",
+            "available": list(OPERATORS.keys()),
+        }
 
     op = OPERATORS[name_upper]
 
@@ -346,7 +361,9 @@ def explain_operator(name: str) -> dict[str, Any]:
             pattern = rf"^{name_upper}\n[~=\-]+\n(.*?)(?=\n[A-Z]+\n[~=\-]+|\Z)"
             match = re.search(pattern, content, re.MULTILINE | re.DOTALL)
             if match:
-                full_docs = f"{name_upper}\n{'=' * len(name_upper)}\n{match.group(1).strip()}"
+                full_docs = (
+                    f"{name_upper}\n{'=' * len(name_upper)}\n{match.group(1).strip()}"
+                )
 
     return {
         "name": name_upper,
