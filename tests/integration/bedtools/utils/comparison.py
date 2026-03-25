@@ -1,21 +1,16 @@
-"""Result comparison logic for GIQL vs bedtools outputs.
-
-This module provides functions for:
-- Comparing GIQL and bedtools results with appropriate tolerance
-- Order-independent row sorting
-- Epsilon-based float comparison
-"""
+"""Result comparison logic for GIQL vs bedtools outputs."""
 
 from typing import Any
-from typing import List
-from typing import Tuple
 
 from .data_models import ComparisonResult
 
+# Sentinel for sorting None values deterministically below all real values.
+_NONE_SORT_KEY = (0, "")
 
-def _sort_key(row: Tuple) -> Tuple:
+
+def _sort_key(row: tuple) -> tuple:
     """Generate sort key for order-independent comparison."""
-    return tuple("" if v is None else v for v in row)
+    return tuple(_NONE_SORT_KEY if v is None else (1, v) for v in row)
 
 
 def _values_match(val1: Any, val2: Any, epsilon: float = 1e-9) -> bool:
@@ -35,8 +30,8 @@ def _values_match(val1: Any, val2: Any, epsilon: float = 1e-9) -> bool:
 
 
 def compare_results(
-    giql_rows: List[Tuple],
-    bedtools_rows: List[Tuple],
+    giql_rows: list[tuple],
+    bedtools_rows: list[tuple],
     epsilon: float = 1e-9,
 ) -> ComparisonResult:
     """Compare GIQL and bedtools results with appropriate tolerance.
@@ -91,10 +86,8 @@ def compare_results(
                     f"GIQL={giql_val!r} != bedtools={bedtools_val!r}"
                 )
 
-    match = len(differences) == 0
-
     return ComparisonResult(
-        match=match,
+        match=len(differences) == 0,
         giql_row_count=giql_count,
         bedtools_row_count=bedtools_count,
         differences=differences,

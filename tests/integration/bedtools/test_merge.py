@@ -6,20 +6,17 @@ results to bedtools merge command.
 
 from giql import transpile
 
-from .utils.bed_export import load_intervals
 from .utils.bedtools_wrapper import merge
 from .utils.comparison import compare_results
 from .utils.data_models import GenomicInterval
+from .utils.duckdb_loader import load_intervals
 
 
 def test_merge_adjacent_intervals(duckdb_connection):
     """
-    Given:
-        A set of adjacent intervals (bookended, half-open)
-    When:
-        MERGE operator is applied
-    Then:
-        Adjacent intervals are merged into single intervals
+    GIVEN a set of adjacent intervals (bookended, half-open)
+    WHEN MERGE operator is applied
+    THEN adjacent intervals are merged into single intervals
     """
     intervals = [
         GenomicInterval("chr1", 100, 200, "i1", 100, "+"),
@@ -47,12 +44,9 @@ def test_merge_adjacent_intervals(duckdb_connection):
 
 def test_merge_overlapping_intervals(duckdb_connection):
     """
-    Given:
-        A set of overlapping intervals
-    When:
-        MERGE operator is applied
-    Then:
-        Overlapping intervals are merged
+    GIVEN a set of overlapping intervals
+    WHEN MERGE operator is applied
+    THEN overlapping intervals are merged
     """
     intervals = [
         GenomicInterval("chr1", 100, 250, "i1", 100, "+"),
@@ -80,12 +74,9 @@ def test_merge_overlapping_intervals(duckdb_connection):
 
 def test_merge_separated_intervals(duckdb_connection):
     """
-    Given:
-        Intervals with gaps between them
-    When:
-        MERGE operator is applied
-    Then:
-        Separated intervals remain separate
+    GIVEN intervals with gaps between them
+    WHEN MERGE operator is applied
+    THEN separated intervals remain separate
     """
     intervals = [
         GenomicInterval("chr1", 100, 200, "i1", 100, "+"),
@@ -113,12 +104,9 @@ def test_merge_separated_intervals(duckdb_connection):
 
 def test_merge_multiple_chromosomes(duckdb_connection):
     """
-    Given:
-        Intervals on different chromosomes with overlaps within each
-    When:
-        MERGE operator is applied
-    Then:
-        Merging occurs per chromosome independently
+    GIVEN intervals on different chromosomes with overlaps within each
+    WHEN MERGE operator is applied
+    THEN merging occurs per chromosome independently
     """
     intervals = [
         GenomicInterval("chr1", 100, 200, "i1", 100, "+"),
@@ -145,14 +133,11 @@ def test_merge_multiple_chromosomes(duckdb_connection):
     assert comparison.match, comparison.failure_message()
 
 
-def test_merge_with_distance(duckdb_connection):
+def test_merge_with_distance(giql_query):
     """
-    Given:
-        Intervals with gaps of 50bp and 150bp
-    When:
-        MERGE with distance=100 is applied
-    Then:
-        Gaps <= 100bp are bridged, gaps > 100bp remain separate
+    GIVEN intervals with gaps of 50bp and 150bp
+    WHEN MERGE with distance=100 is applied
+    THEN gaps <= 100bp are bridged, gaps > 100bp remain separate
     """
     intervals = [
         GenomicInterval("chr1", 100, 200, "i1", 100, "+"),
@@ -160,17 +145,11 @@ def test_merge_with_distance(duckdb_connection):
         GenomicInterval("chr1", 500, 600, "i3", 200, "+"),  # 150bp gap
     ]
 
-    load_intervals(
-        duckdb_connection,
-        "intervals",
-        [i.to_tuple() for i in intervals],
-    )
-
-    sql = transpile(
+    giql_result = giql_query(
         "SELECT MERGE(interval, 100) FROM intervals",
         tables=["intervals"],
+        intervals=intervals,
     )
-    giql_result = duckdb_connection.execute(sql).fetchall()
 
     # i1 and i2 bridge (50bp gap <= 100), i3 stays separate (150bp gap)
     assert len(giql_result) == 2, f"Expected 2 merged groups, got {len(giql_result)}"
@@ -182,14 +161,11 @@ def test_merge_with_distance(duckdb_connection):
     assert sorted_result[1][2] == 600
 
 
-def test_merge_stranded_giql(duckdb_connection):
+def test_merge_stranded_giql(giql_query):
     """
-    Given:
-        Overlapping intervals on different strands
-    When:
-        MERGE with stranded := true is applied via GIQL
-    Then:
-        Intervals are merged per-strand, matching bedtools merge -s count
+    GIVEN overlapping intervals on different strands
+    WHEN MERGE with stranded := true is applied via GIQL
+    THEN intervals are merged per-strand, matching bedtools merge -s count
     """
     intervals = [
         GenomicInterval("chr1", 100, 200, "i1", 100, "+"),
@@ -198,22 +174,16 @@ def test_merge_stranded_giql(duckdb_connection):
         GenomicInterval("chr1", 180, 280, "i4", 100, "-"),
     ]
 
-    load_intervals(
-        duckdb_connection,
-        "intervals",
-        [i.to_tuple() for i in intervals],
-    )
-
     bedtools_result = merge(
         [i.to_tuple() for i in intervals],
         strand_mode="same",
     )
 
-    sql = transpile(
+    giql_result = giql_query(
         "SELECT MERGE(interval, stranded := true) FROM intervals",
         tables=["intervals"],
+        intervals=intervals,
     )
-    giql_result = duckdb_connection.execute(sql).fetchall()
 
     # Should have 2 merged intervals: one for + strand, one for - strand
     assert len(giql_result) == len(bedtools_result), (

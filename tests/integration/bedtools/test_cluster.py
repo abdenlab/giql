@@ -8,20 +8,17 @@ number of distinct clusters should equal the number of merged intervals.
 
 from giql import transpile
 
-from .utils.bed_export import load_intervals
 from .utils.bedtools_wrapper import merge
 from .utils.data_models import GenomicInterval
+from .utils.duckdb_loader import load_intervals
 
 
 def test_cluster_basic(duckdb_connection):
     """
-    Given:
-        A set of intervals with two overlapping groups
-    When:
-        CLUSTER operator is applied via GIQL
-    Then:
-        Overlapping intervals share cluster IDs and the number of
-        distinct clusters matches the number of bedtools merge results
+    GIVEN a set of intervals with two overlapping groups
+    WHEN CLUSTER operator is applied via GIQL
+    THEN overlapping intervals share cluster IDs and distinct
+    cluster count matches bedtools merge
     """
     intervals = [
         GenomicInterval("chr1", 100, 200, "i1", 100, "+"),
@@ -68,12 +65,9 @@ def test_cluster_basic(duckdb_connection):
 
 def test_cluster_separated(duckdb_connection):
     """
-    Given:
-        Non-overlapping intervals with gaps
-    When:
-        CLUSTER operator is applied
-    Then:
-        Each interval gets its own cluster_id
+    GIVEN non-overlapping intervals with gaps
+    WHEN CLUSTER operator is applied
+    THEN each interval gets its own cluster_id, matching bedtools merge count
     """
     intervals = [
         GenomicInterval("chr1", 100, 200, "i1", 100, "+"),
@@ -104,12 +98,9 @@ def test_cluster_separated(duckdb_connection):
 
 def test_cluster_multiple_chromosomes(duckdb_connection):
     """
-    Given:
-        Overlapping intervals on different chromosomes
-    When:
-        CLUSTER operator is applied
-    Then:
-        Clustering occurs per chromosome independently
+    GIVEN overlapping intervals on different chromosomes
+    WHEN CLUSTER operator is applied
+    THEN clustering occurs per chromosome independently, matching bedtools merge count
     """
     intervals = [
         GenomicInterval("chr1", 100, 200, "i1", 100, "+"),
@@ -143,12 +134,10 @@ def test_cluster_multiple_chromosomes(duckdb_connection):
 
 def test_cluster_stranded(duckdb_connection):
     """
-    Given:
-        Overlapping intervals on different strands
-    When:
-        CLUSTER with stranded := true is applied
-    Then:
-        Clustering occurs per strand independently
+    GIVEN overlapping intervals on different strands
+    WHEN CLUSTER with stranded := true is applied
+    THEN clustering occurs per strand independently, matching
+    bedtools strand-aware merge count
     """
     intervals = [
         GenomicInterval("chr1", 100, 200, "i1", 100, "+"),
@@ -183,42 +172,31 @@ def test_cluster_stranded(duckdb_connection):
     assert len(strand_clusters) == len(bedtools_strand_merged)
 
 
-def test_cluster_with_distance(duckdb_connection):
+def test_cluster_with_distance(giql_query):
     """
-    Given:
-        Intervals with gaps of 50bp and 150bp
-    When:
-        CLUSTER with distance=100 is applied
-    Then:
-        Gaps <= 100bp are in the same cluster, gaps > 100bp are separate
+    GIVEN intervals with gaps of 50bp and 150bp
+    WHEN CLUSTER with distance=100 is applied
+    THEN gaps <= 100bp are in the same cluster and gaps > 100bp are separate
     """
-    intervals = [
-        GenomicInterval("chr1", 100, 200, "i1", 100, "+"),
-        GenomicInterval("chr1", 250, 350, "i2", 150, "+"),  # 50bp gap
-        GenomicInterval("chr1", 500, 600, "i3", 200, "+"),  # 150bp gap
-    ]
-
-    load_intervals(
-        duckdb_connection,
-        "intervals",
-        [i.to_tuple() for i in intervals],
-    )
-
-    sql = transpile(
+    result = giql_query(
         """
         SELECT *, CLUSTER(interval, 100) AS cluster_id
         FROM intervals
         """,
         tables=["intervals"],
+        intervals=[
+            GenomicInterval("chr1", 100, 200, "i1", 100, "+"),
+            GenomicInterval("chr1", 250, 350, "i2", 150, "+"),  # 50bp gap
+            GenomicInterval("chr1", 500, 600, "i3", 200, "+"),  # 150bp gap
+        ],
     )
-    giql_result = duckdb_connection.execute(sql).fetchall()
 
-    assert len(giql_result) == 3
+    assert len(result) == 3
 
     # i1 and i2 should share a cluster (50bp gap <= 100)
-    i1_cluster = giql_result[0][-1]
-    i2_cluster = giql_result[1][-1]
-    i3_cluster = giql_result[2][-1]
+    i1_cluster = result[0][-1]
+    i2_cluster = result[1][-1]
+    i3_cluster = result[2][-1]
 
     assert i1_cluster == i2_cluster, (
         "i1 and i2 (50bp gap) should be in the same cluster with distance=100"

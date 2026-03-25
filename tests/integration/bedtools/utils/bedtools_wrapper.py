@@ -1,13 +1,4 @@
-"""Pybedtools wrapper for genomic interval operations.
-
-This module provides functions for:
-- Creating BedTool objects from interval data
-- Executing bedtools operations via pybedtools
-- Converting results to comparable formats
-"""
-
-from typing import List
-from typing import Tuple
+"""Pybedtools wrapper for genomic interval operations."""
 
 import pybedtools
 
@@ -15,17 +6,9 @@ import pybedtools
 class BedtoolsError(Exception):
     """Raised when bedtools operation fails."""
 
-    pass
 
-
-def create_bedtool(intervals: List[Tuple]) -> pybedtools.BedTool:
-    """Create BedTool object from interval tuples.
-
-    Args:
-        intervals: List of tuples, each containing:
-            - (chrom, start, end) for BED3 format
-            - (chrom, start, end, name, score, strand) for BED6 format
-    """
+def create_bedtool(intervals: list[tuple]) -> pybedtools.BedTool:
+    """Create BedTool object from interval tuples."""
     bed_strings = []
     for interval in intervals:
         if len(interval) == 3:
@@ -44,17 +27,11 @@ def create_bedtool(intervals: List[Tuple]) -> pybedtools.BedTool:
 
 
 def intersect(
-    intervals_a: List[Tuple],
-    intervals_b: List[Tuple],
+    intervals_a: list[tuple],
+    intervals_b: list[tuple],
     strand_mode: str | None = None,
-) -> List[Tuple]:
-    """Find overlapping intervals using bedtools intersect.
-
-    Args:
-        intervals_a: First set of intervals
-        intervals_b: Second set of intervals
-        strand_mode: Strand requirement ('same', 'opposite', or None)
-    """
+) -> list[tuple]:
+    """Find overlapping intervals using bedtools intersect."""
     try:
         bt_a = create_bedtool(intervals_a)
         bt_b = create_bedtool(intervals_b)
@@ -72,13 +49,8 @@ def intersect(
         raise BedtoolsError(f"Intersect operation failed: {e}")
 
 
-def merge(intervals: List[Tuple], strand_mode: str | None = None) -> List[Tuple]:
-    """Merge overlapping intervals using bedtools merge.
-
-    Args:
-        intervals: List of intervals to merge
-        strand_mode: 'same' to merge per-strand, None to ignore
-    """
+def merge(intervals: list[tuple], strand_mode: str | None = None) -> list[tuple]:
+    """Merge overlapping intervals using bedtools merge."""
     try:
         bt = create_bedtool(intervals)
         bt_sorted = bt.sort()
@@ -88,26 +60,19 @@ def merge(intervals: List[Tuple], strand_mode: str | None = None) -> List[Tuple]
             kwargs["s"] = True
 
         result = bt_sorted.merge(**kwargs)
-        return bedtool_to_tuples(result, format="bed3")
+        return bedtool_to_tuples(result, bed_format="bed3")
 
     except Exception as e:
         raise BedtoolsError(f"Merge operation failed: {e}")
 
 
 def closest(
-    intervals_a: List[Tuple],
-    intervals_b: List[Tuple],
+    intervals_a: list[tuple],
+    intervals_b: list[tuple],
     strand_mode: str | None = None,
     k: int = 1,
-) -> List[Tuple]:
-    """Find closest intervals using bedtools closest.
-
-    Args:
-        intervals_a: Query intervals
-        intervals_b: Database intervals to search
-        strand_mode: Strand requirement ('same', 'opposite', or None)
-        k: Number of closest intervals to report
-    """
+) -> list[tuple]:
+    """Find closest intervals using bedtools closest."""
     try:
         bt_a = create_bedtool(intervals_a)
         bt_b = create_bedtool(intervals_b)
@@ -124,31 +89,35 @@ def closest(
             kwargs["S"] = True
 
         result = bt_a.closest(bt_b, **kwargs)
-        return bedtool_to_tuples(result, format="closest")
+        return bedtool_to_tuples(result, bed_format="closest")
 
     except Exception as e:
         raise BedtoolsError(f"Closest operation failed: {e}")
 
 
-def bedtool_to_tuples(bedtool: pybedtools.BedTool, format: str = "bed6") -> List[Tuple]:
+def bedtool_to_tuples(
+    bedtool: pybedtools.BedTool, bed_format: str = "bed6"
+) -> list[tuple]:
     """Convert BedTool object to list of tuples.
 
     Args:
         bedtool: pybedtools.BedTool object
-        format: Expected format ('bed3', 'bed6', or 'closest')
+        bed_format: Expected format ('bed3', 'bed6', or 'closest')
+
+    Closest format assumes BED6+BED6+distance (13 fields):
+        Fields 0-5: A interval (chrom, start, end, name, score, strand)
+        Fields 6-11: B interval (chrom, start, end, name, score, strand)
+        Field 12: distance (integer)
     """
     rows = []
 
     for interval in bedtool:
         fields = interval.fields
 
-        if format == "bed3":
-            chrom = fields[0]
-            start = int(fields[1])
-            end = int(fields[2])
-            rows.append((chrom, start, end))
+        if bed_format == "bed3":
+            rows.append((fields[0], int(fields[1]), int(fields[2])))
 
-        elif format == "bed6":
+        elif bed_format == "bed6":
             while len(fields) < 6:
                 if len(fields) == 3:
                     fields.append(".")
@@ -157,34 +126,35 @@ def bedtool_to_tuples(bedtool: pybedtools.BedTool, format: str = "bed6") -> List
                 elif len(fields) == 5:
                     fields.append(".")
 
-            chrom = fields[0]
-            start = int(fields[1])
-            end = int(fields[2])
-            name = fields[3] if fields[3] != "." else None
-            score = int(fields[4]) if fields[4] != "." else None
-            strand = fields[5] if fields[5] != "." else None
+            rows.append(
+                (
+                    fields[0],
+                    int(fields[1]),
+                    int(fields[2]),
+                    fields[3] if fields[3] != "." else None,
+                    int(fields[4]) if fields[4] != "." else None,
+                    fields[5] if fields[5] != "." else None,
+                )
+            )
 
-            rows.append((chrom, start, end, name, score, strand))
-
-        elif format == "closest":
-            if len(fields) >= 13:
-                row = []
-                for i, field in enumerate(fields):
-                    if i in (1, 2, 7, 8, 12):
-                        row.append(int(field))
-                    elif i in (4, 10):
-                        row.append(int(field) if field != "." else None)
-                    elif i in (3, 5, 9, 11):
-                        row.append(field if field != "." else None)
-                    else:
-                        row.append(field)
-                rows.append(tuple(row))
-            else:
+        elif bed_format == "closest":
+            if len(fields) < 13:
                 raise ValueError(
                     f"Unexpected number of fields for closest: {len(fields)}"
                 )
+            row = []
+            for i, field_val in enumerate(fields):
+                if i in (1, 2, 7, 8, 12):
+                    row.append(int(field_val))
+                elif i in (4, 10):
+                    row.append(int(field_val) if field_val != "." else None)
+                elif i in (3, 5, 9, 11):
+                    row.append(field_val if field_val != "." else None)
+                else:
+                    row.append(field_val)
+            rows.append(tuple(row))
 
         else:
-            raise ValueError(f"Unsupported format: {format}")
+            raise ValueError(f"Unsupported format: {bed_format}")
 
     return rows

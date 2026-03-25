@@ -6,22 +6,19 @@ operations, matching bedtools behavior with -s and -S flags.
 
 from giql import transpile
 
-from .utils.bed_export import load_intervals
 from .utils.bedtools_wrapper import closest
 from .utils.bedtools_wrapper import intersect
 from .utils.bedtools_wrapper import merge
 from .utils.comparison import compare_results
 from .utils.data_models import GenomicInterval
+from .utils.duckdb_loader import load_intervals
 
 
 def test_intersect_same_strand(duckdb_connection):
     """
-    Given:
-        Intervals on both same and opposite strands
-    When:
-        INTERSECTS with same-strand filter is applied
-    Then:
-        Only same-strand overlaps are reported
+    GIVEN intervals on both same and opposite strands
+    WHEN INTERSECTS with same-strand filter is applied
+    THEN only same-strand overlaps are reported
     """
     intervals_a = [
         GenomicInterval("chr1", 100, 200, "a1", 100, "+"),
@@ -67,12 +64,9 @@ def test_intersect_same_strand(duckdb_connection):
 
 def test_intersect_opposite_strand(duckdb_connection):
     """
-    Given:
-        Intervals on both same and opposite strands
-    When:
-        INTERSECTS with opposite-strand filter is applied
-    Then:
-        Only opposite-strand overlaps are reported
+    GIVEN intervals on both same and opposite strands
+    WHEN INTERSECTS with opposite-strand filter is applied
+    THEN only opposite-strand overlaps are reported
     """
     intervals_a = [
         GenomicInterval("chr1", 100, 200, "a1", 100, "+"),
@@ -117,12 +111,9 @@ def test_intersect_opposite_strand(duckdb_connection):
 
 def test_intersect_ignore_strand(duckdb_connection):
     """
-    Given:
-        Intervals with various strand combinations
-    When:
-        INTERSECTS without strand requirements is applied
-    Then:
-        All overlaps are reported regardless of strand
+    GIVEN intervals with various strand combinations
+    WHEN INTERSECTS without strand requirements is applied
+    THEN all overlaps are reported regardless of strand
     """
     intervals_a = [
         GenomicInterval("chr1", 100, 200, "a1", 100, "+"),
@@ -164,12 +155,9 @@ def test_intersect_ignore_strand(duckdb_connection):
 
 def test_intersect_mixed_strands(duckdb_connection):
     """
-    Given:
-        Complex scenario with +, -, and unstranded intervals
-    When:
-        INTERSECTS with same-strand requirement is applied
-    Then:
-        Results correctly handle strand matching logic
+    GIVEN a complex scenario with +, -, and unstranded intervals
+    WHEN INTERSECTS with same-strand requirement is applied
+    THEN results correctly handle strand matching logic
     """
     intervals_a = [
         GenomicInterval("chr1", 100, 200, "a1", 100, "+"),
@@ -218,12 +206,9 @@ def test_intersect_mixed_strands(duckdb_connection):
 
 def test_nearest_same_strand(duckdb_connection):
     """
-    Given:
-        Intervals with candidates on same and opposite strands
-    When:
-        NEAREST with stranded := true is applied
-    Then:
-        Only same-strand nearest intervals are reported
+    GIVEN intervals with candidates on same and opposite strands
+    WHEN NEAREST with stranded := true is applied
+    THEN only same-strand nearest intervals are reported
     """
     intervals_a = [
         GenomicInterval("chr1", 100, 200, "a1", 100, "+"),
@@ -271,14 +256,16 @@ def test_nearest_same_strand(duckdb_connection):
     assert giql_result[0][9] == "b1"
 
 
-def test_nearest_opposite_strand(duckdb_connection):
+def test_nearest_opposite_strand():
     """
-    Given:
-        Intervals with candidates on same and opposite strands
-    When:
-        bedtools closest with opposite-strand requirement is applied
-    Then:
-        Only opposite-strand nearest intervals are reported
+    GIVEN intervals with candidates on same and opposite strands
+    WHEN bedtools closest with opposite-strand (-S) requirement is applied
+    THEN only opposite-strand nearest intervals are reported
+
+    Note: This validates bedtools reference behavior for opposite-strand
+    nearest. GIQL does not yet support a direct opposite-strand NEAREST
+    mode; achieving the equivalent would require a post-filter on NEAREST
+    results.
     """
     intervals_a = [
         GenomicInterval("chr1", 100, 200, "a1", 100, "+"),
@@ -302,12 +289,9 @@ def test_nearest_opposite_strand(duckdb_connection):
 
 def test_nearest_ignore_strand(duckdb_connection):
     """
-    Given:
-        Intervals on different strands
-    When:
-        NEAREST without strand requirements is applied
-    Then:
-        Closest interval is found regardless of strand
+    GIVEN intervals on different strands
+    WHEN NEAREST without strand requirements is applied
+    THEN closest interval is found regardless of strand
     """
     intervals_a = [
         GenomicInterval("chr1", 100, 200, "a1", 100, "+"),
@@ -353,14 +337,11 @@ def test_nearest_ignore_strand(duckdb_connection):
     assert giql_result[0][9] == "b2"
 
 
-def test_merge_strand_specific(duckdb_connection):
+def test_merge_strand_specific(duckdb_connection, giql_query):
     """
-    Given:
-        Overlapping intervals on different strands
-    When:
-        bedtools merge with strand-specific flag is applied
-    Then:
-        Intervals are merged per-strand
+    GIVEN overlapping intervals on different strands
+    WHEN MERGE with stranded := true is applied
+    THEN intervals are merged per-strand
     """
     intervals = [
         GenomicInterval("chr1", 100, 200, "i1", 100, "+"),
@@ -374,5 +355,15 @@ def test_merge_strand_specific(duckdb_connection):
         strand_mode="same",
     )
 
-    # Should produce at least 2 merged intervals (one per strand)
-    assert len(bedtools_result) >= 2
+    giql_result = giql_query(
+        """
+        SELECT MERGE(interval, stranded := true) AS merged
+        FROM intervals
+        """,
+        tables=["intervals"],
+        intervals=intervals,
+    )
+
+    # Should produce exactly 2 merged intervals (one per strand)
+    assert len(bedtools_result) == 2
+    assert len(giql_result) == 2
