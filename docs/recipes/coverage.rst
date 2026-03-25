@@ -17,6 +17,21 @@ Count the number of features overlapping each 1 kb bin across the genome:
    SELECT COVERAGE(interval, 1000) AS depth
    FROM features
 
+**Sample output:**
+
+.. code-block:: text
+
+   ┌────────┬────────┬────────┬───────┐
+   │ chrom  │ start  │  end   │ depth │
+   ├────────┼────────┼────────┼───────┤
+   │ chr1   │      0 │   1000 │     3 │
+   │ chr1   │   1000 │   2000 │     1 │
+   │ chr1   │   2000 │   3000 │     0 │
+   │ ...    │    ... │    ... │   ... │
+   └────────┴────────┴────────┴───────┘
+
+Each row represents one genomic bin. Bins with no overlapping features appear with a count of zero.
+
 **Use case:** Compute read depth or feature density at a fixed resolution.
 
 Custom Bin Size
