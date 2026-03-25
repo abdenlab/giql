@@ -875,7 +875,9 @@ class TestBaseGIQLGenerator:
         tables = Tables()
         tables.register("genes_closed", Table("genes_closed", interval_type="closed"))
 
-        sql = "SELECT * FROM NEAREST(genes_closed, reference := 'chr1:1000-2000', k := 3)"
+        sql = (
+            "SELECT * FROM NEAREST(genes_closed, reference := 'chr1:1000-2000', k := 3)"
+        )
         ast = parse_one(sql, dialect=GIQLDialect)
 
         generator = BaseGIQLGenerator(tables=tables)
@@ -988,7 +990,9 @@ class TestBaseGIQLGenerator:
         WHEN giqlnearest_sql is called
         THEN ValueError is raised listing available tables.
         """
-        sql = "SELECT * FROM NEAREST(unknown_table, reference := 'chr1:1000-2000', k := 3)"
+        sql = (
+            "SELECT * FROM NEAREST(unknown_table, reference := 'chr1:1000-2000', k := 3)"
+        )
         ast = parse_one(sql, dialect=GIQLDialect)
 
         generator = BaseGIQLGenerator(tables=tables_with_peaks_and_genes)

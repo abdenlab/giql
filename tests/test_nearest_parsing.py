@@ -213,7 +213,9 @@ class TestNearestParsing:
         joins = ast.args.get("joins")
         join = joins[0]
         lateral_expr = join.this
-        nearest_expr = lateral_expr.this if hasattr(lateral_expr, "this") else lateral_expr
+        nearest_expr = (
+            lateral_expr.this if hasattr(lateral_expr, "this") else lateral_expr
+        )
         assert isinstance(nearest_expr, GIQLNearest)
         assert nearest_expr.args.get("k") is None, (
             "= should not be treated as named parameter assignment"
@@ -235,6 +237,10 @@ class TestNearestParsing:
         joins = ast.args.get("joins")
         join = joins[0]
         lateral_expr = join.this
-        nearest_expr = lateral_expr.this if hasattr(lateral_expr, "this") else lateral_expr
+        nearest_expr = (
+            lateral_expr.this if hasattr(lateral_expr, "this") else lateral_expr
+        )
         assert isinstance(nearest_expr, GIQLNearest)
-        assert nearest_expr.args.get("k") is not None, "Missing k parameter with => syntax"
+        assert nearest_expr.args.get("k") is not None, (
+            "Missing k parameter with => syntax"
+        )

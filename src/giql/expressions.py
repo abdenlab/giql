@@ -79,9 +79,7 @@ def _split_named_and_positional(args):
     positional_args = []
     for arg in args:
         if isinstance(arg, (exp.PropertyEQ, exp.Kwarg)):
-            param_name = (
-                arg.this.name if hasattr(arg.this, "name") else str(arg.this)
-            )
+            param_name = arg.this.name if hasattr(arg.this, "name") else str(arg.this)
             kwargs[param_name.lower()] = arg.expression
         else:
             positional_args.append(arg)
