@@ -181,3 +181,48 @@ def test_cluster_stranded(duckdb_connection):
     # distinct (chrom, strand, cluster_id) pairs
     strand_clusters = {(row[0], row[5], row[-1]) for row in giql_result}
     assert len(strand_clusters) == len(bedtools_strand_merged)
+
+
+def test_cluster_with_distance(duckdb_connection):
+    """
+    Given:
+        Intervals with gaps of 50bp and 150bp
+    When:
+        CLUSTER with distance=100 is applied
+    Then:
+        Gaps <= 100bp are in the same cluster, gaps > 100bp are separate
+    """
+    intervals = [
+        GenomicInterval("chr1", 100, 200, "i1", 100, "+"),
+        GenomicInterval("chr1", 250, 350, "i2", 150, "+"),  # 50bp gap
+        GenomicInterval("chr1", 500, 600, "i3", 200, "+"),  # 150bp gap
+    ]
+
+    load_intervals(
+        duckdb_connection,
+        "intervals",
+        [i.to_tuple() for i in intervals],
+    )
+
+    sql = transpile(
+        """
+        SELECT *, CLUSTER(interval, 100) AS cluster_id
+        FROM intervals
+        """,
+        tables=["intervals"],
+    )
+    giql_result = duckdb_connection.execute(sql).fetchall()
+
+    assert len(giql_result) == 3
+
+    # i1 and i2 should share a cluster (50bp gap <= 100)
+    i1_cluster = giql_result[0][-1]
+    i2_cluster = giql_result[1][-1]
+    i3_cluster = giql_result[2][-1]
+
+    assert i1_cluster == i2_cluster, (
+        "i1 and i2 (50bp gap) should be in the same cluster with distance=100"
+    )
+    assert i3_cluster != i1_cluster, (
+        "i3 (150bp gap) should be in a different cluster with distance=100"
+    )

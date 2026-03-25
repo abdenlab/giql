@@ -237,3 +237,184 @@ def test_nearest_boundary_cases(duckdb_connection):
     assert len(giql_result) == 1
     # b1 is adjacent (distance 0), b2 is far (distance 300)
     assert giql_result[0][9] == "b1"
+
+
+def test_nearest_k_greater_than_one(duckdb_connection):
+    """
+    Given:
+        One query interval and three database intervals at different distances
+    When:
+        NEAREST with k := 3 is applied
+    Then:
+        All 3 neighbors are returned, ordered by distance
+    """
+    intervals_a = [
+        GenomicInterval("chr1", 200, 300, "a1", 100, "+"),
+    ]
+    intervals_b = [
+        GenomicInterval("chr1", 100, 150, "b_far", 100, "+"),
+        GenomicInterval("chr1", 310, 350, "b_near", 100, "+"),
+        GenomicInterval("chr1", 500, 600, "b_farther", 100, "+"),
+    ]
+
+    load_intervals(
+        duckdb_connection,
+        "intervals_a",
+        [i.to_tuple() for i in intervals_a],
+    )
+    load_intervals(
+        duckdb_connection,
+        "intervals_b",
+        [i.to_tuple() for i in intervals_b],
+    )
+
+    sql = transpile(
+        """
+        SELECT a.name, b.name
+        FROM intervals_a a
+        CROSS JOIN LATERAL NEAREST(
+            intervals_b,
+            reference := a.interval,
+            k := 3
+        ) b
+        """,
+        tables=["intervals_a", "intervals_b"],
+    )
+    result = duckdb_connection.execute(sql).fetchall()
+
+    b_names = [row[1] for row in result]
+    assert len(b_names) == 3, f"Expected 3 results for k=3, got {len(b_names)}"
+    assert set(b_names) == {"b_far", "b_near", "b_farther"}
+
+
+def test_nearest_k_exceeds_available(duckdb_connection):
+    """
+    Given:
+        One query interval and only two database intervals
+    When:
+        NEAREST with k := 5 is applied
+    Then:
+        Only 2 rows returned (fewer than k available)
+    """
+    intervals_a = [
+        GenomicInterval("chr1", 200, 300, "a1", 100, "+"),
+    ]
+    intervals_b = [
+        GenomicInterval("chr1", 100, 150, "b1", 100, "+"),
+        GenomicInterval("chr1", 400, 500, "b2", 100, "+"),
+    ]
+
+    load_intervals(
+        duckdb_connection,
+        "intervals_a",
+        [i.to_tuple() for i in intervals_a],
+    )
+    load_intervals(
+        duckdb_connection,
+        "intervals_b",
+        [i.to_tuple() for i in intervals_b],
+    )
+
+    sql = transpile(
+        """
+        SELECT a.name, b.name
+        FROM intervals_a a
+        CROSS JOIN LATERAL NEAREST(
+            intervals_b,
+            reference := a.interval,
+            k := 5
+        ) b
+        """,
+        tables=["intervals_a", "intervals_b"],
+    )
+    result = duckdb_connection.execute(sql).fetchall()
+
+    assert len(result) == 2, f"Expected 2 results (fewer than k=5), got {len(result)}"
+
+
+def test_nearest_max_distance(duckdb_connection):
+    """
+    Given:
+        One query interval, one near and one far database interval
+    When:
+        NEAREST with max_distance := 50 is applied
+    Then:
+        Only the near interval (within 50bp) is returned
+    """
+    intervals_a = [
+        GenomicInterval("chr1", 200, 300, "a1", 100, "+"),
+    ]
+    intervals_b = [
+        GenomicInterval("chr1", 310, 350, "b_near", 100, "+"),
+        GenomicInterval("chr1", 500, 600, "b_far", 100, "+"),
+    ]
+
+    load_intervals(
+        duckdb_connection,
+        "intervals_a",
+        [i.to_tuple() for i in intervals_a],
+    )
+    load_intervals(
+        duckdb_connection,
+        "intervals_b",
+        [i.to_tuple() for i in intervals_b],
+    )
+
+    sql = transpile(
+        """
+        SELECT a.name, b.name
+        FROM intervals_a a
+        CROSS JOIN LATERAL NEAREST(
+            intervals_b,
+            reference := a.interval,
+            k := 5,
+            max_distance := 50
+        ) b
+        """,
+        tables=["intervals_a", "intervals_b"],
+    )
+    result = duckdb_connection.execute(sql).fetchall()
+
+    b_names = [row[1] for row in result]
+    # b_near is 10bp away (310 - 300), b_far is 200bp away (500 - 300)
+    assert b_names == ["b_near"], f"Expected only b_near within 50bp, got {b_names}"
+
+
+def test_nearest_standalone_literal_reference(duckdb_connection):
+    """
+    Given:
+        A table with intervals
+    When:
+        NEAREST is used in standalone mode with a literal reference
+    Then:
+        The nearest intervals to the literal position are returned
+    """
+    intervals = [
+        GenomicInterval("chr1", 100, 200, "near", 100, "+"),
+        GenomicInterval("chr1", 400, 500, "mid", 100, "+"),
+        GenomicInterval("chr1", 800, 900, "far", 100, "+"),
+    ]
+
+    load_intervals(
+        duckdb_connection,
+        "intervals",
+        [i.to_tuple() for i in intervals],
+    )
+
+    sql = transpile(
+        """
+        SELECT *
+        FROM NEAREST(
+            intervals,
+            reference := 'chr1:350-360',
+            k := 2
+        )
+        """,
+        tables=["intervals"],
+    )
+    result = duckdb_connection.execute(sql).fetchall()
+
+    names = [row[3] for row in result]
+    assert len(names) == 2, f"Expected 2 results for k=2, got {len(names)}"
+    # near is 150bp away, mid is 40bp away, far is 440bp away
+    assert set(names) == {"near", "mid"}
