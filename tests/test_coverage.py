@@ -763,8 +763,7 @@ class TestCoverageTransformer:
         # Act & Assert
         with pytest.raises(ValueError, match="Multiple COVERAGE"):
             transpile(
-                "SELECT COVERAGE(interval, 1000), "
-                "COVERAGE(interval, 500) FROM features",
+                "SELECT COVERAGE(interval, 1000), COVERAGE(interval, 500) FROM features",
                 tables=["features"],
             )
 
@@ -927,3 +926,76 @@ class TestCoverageTransformer:
         # Assert
         row = df[df["start"] == 0].iloc[0]
         assert row["value"] == 100
+
+    # ------------------------------------------------------------------
+    # Property-based transpilation (PBT-T001, PBT-T002)
+    # ------------------------------------------------------------------
+
+    @given(
+        resolution=st.integers(min_value=1, max_value=10_000_000),
+        stat=st.sampled_from(VALID_STATS),
+    )
+    @settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
+    def test_transform_with_varying_stat_and_resolution(self, resolution, stat):
+        """Test stat parameter maps to correct SQL aggregate across input space.
+
+        Given:
+            Any valid stat (count/mean/sum/min/max) and resolution (1-10M)
+        When:
+            Transpiled via transpile()
+        Then:
+            The output SQL should contain the corresponding SQL aggregate
+            function name and the resolution value
+        """
+        # Arrange
+        stat_to_sql = {
+            "count": "COUNT",
+            "mean": "AVG",
+            "sum": "SUM(",
+            "min": "MIN(",
+            "max": "MAX(",
+        }
+        expected_agg = stat_to_sql[stat]
+
+        # Act
+        sql = transpile(
+            f"SELECT COVERAGE(interval, {resolution}, stat := '{stat}') FROM features",
+            tables=["features"],
+        )
+
+        # Assert
+        upper = sql.upper()
+        assert expected_agg in upper
+        assert str(resolution) in sql
+
+    @given(
+        resolution=st.integers(min_value=1, max_value=10_000_000),
+        stat=st.sampled_from(VALID_STATS),
+    )
+    @settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
+    def test_transform_structural_invariants_with_varying_stat_and_resolution(
+        self, resolution, stat
+    ):
+        """Test transpiled SQL always contains required structural elements.
+
+        Given:
+            Any valid stat (count/mean/sum/min/max) and resolution (1-10M)
+        When:
+            Transpiled via transpile()
+        Then:
+            The output SQL should always contain __GIQL_BINS,
+            GENERATE_SERIES, LEFT JOIN, GROUP BY, and ORDER BY
+        """
+        # Act
+        sql = transpile(
+            f"SELECT COVERAGE(interval, {resolution}, stat := '{stat}') FROM features",
+            tables=["features"],
+        )
+
+        # Assert
+        upper = sql.upper()
+        assert "__GIQL_BINS" in upper
+        assert "GENERATE_SERIES" in upper
+        assert "LEFT JOIN" in upper
+        assert "GROUP BY" in upper
+        assert "ORDER BY" in upper
