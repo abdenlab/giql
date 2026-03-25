@@ -434,7 +434,7 @@ Compute the average interval length per 500 bp bin:
 
 **With WHERE Filter:**
 
-Coverage of high-scoring features only:
+Assuming the source table includes a ``score`` column, compute coverage of high-scoring features only:
 
 .. code-block:: sql
 
