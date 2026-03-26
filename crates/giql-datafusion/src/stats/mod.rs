@@ -91,4 +91,60 @@ mod tests {
     fn test_select_representative_max_one() {
         assert_eq!(select_representative_row_groups(10, 1), vec![0]);
     }
+
+    #[test]
+    fn test_collect_parquet_stats_uniform() {
+        use arrow::array::{Int64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use arrow::record_batch::RecordBatch;
+        use parquet::arrow::ArrowWriter;
+        use std::sync::Arc;
+        use tempfile::NamedTempFile;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("chrom", DataType::Utf8, false),
+            Field::new("start", DataType::Int64, false),
+            Field::new("end", DataType::Int64, false),
+        ]));
+        let starts: Vec<i64> = (0..50).map(|i| i * 200).collect();
+        let ends: Vec<i64> = starts.iter().map(|s| s + 100).collect();
+        let chroms: Vec<&str> = vec!["chr1"; 50];
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(StringArray::from(chroms)),
+                Arc::new(Int64Array::from(starts.clone())),
+                Arc::new(Int64Array::from(ends.clone())),
+            ],
+        )
+        .unwrap();
+
+        let file = NamedTempFile::new().unwrap();
+        let mut writer =
+            ArrowWriter::try_new(file.reopen().unwrap(), schema, None)
+                .unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+
+        let stats =
+            collect_parquet_stats(file.path(), "start", "end", 3)
+                .unwrap();
+
+        assert_eq!(stats.row_count, 50);
+        assert_eq!(stats.domain_min, 0);
+        assert_eq!(stats.domain_max, *ends.last().unwrap());
+        assert!((stats.width.median - 100.0).abs() < 1e-6);
+        assert!(stats.width.cv < 0.01);
+    }
+
+    #[test]
+    fn test_collect_parquet_stats_nonexistent_file() {
+        let result = collect_parquet_stats(
+            Path::new("/tmp/nonexistent_file.parquet"),
+            "start",
+            "end",
+            3,
+        );
+        assert!(result.is_err());
+    }
 }

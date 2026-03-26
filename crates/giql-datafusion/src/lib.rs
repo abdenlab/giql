@@ -77,3 +77,72 @@ pub fn register_optimizer(
         .with_physical_optimizer_rules(rules)
         .build()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_config() {
+        let config = IntersectsOptimizerConfig::default();
+        assert!((config.p99_median_threshold - 10.0).abs() < f64::EPSILON);
+        assert!((config.cv_threshold - 1.5).abs() < f64::EPSILON);
+        assert_eq!(config.max_sample_row_groups, 3);
+    }
+
+    #[test]
+    fn test_custom_config_used_by_cost_model() {
+        let config = IntersectsOptimizerConfig {
+            p99_median_threshold: 5.0,
+            cv_threshold: 1.0,
+            max_sample_row_groups: 1,
+        };
+        let model = cost::CostModel::new(&config);
+
+        // With p99/median = 6.0 > 5.0 (custom threshold), should
+        // short-circuit to sweep line even though default threshold
+        // would not trigger.
+        let stats = stats::IntervalStats {
+            row_count: 100_000,
+            domain_min: 0,
+            domain_max: 1_000_000,
+            is_sorted_by_start: false,
+            row_group_bounds: vec![],
+            width: stats::WidthStats {
+                median: 100.0,
+                mean: 120.0,
+                p95: 500.0,
+                p99: 600.0,
+                cv: 0.5,
+                p99_median_ratio: 6.0,
+            },
+        };
+
+        match model.decide(&stats, &stats) {
+            JoinStrategy::SweepLine { .. } => {}
+            other => panic!(
+                "Expected SweepLine with custom threshold, got {:?}",
+                other
+            ),
+        }
+    }
+
+    #[test]
+    fn test_register_optimizer_adds_rule() {
+        use datafusion::execution::SessionStateBuilder;
+
+        let state = SessionStateBuilder::new()
+            .with_default_features()
+            .build();
+        let n_before = state.physical_optimizers().len();
+
+        let config = IntersectsOptimizerConfig::default();
+        let state = register_optimizer(state, config);
+        let n_after = state.physical_optimizers().len();
+
+        assert_eq!(n_after, n_before + 1);
+
+        let last_rule = state.physical_optimizers().last().unwrap();
+        assert_eq!(last_rule.name(), "intersects_optimizer");
+    }
+}

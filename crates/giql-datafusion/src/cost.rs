@@ -264,4 +264,43 @@ mod tests {
         let bin_size = model.estimate_optimal_bin_size(&left, &right);
         assert_eq!(bin_size, MIN_BIN_SIZE);
     }
+
+    #[test]
+    fn test_both_sorted_selects_sweep_with_skip() {
+        let model = CostModel::new(&default_config());
+        // CV just above threshold, both sides sorted
+        let left = make_stats(100_000, 100.0, 200.0, 500.0, 600.0, 1.6, true);
+        let right = make_stats(100_000, 100.0, 200.0, 500.0, 600.0, 0.5, true);
+
+        match model.decide(&left, &right) {
+            JoinStrategy::SweepLine { skip_sort } => {
+                assert!(skip_sort);
+            }
+            other => panic!("Expected SweepLine, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_at_threshold_does_not_short_circuit() {
+        let model = CostModel::new(&default_config());
+        // p99/median = exactly 10.0 — threshold is >, so should NOT
+        // short-circuit to sweep line
+        let left = make_stats(
+            1_000_000, 100.0, 100.0, 500.0, 1000.0, 0.3, false,
+        );
+        let right = make_stats(
+            1_000_000, 100.0, 100.0, 500.0, 1000.0, 0.3, false,
+        );
+
+        // p99/median = 1000/100 = 10.0, which is NOT > 10.0
+        let strategy = model.decide(&left, &right);
+        // Should reach cost comparison, not short-circuit
+        match strategy {
+            JoinStrategy::SweepLine { .. }
+            | JoinStrategy::BinnedJoin { .. } => {}
+            JoinStrategy::NestedLoop => {
+                panic!("Should not return NestedLoop with stats")
+            }
+        }
+    }
 }

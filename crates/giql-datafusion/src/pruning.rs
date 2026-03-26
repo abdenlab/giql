@@ -137,4 +137,29 @@ mod tests {
         assert_eq!(preds[3].op, PruningOp::Gt);
         assert_eq!(preds[3].value, 1000);
     }
+
+    #[test]
+    fn test_domain_bounds_from_interval_stats() {
+        use crate::stats::{IntervalStats, WidthStats};
+
+        let stats = IntervalStats {
+            row_count: 1000,
+            domain_min: 500,
+            domain_max: 50000,
+            is_sorted_by_start: false,
+            row_group_bounds: vec![],
+            width: WidthStats {
+                median: 100.0,
+                mean: 100.0,
+                p95: 100.0,
+                p99: 100.0,
+                cv: 0.0,
+                p99_median_ratio: 1.0,
+            },
+        };
+
+        let bounds = DomainBounds::from(&stats);
+        assert_eq!(bounds.min_start, 500);
+        assert_eq!(bounds.max_end, 50000);
+    }
 }

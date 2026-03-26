@@ -214,4 +214,91 @@ mod tests {
     fn test_percentile_sorted_single() {
         assert!((percentile_sorted(&[42.0], 0.5) - 42.0).abs() < 1e-6);
     }
+
+    #[test]
+    fn test_sample_widths_uniform_parquet() {
+        use arrow::array::{Int64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use arrow::record_batch::RecordBatch;
+        use parquet::arrow::ArrowWriter;
+        use std::sync::Arc;
+        use tempfile::NamedTempFile;
+
+        // Write a Parquet file with uniform 100bp intervals
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("chrom", DataType::Utf8, false),
+            Field::new("start", DataType::Int64, false),
+            Field::new("end", DataType::Int64, false),
+        ]));
+        let starts: Vec<i64> = (0..100).map(|i| i * 200).collect();
+        let ends: Vec<i64> = starts.iter().map(|s| s + 100).collect();
+        let chroms: Vec<&str> = vec!["chr1"; 100];
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(StringArray::from(chroms)),
+                Arc::new(Int64Array::from(starts)),
+                Arc::new(Int64Array::from(ends)),
+            ],
+        )
+        .unwrap();
+
+        let file = NamedTempFile::new().unwrap();
+        let mut writer =
+            ArrowWriter::try_new(file.reopen().unwrap(), schema, None)
+                .unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+
+        let stats =
+            sample_widths(file.path(), "start", "end", &[0]).unwrap();
+        assert!((stats.median - 100.0).abs() < 1e-6);
+        assert!(stats.cv < 0.01);
+    }
+
+    #[test]
+    fn test_sample_widths_missing_column() {
+        use arrow::array::{Int64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use arrow::record_batch::RecordBatch;
+        use parquet::arrow::ArrowWriter;
+        use std::sync::Arc;
+        use tempfile::NamedTempFile;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("chrom", DataType::Utf8, false),
+            Field::new("start", DataType::Int64, false),
+            Field::new("end", DataType::Int64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(StringArray::from(vec!["chr1"])),
+                Arc::new(Int64Array::from(vec![100])),
+                Arc::new(Int64Array::from(vec![200])),
+            ],
+        )
+        .unwrap();
+        let file = NamedTempFile::new().unwrap();
+        let mut writer =
+            ArrowWriter::try_new(file.reopen().unwrap(), schema, None)
+                .unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+
+        let result =
+            sample_widths(file.path(), "nonexistent", "end", &[0]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_sample_widths_empty_row_groups() {
+        let result = sample_widths(
+            std::path::Path::new("/tmp/fake.parquet"),
+            "start",
+            "end",
+            &[],
+        );
+        assert!(result.is_err());
+    }
 }

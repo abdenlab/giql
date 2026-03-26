@@ -80,3 +80,64 @@ impl IntervalStats {
         self.domain_max - self.domain_min
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_width_upper_bound() {
+        let rg = RowGroupBounds {
+            min_start: 100,
+            max_start: 400,
+            min_end: 200,
+            max_end: 500,
+            row_count: 10,
+        };
+        assert_eq!(rg.width_upper_bound(), 400);
+    }
+
+    #[test]
+    fn test_width_at_max() {
+        let rg = RowGroupBounds {
+            min_start: 100,
+            max_start: 400,
+            min_end: 200,
+            max_end: 500,
+            row_count: 10,
+        };
+        assert_eq!(rg.width_at_max(), 100);
+    }
+
+    #[test]
+    fn test_width_at_min() {
+        let rg = RowGroupBounds {
+            min_start: 100,
+            max_start: 400,
+            min_end: 200,
+            max_end: 500,
+            row_count: 10,
+        };
+        assert_eq!(rg.width_at_min(), 100);
+    }
+
+    #[test]
+    fn test_domain_span() {
+        let stats = IntervalStats {
+            row_count: 1000,
+            domain_min: 0,
+            domain_max: 1_000_000,
+            is_sorted_by_start: false,
+            row_group_bounds: vec![],
+            width: WidthStats {
+                median: 100.0,
+                mean: 100.0,
+                p95: 100.0,
+                p99: 100.0,
+                cv: 0.0,
+                p99_median_ratio: 1.0,
+            },
+        };
+        assert_eq!(stats.domain_span(), 1_000_000);
+    }
+}
