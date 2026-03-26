@@ -47,6 +47,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut reps = 3;
     let mut op = "join".to_string();
     let mut no_optimizer = false;
+    let mut force_binned = false;
 
     let mut i = 3;
     while i < args.len() {
@@ -61,6 +62,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             "--no-optimizer" => {
                 no_optimizer = true;
+            }
+            "--force-binned" => {
+                force_binned = true;
             }
             _ => {
                 eprintln!("Unknown arg: {}", args[i]);
@@ -84,7 +88,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ctx = if no_optimizer {
         SessionContext::new()
     } else {
-        let config = IntersectsOptimizerConfig::default();
+        let config = if force_binned {
+            // Set thresholds so high that sweep-line is never chosen
+            IntersectsOptimizerConfig {
+                p99_median_threshold: f64::MAX,
+                cv_threshold: f64::MAX,
+                max_sample_row_groups: 3,
+            }
+        } else {
+            IntersectsOptimizerConfig::default()
+        };
         let state = SessionStateBuilder::new()
             .with_default_features()
             .build();
