@@ -3,7 +3,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, ArrayRef, Int64Array, RecordBatch, StringArray,
+    Array, ArrayRef, Int32Array, Int64Array, RecordBatch, StringArray,
     StringViewArray,
 };
 use arrow::datatypes::SchemaRef;
@@ -120,20 +120,24 @@ impl ExecutionPlan for SweepLineJoinExec {
 
     fn execute(
         &self,
-        partition: usize,
+        _partition: usize,
         context: Arc<datafusion::execution::TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
-        let left_stream =
-            self.left.execute(partition, context.clone())?;
-        let right_stream = self.right.execute(partition, context)?;
-
+        // Collect ALL partitions from both children. DataFusion may
+        // split inputs across multiple partitions (default =
+        // num_cpus). We must read every partition to get all rows.
+        let left = self.left.clone();
+        let right = self.right.clone();
         let left_cols = self.left_cols.clone();
         let right_cols = self.right_cols.clone();
         let schema = self.schema.clone();
+        let ctx = context;
 
         let stream = futures::stream::once(async move {
-            let left_batches = collect_batches(left_stream).await?;
-            let right_batches = collect_batches(right_stream).await?;
+            let left_batches =
+                collect_all_partitions(&left, &ctx).await?;
+            let right_batches =
+                collect_all_partitions(&right, &ctx).await?;
 
             let left_intervals =
                 extract_intervals(&left_batches, &left_cols)?;
@@ -179,30 +183,13 @@ fn extract_intervals(
 
     for (batch_idx, batch) in batches.iter().enumerate() {
         let chrom_col = batch.column(cols.chrom_idx);
-        let starts = batch
-            .column(cols.start_idx)
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .ok_or_else(|| {
-                datafusion::error::DataFusionError::Internal(
-                    "Start column is not Int64Array".to_string(),
-                )
-            })?;
-
-        let ends = batch
-            .column(cols.end_idx)
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .ok_or_else(|| {
-                datafusion::error::DataFusionError::Internal(
-                    "End column is not Int64Array".to_string(),
-                )
-            })?;
+        let start_col = batch.column(cols.start_idx);
+        let end_col = batch.column(cols.end_idx);
 
         for row_idx in 0..batch.num_rows() {
             if chrom_col.is_null(row_idx)
-                || starts.is_null(row_idx)
-                || ends.is_null(row_idx)
+                || start_col.is_null(row_idx)
+                || end_col.is_null(row_idx)
             {
                 continue;
             }
@@ -213,10 +200,22 @@ fn extract_intervals(
                             .to_string(),
                     )
                 })?;
+            let start = get_i64_value(start_col.as_ref(), row_idx)
+                .ok_or_else(|| {
+                    datafusion::error::DataFusionError::Internal(
+                        "Start column is not Int32 or Int64".to_string(),
+                    )
+                })?;
+            let end = get_i64_value(end_col.as_ref(), row_idx)
+                .ok_or_else(|| {
+                    datafusion::error::DataFusionError::Internal(
+                        "End column is not Int32 or Int64".to_string(),
+                    )
+                })?;
             intervals.push(FlatInterval {
                 chrom,
-                start: starts.value(row_idx),
-                end: ends.value(row_idx),
+                start,
+                end,
                 batch_idx,
                 row_idx,
             });
@@ -247,8 +246,11 @@ fn sweep_line_join(
 
     for l in left {
 
-        // Advance right_idx to add all right intervals with
-        // start < left.end on the same chromosome
+        // Advance right_idx to add right intervals that START before
+        // ANY future left interval could end. Since left is sorted by
+        // start, and a future left interval's end could be arbitrarily
+        // large, we add all right intervals with start < l.end.
+        // This is conservative — we check exact overlap below.
         while right_idx < right.len() {
             let r = &right[right_idx];
             if r.chrom < l.chrom {
@@ -258,7 +260,6 @@ fn sweep_line_join(
             if r.chrom > l.chrom {
                 break;
             }
-            // Same chromosome
             if r.start >= l.end {
                 break;
             }
@@ -266,21 +267,30 @@ fn sweep_line_join(
             right_idx += 1;
         }
 
-        // Remove expired intervals from active set
+        // Remove only truly expired intervals: those whose END is at
+        // or before the current left START. Since left is sorted by
+        // start, any interval with end <= l.start can never overlap
+        // any future left interval either.
+        //
+        // We do NOT filter on r.start < l.end here because a wide
+        // right interval (r.start before a previous narrow left's
+        // end) may still be needed by a LATER wider left interval.
         active.retain(|&ri| {
             let r = &right[ri];
             r.chrom == l.chrom && r.end > l.start
         });
 
-        // All remaining active intervals overlap with l
+        // Emit matches: check the full overlap condition inline.
         for &ri in &active {
             let r = &right[ri];
-            matches.push((
-                l.batch_idx,
-                l.row_idx,
-                r.batch_idx,
-                r.row_idx,
-            ));
+            if r.start < l.end {
+                matches.push((
+                    l.batch_idx,
+                    l.row_idx,
+                    r.batch_idx,
+                    r.row_idx,
+                ));
+            }
         }
     }
 
@@ -335,20 +345,34 @@ fn build_output_batch(
     Ok(RecordBatch::try_new(schema.clone(), columns)?)
 }
 
-/// Collect all batches from a stream into a Vec.
-async fn collect_batches(
-    stream: SendableRecordBatchStream,
+/// Collect all record batches from all partitions of an execution
+/// plan. Uses DataFusion's `collect` which spawns partition tasks
+/// concurrently — required because RepartitionExec uses shared
+/// channels that break under sequential execution.
+async fn collect_all_partitions(
+    plan: &Arc<dyn ExecutionPlan>,
+    context: &Arc<datafusion::execution::TaskContext>,
 ) -> Result<Vec<RecordBatch>> {
-    use futures::StreamExt;
+    datafusion::physical_plan::collect(
+        plan.clone(),
+        context.clone(),
+    )
+    .await
+}
 
-    let mut batches = Vec::new();
-    let mut stream = stream;
-
-    while let Some(batch) = stream.next().await {
-        batches.push(batch?);
-    }
-
-    Ok(batches)
+/// Extract an i64 value from an array that may be Int32Array or
+/// Int64Array.
+fn get_i64_value(array: &dyn Array, idx: usize) -> Option<i64> {
+    array
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .map(|arr| arr.value(idx))
+        .or_else(|| {
+            array
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .map(|arr| arr.value(idx) as i64)
+        })
 }
 
 /// Extract a string value from an array that may be StringArray or

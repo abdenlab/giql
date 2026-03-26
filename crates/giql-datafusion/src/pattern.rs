@@ -148,7 +148,14 @@ fn detect_from_hash_join(
         &right_schema,
     ) {
         Some(cols) => cols,
-        None => return Ok(None),
+        None => {
+            eprintln!(
+                "INTERSECTS optimizer: HashJoinExec filter didn't \
+                 match. filter={:?}, indices={:?}",
+                filter_expr, column_indices,
+            );
+            return Ok(None);
+        }
     };
 
     let left_start_idx = match left_schema
@@ -218,9 +225,12 @@ fn detect_from_hash_join(
 
 /// Extract range column names from a HashJoin filter expression.
 ///
-/// The filter should contain `left.start < right.end AND left.end >
-/// right.start`. Returns `Some((left_start, left_end, right_start,
-/// right_end))` column names if the pattern matches.
+/// The filter should contain the interval overlap condition
+/// `A.start < B.end AND A.end > B.start`, but DataFusion may reorder
+/// the operands arbitrarily. We resolve all four columns by name and
+/// side, then match them to the canonical form.
+///
+/// Returns `Some((left_start, left_end, right_start, right_end))`.
 fn extract_range_columns_from_filter(
     expr: &Arc<dyn datafusion::physical_plan::PhysicalExpr>,
     column_indices: &[ColumnIndex],
@@ -228,170 +238,144 @@ fn extract_range_columns_from_filter(
     right_schema: &SchemaRef,
 ) -> Option<(String, String, String, String)> {
     use datafusion::logical_expr::Operator;
-    use datafusion::physical_expr::expressions::BinaryExpr;
+    use datafusion::physical_expr::expressions::{BinaryExpr, Column};
 
     let binary = expr.as_any().downcast_ref::<BinaryExpr>()?;
-
     if *binary.op() != Operator::And {
         return None;
     }
 
-    let left_pred = binary.left();
-    let right_pred = binary.right();
+    // Collect all four column references from both predicates.
+    // Each predicate is either Lt or Gt with two Column operands.
+    let pred_a = binary.left();
+    let pred_b = binary.right();
 
-    // Try both orderings of the two predicates
-    
-
-    try_extract_range_pair(
-        left_pred,
-        right_pred,
-        column_indices,
-        left_schema,
-        right_schema,
-    )
-    .or_else(|| {
-        try_extract_range_pair(
-            right_pred,
-            left_pred,
-            column_indices,
-            left_schema,
-            right_schema,
-        )
-    })
-}
-
-/// Try to extract (left_start, left_end, right_start, right_end) from
-/// a pair of predicates where one is Lt and one is Gt.
-fn try_extract_range_pair(
-    pred_a: &Arc<dyn datafusion::physical_plan::PhysicalExpr>,
-    pred_b: &Arc<dyn datafusion::physical_plan::PhysicalExpr>,
-    column_indices: &[ColumnIndex],
-    left_schema: &SchemaRef,
-    right_schema: &SchemaRef,
-) -> Option<(String, String, String, String)> {
-    let (lt_left, lt_right) = extract_lt_columns(
-        pred_a,
-        column_indices,
-        left_schema,
-        right_schema,
+    let cols_a = extract_comparison_columns(
+        pred_a, column_indices, left_schema, right_schema,
     )?;
-    let (gt_left, gt_right) = extract_gt_columns(
-        pred_b,
-        column_indices,
-        left_schema,
-        right_schema,
+    let cols_b = extract_comparison_columns(
+        pred_b, column_indices, left_schema, right_schema,
     )?;
 
-    // lt pattern: left.start < right.end
-    // gt pattern: left.end > right.start
-    Some((lt_left, gt_left, gt_right, lt_right))
+    // We have two predicates, each with a "lesser" and "greater" side:
+    //   Lt(A, B) means A < B
+    //   Gt(A, B) means A > B
+    //
+    // For interval overlap, the two predicates are (in any order):
+    //   some_start < some_end   (one from left, one from right)
+    //   some_end > some_start   (one from left, one from right)
+    //
+    // Rather than parsing the comparison semantics, we simply collect
+    // all four resolved columns, then identify left_start, left_end,
+    // right_start, right_end by matching (name, side).
+
+    let all_cols = [&cols_a.0, &cols_a.1, &cols_b.0, &cols_b.1];
+
+    let left_start = all_cols.iter().find(|c| is_left(&c.side) && is_start_col(&c.name))?;
+    let left_end = all_cols.iter().find(|c| is_left(&c.side) && is_end_col(&c.name))?;
+    let right_start = all_cols.iter().find(|c| is_right(&c.side) && is_start_col(&c.name))?;
+    let right_end = all_cols.iter().find(|c| is_right(&c.side) && is_end_col(&c.name))?;
+
+    Some((
+        left_start.name.clone(),
+        left_end.name.clone(),
+        right_start.name.clone(),
+        right_end.name.clone(),
+    ))
 }
 
-/// Extract columns from a `<` comparison.
-fn extract_lt_columns(
+fn is_start_col(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    lower == "start" || lower == "chromstart" || lower == "pos_start" || lower == "begin"
+}
+
+fn is_end_col(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    lower == "end" || lower == "chromend" || lower == "pos_end" || lower == "stop"
+}
+
+/// A resolved column: name + which side of the join it's on.
+#[derive(Debug)]
+struct ResolvedColumn {
+    name: String,
+    side: JoinSide,
+}
+
+fn is_left(side: &JoinSide) -> bool {
+    matches!(side, JoinSide::Left)
+}
+
+fn is_right(side: &JoinSide) -> bool {
+    matches!(side, JoinSide::Right)
+}
+
+/// Extract the two column operands of a Lt or Gt comparison.
+fn extract_comparison_columns(
     expr: &Arc<dyn datafusion::physical_plan::PhysicalExpr>,
     column_indices: &[ColumnIndex],
     left_schema: &SchemaRef,
     right_schema: &SchemaRef,
-) -> Option<(String, String)> {
+) -> Option<(ResolvedColumn, ResolvedColumn)> {
     use datafusion::logical_expr::Operator;
     use datafusion::physical_expr::expressions::{BinaryExpr, Column};
 
     let binary = expr.as_any().downcast_ref::<BinaryExpr>()?;
-    if *binary.op() != Operator::Lt {
+    match binary.op() {
+        Operator::Lt | Operator::Gt | Operator::LtEq | Operator::GtEq => {}
+        _ => return None,
+    }
+
+    let lhs = binary.left().as_any().downcast_ref::<Column>()?;
+    let rhs = binary.right().as_any().downcast_ref::<Column>()?;
+
+    let lhs_resolved =
+        resolve_column(lhs.index(), column_indices, left_schema, right_schema)?;
+    let rhs_resolved =
+        resolve_column(rhs.index(), column_indices, left_schema, right_schema)?;
+
+    // Ensure the two columns are from different sides
+    if std::mem::discriminant(&lhs_resolved.side)
+        == std::mem::discriminant(&rhs_resolved.side)
+    {
         return None;
     }
 
-    let left_col = binary.left().as_any().downcast_ref::<Column>()?;
-    let right_col =
-        binary.right().as_any().downcast_ref::<Column>()?;
-
-    let left_name = resolve_column_name(
-        left_col.index(),
-        column_indices,
-        left_schema,
-        right_schema,
-        true,
-    )?;
-    let right_name = resolve_column_name(
-        right_col.index(),
-        column_indices,
-        left_schema,
-        right_schema,
-        false,
-    )?;
-
-    Some((left_name, right_name))
+    Some((lhs_resolved, rhs_resolved))
 }
 
-/// Extract columns from a `>` comparison.
-fn extract_gt_columns(
-    expr: &Arc<dyn datafusion::physical_plan::PhysicalExpr>,
-    column_indices: &[ColumnIndex],
-    left_schema: &SchemaRef,
-    right_schema: &SchemaRef,
-) -> Option<(String, String)> {
-    use datafusion::logical_expr::Operator;
-    use datafusion::physical_expr::expressions::{BinaryExpr, Column};
-
-    let binary = expr.as_any().downcast_ref::<BinaryExpr>()?;
-    if *binary.op() != Operator::Gt {
-        return None;
-    }
-
-    let left_col = binary.left().as_any().downcast_ref::<Column>()?;
-    let right_col =
-        binary.right().as_any().downcast_ref::<Column>()?;
-
-    let left_name = resolve_column_name(
-        left_col.index(),
-        column_indices,
-        left_schema,
-        right_schema,
-        true,
-    )?;
-    let right_name = resolve_column_name(
-        right_col.index(),
-        column_indices,
-        left_schema,
-        right_schema,
-        false,
-    )?;
-
-    Some((left_name, right_name))
-}
-
-/// Resolve a filter-local column index to a column name.
-fn resolve_column_name(
+/// Resolve a filter-local column index to a name and join side.
+fn resolve_column(
     filter_idx: usize,
     column_indices: &[ColumnIndex],
     left_schema: &SchemaRef,
     right_schema: &SchemaRef,
-    expect_left: bool,
-) -> Option<String> {
+) -> Option<ResolvedColumn> {
     if filter_idx >= column_indices.len() {
         return None;
     }
 
     let col_idx = &column_indices[filter_idx];
-    let is_left = matches!(col_idx.side, JoinSide::Left);
+    let (schema, side) = match col_idx.side {
+        JoinSide::Left => (left_schema, JoinSide::Left),
+        JoinSide::Right => (right_schema, JoinSide::Right),
+        _ => return None,
+    };
 
-    if is_left != expect_left {
-        return None;
-    }
-
-    let schema = if is_left { left_schema } else { right_schema };
     if col_idx.index >= schema.fields().len() {
         return None;
     }
-    let field = schema.field(col_idx.index);
-    Some(field.name().clone())
+    let name = schema.field(col_idx.index).name().clone();
+    Some(ResolvedColumn { name, side })
 }
 
 /// Recursively find Parquet file paths in the plan tree.
+///
+/// DataFusion's object store stores paths relative to the filesystem
+/// root (no leading `/`). We prepend `/` to reconstruct the absolute
+/// path so that `File::open` works.
 fn find_parquet_paths(plan: &Arc<dyn ExecutionPlan>) -> Vec<PathBuf> {
-    use datafusion::datasource::source::DataSourceExec;
     use datafusion::datasource::physical_plan::parquet::source::ParquetSource;
+    use datafusion::datasource::source::DataSourceExec;
 
     let mut paths = Vec::new();
 
@@ -403,9 +387,15 @@ fn find_parquet_paths(plan: &Arc<dyn ExecutionPlan>) -> Vec<PathBuf> {
         {
             for group in &file_config.file_groups {
                 for file in group.iter() {
-                    paths.push(PathBuf::from(
-                        file.object_meta.location.as_ref(),
-                    ));
+                    let loc = file.object_meta.location.as_ref();
+                    // object_store strips the leading / from absolute
+                    // paths. Reconstruct it for filesystem access.
+                    let fs_path = if loc.starts_with('/') {
+                        PathBuf::from(loc)
+                    } else {
+                        PathBuf::from(format!("/{loc}"))
+                    };
+                    paths.push(fs_path);
                 }
             }
             return paths;

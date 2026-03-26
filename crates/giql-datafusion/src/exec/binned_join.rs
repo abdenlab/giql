@@ -4,7 +4,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, ArrayRef, Int64Array, RecordBatch, StringArray,
+    Array, ArrayRef, Int32Array, Int64Array, RecordBatch, StringArray,
     StringViewArray,
 };
 use arrow::datatypes::SchemaRef;
@@ -118,22 +118,22 @@ impl ExecutionPlan for BinnedJoinExec {
 
     fn execute(
         &self,
-        partition: usize,
+        _partition: usize,
         context: Arc<datafusion::execution::TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
-        let left_stream =
-            self.left.execute(partition, context.clone())?;
-        let right_stream = self.right.execute(partition, context)?;
-
+        let left = self.left.clone();
+        let right = self.right.clone();
         let left_cols = self.left_cols.clone();
         let right_cols = self.right_cols.clone();
         let schema = self.schema.clone();
         let bin_size = self.bin_size;
+        let ctx = context;
 
         let stream = futures::stream::once(async move {
-            let left_batches = collect_batches(left_stream).await?;
+            let left_batches =
+                collect_all_partitions(&left, &ctx).await?;
             let right_batches =
-                collect_batches(right_stream).await?;
+                collect_all_partitions(&right, &ctx).await?;
 
             binned_join(
                 &schema,
@@ -235,30 +235,13 @@ fn extract_interval_rows(
 
     for (batch_idx, batch) in batches.iter().enumerate() {
         let chrom_col = batch.column(cols.chrom_idx);
-        let starts = batch
-            .column(cols.start_idx)
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .ok_or_else(|| {
-                datafusion::error::DataFusionError::Internal(
-                    "Start column is not Int64Array".to_string(),
-                )
-            })?;
-
-        let ends = batch
-            .column(cols.end_idx)
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .ok_or_else(|| {
-                datafusion::error::DataFusionError::Internal(
-                    "End column is not Int64Array".to_string(),
-                )
-            })?;
+        let start_col = batch.column(cols.start_idx);
+        let end_col = batch.column(cols.end_idx);
 
         for row_idx in 0..batch.num_rows() {
             if chrom_col.is_null(row_idx)
-                || starts.is_null(row_idx)
-                || ends.is_null(row_idx)
+                || start_col.is_null(row_idx)
+                || end_col.is_null(row_idx)
             {
                 continue;
             }
@@ -269,10 +252,22 @@ fn extract_interval_rows(
                             .to_string(),
                     )
                 })?;
+            let start = get_i64_value(start_col.as_ref(), row_idx)
+                .ok_or_else(|| {
+                    datafusion::error::DataFusionError::Internal(
+                        "Start column is not Int32 or Int64".to_string(),
+                    )
+                })?;
+            let end = get_i64_value(end_col.as_ref(), row_idx)
+                .ok_or_else(|| {
+                    datafusion::error::DataFusionError::Internal(
+                        "End column is not Int32 or Int64".to_string(),
+                    )
+                })?;
             rows.push(IntervalRow {
                 chrom,
-                start: starts.value(row_idx),
-                end: ends.value(row_idx),
+                start,
+                end,
                 row_ref: RowRef {
                     batch_idx,
                     row_idx,
@@ -336,20 +331,31 @@ fn build_output(
     Ok(RecordBatch::try_new(schema.clone(), columns)?)
 }
 
-/// Collect all batches from a stream.
-async fn collect_batches(
-    stream: SendableRecordBatchStream,
+/// Collect all record batches from all partitions concurrently.
+async fn collect_all_partitions(
+    plan: &Arc<dyn ExecutionPlan>,
+    context: &Arc<datafusion::execution::TaskContext>,
 ) -> Result<Vec<RecordBatch>> {
-    use futures::StreamExt;
+    datafusion::physical_plan::collect(
+        plan.clone(),
+        context.clone(),
+    )
+    .await
+}
 
-    let mut batches = Vec::new();
-    let mut stream = stream;
-
-    while let Some(batch) = stream.next().await {
-        batches.push(batch?);
-    }
-
-    Ok(batches)
+/// Extract an i64 value from an array that may be Int32Array or
+/// Int64Array.
+fn get_i64_value(array: &dyn Array, idx: usize) -> Option<i64> {
+    array
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .map(|arr| arr.value(idx))
+        .or_else(|| {
+            array
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .map(|arr| arr.value(idx) as i64)
+        })
 }
 
 /// Extract a string value from an array that may be StringArray or
