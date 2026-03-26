@@ -129,25 +129,28 @@ impl IntersectsOptimizerRule {
     ///
     /// 1. Wrap each child in `BinExpandExec` (adds `__giql_bin` and
     ///    `__giql_first_bin` columns)
-    /// 2. `HashJoinExec` on `(chrom, __giql_bin)` with the original
-    ///    range filter
-    /// 3. `FilterExec` for canonical-bin dedup: keep only matches
-    ///    where `__giql_bin == max(left.__giql_first_bin,
-    ///    right.__giql_first_bin)`, so each pair is emitted once
-    /// 4. `ProjectionExec` to strip the extra columns
+    /// 2. `HashJoinExec` on `(chrom, __giql_bin)` with a combined
+    ///    filter that includes both the range overlap check AND the
+    ///    canonical-bin dedup, plus a projection that strips extra
+    ///    columns
+    ///
+    /// The dedup is folded into the JoinFilter so it runs inside the
+    /// hash probe — no separate FilterExec or ProjectionExec needed.
     fn build_binned_plan(
         &self,
         original_plan: Arc<dyn ExecutionPlan>,
         join_match: IntervalJoinMatch,
         bin_size: usize,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        use datafusion::physical_expr::expressions::{
-            BinaryExpr, CastExpr, Column, Literal,
-        };
-        use datafusion::physical_plan::filter::FilterExec;
-        use datafusion::physical_plan::joins::HashJoinExec;
-        use datafusion::physical_plan::projection::ProjectionExec;
+        use datafusion::common::JoinSide;
         use datafusion::logical_expr::Operator;
+        use datafusion::physical_expr::expressions::{
+            BinaryExpr, Column,
+        };
+        use datafusion::physical_plan::joins::utils::{
+            ColumnIndex, JoinFilter,
+        };
+        use datafusion::physical_plan::joins::HashJoinExec;
 
         let hj = original_plan
             .as_any()
@@ -159,7 +162,7 @@ impl IntersectsOptimizerRule {
                 )
             })?;
 
-        let extra = BinExpandExec::EXTRA_COLS; // 2: __giql_bin, __giql_first_bin
+        let extra = BinExpandExec::EXTRA_COLS;
 
         // Step 1: Wrap each child in BinExpandExec
         let left_expanded = Arc::new(BinExpandExec::new(
@@ -181,13 +184,12 @@ impl IntersectsOptimizerRule {
         let left_n = left_schema.fields().len();
         let right_n = right_schema.fields().len();
 
-        // Indices of the new columns in each child's schema
-        let left_bin_idx = left_n - 2;      // __giql_bin
-        let left_first_bin_idx = left_n - 1; // __giql_first_bin
+        let left_bin_idx = left_n - 2;
+        let left_first_bin_idx = left_n - 1;
         let right_bin_idx = right_n - 2;
         let right_first_bin_idx = right_n - 1;
 
-        // Step 2: HashJoinExec on (chrom, __giql_bin)
+        // Equi-keys: original chrom + __giql_bin
         let mut on = hj.on().to_vec();
         on.push((
             Arc::new(Column::new("__giql_bin", left_bin_idx))
@@ -196,123 +198,161 @@ impl IntersectsOptimizerRule {
                 as Arc<dyn datafusion::physical_plan::PhysicalExpr>,
         ));
 
-        // No projection on the HashJoinExec — we need all columns
-        // including __giql_first_bin for the dedup filter.
-        let new_join = Arc::new(HashJoinExec::try_new(
-            left_expanded,
-            right_expanded,
-            on,
-            hj.filter().cloned(),
-            hj.join_type(),
-            None, // no projection yet
-            *hj.partition_mode(),
-            hj.null_equals_null(),
-        )?);
+        // Step 2: Build extended JoinFilter with dedup folded in.
+        //
+        // Start from the original filter and append:
+        //   - column indices for __giql_bin (left) and
+        //     __giql_first_bin (left + right)
+        //   - the canonical-bin dedup expression ANDed with the
+        //     original range-overlap expression
+        let extended_filter = if let Some(orig_filter) = hj.filter()
+        {
+            let mut col_indices =
+                orig_filter.column_indices().to_vec();
+            let orig_len = col_indices.len();
 
-        // Step 3: FilterExec for canonical-bin dedup.
-        //
-        // Join output columns (inner join, no projection):
-        //   [0..left_n) = left columns (including __giql_bin, __giql_first_bin)
-        //   [left_n..left_n+right_n) = right columns
-        //
-        // Filter: __giql_bin (from left) == max(left.__giql_first_bin, right.__giql_first_bin)
-        //
-        // We use left's __giql_bin since it equals right's (equi-key).
-        let join_schema = new_join.schema();
-        let join_left_bin = left_bin_idx;
-        let join_left_first_bin = left_first_bin_idx;
-        let join_right_first_bin = left_n + right_first_bin_idx;
+            // Append 3 new column references into the filter schema
+            // [orig_len + 0] → left.__giql_bin
+            col_indices.push(ColumnIndex {
+                index: left_bin_idx,
+                side: JoinSide::Left,
+            });
+            // [orig_len + 1] → left.__giql_first_bin
+            col_indices.push(ColumnIndex {
+                index: left_first_bin_idx,
+                side: JoinSide::Left,
+            });
+            // [orig_len + 2] → right.__giql_first_bin
+            col_indices.push(ColumnIndex {
+                index: right_first_bin_idx,
+                side: JoinSide::Right,
+            });
 
-        // Build: CASE WHEN left_first_bin >= right_first_bin
-        //             THEN left_first_bin
-        //             ELSE right_first_bin END
-        // Simplified: use a >= b check with binary expressions
-        let left_fb: Arc<dyn datafusion::physical_plan::PhysicalExpr> =
-            Arc::new(Column::new("__giql_first_bin", join_left_first_bin));
-        let right_fb: Arc<dyn datafusion::physical_plan::PhysicalExpr> =
-            Arc::new(Column::new("__giql_first_bin", join_right_first_bin));
-        let bin_col: Arc<dyn datafusion::physical_plan::PhysicalExpr> =
-            Arc::new(Column::new("__giql_bin", join_left_bin));
+            // Build filter-local column refs
+            let filt_bin: Arc<
+                dyn datafusion::physical_plan::PhysicalExpr,
+            > = Arc::new(Column::new(
+                "__giql_bin",
+                orig_len,
+            ));
+            let filt_lfb: Arc<
+                dyn datafusion::physical_plan::PhysicalExpr,
+            > = Arc::new(Column::new(
+                "__giql_first_bin",
+                orig_len + 1,
+            ));
+            let filt_rfb: Arc<
+                dyn datafusion::physical_plan::PhysicalExpr,
+            > = Arc::new(Column::new(
+                "__giql_first_bin",
+                orig_len + 2,
+            ));
 
-        // Filter: __giql_bin == left_first_bin OR __giql_bin == right_first_bin
-        // AND left_first_bin <= __giql_bin AND right_first_bin <= __giql_bin
-        //
-        // Simpler canonical condition:
-        //   __giql_bin == GREATEST(left_first_bin, right_first_bin)
-        //
-        // Without a GREATEST function, use:
-        //   (left_first_bin >= right_first_bin AND __giql_bin == left_first_bin)
-        //   OR
-        //   (right_first_bin > left_first_bin AND __giql_bin == right_first_bin)
-        let dedup_filter: Arc<dyn datafusion::physical_plan::PhysicalExpr> = Arc::new(
-            BinaryExpr::new(
+            // Canonical-bin condition:
+            //   (lfb >= rfb AND bin == lfb)
+            //   OR (rfb > lfb AND bin == rfb)
+            let dedup_expr: Arc<
+                dyn datafusion::physical_plan::PhysicalExpr,
+            > = Arc::new(BinaryExpr::new(
                 Arc::new(BinaryExpr::new(
                     Arc::new(BinaryExpr::new(
-                        left_fb.clone(),
+                        filt_lfb.clone(),
                         Operator::GtEq,
-                        right_fb.clone(),
+                        filt_rfb.clone(),
                     )),
                     Operator::And,
                     Arc::new(BinaryExpr::new(
-                        bin_col.clone(),
+                        filt_bin.clone(),
                         Operator::Eq,
-                        left_fb.clone(),
+                        filt_lfb,
                     )),
                 )),
                 Operator::Or,
                 Arc::new(BinaryExpr::new(
                     Arc::new(BinaryExpr::new(
-                        right_fb.clone(),
+                        filt_rfb.clone(),
                         Operator::Gt,
-                        left_fb,
+                        Arc::new(Column::new(
+                            "__giql_first_bin",
+                            orig_len + 1,
+                        )),
                     )),
                     Operator::And,
                     Arc::new(BinaryExpr::new(
-                        bin_col,
+                        filt_bin,
                         Operator::Eq,
-                        right_fb,
+                        filt_rfb,
                     )),
                 )),
-            ),
-        );
+            ));
 
-        let filtered =
-            Arc::new(FilterExec::try_new(dedup_filter, new_join)?)
-                as Arc<dyn ExecutionPlan>;
+            // Combine: original_expr AND dedup_expr
+            let combined: Arc<
+                dyn datafusion::physical_plan::PhysicalExpr,
+            > = Arc::new(BinaryExpr::new(
+                orig_filter.expression().clone(),
+                Operator::And,
+                dedup_expr,
+            ));
 
-        // Step 4: ProjectionExec to strip extra columns.
-        // Keep only the original columns (skip __giql_bin, __giql_first_bin
-        // from both sides).
+            // Build extended filter schema: original fields + 3 new
+            let mut filter_fields: Vec<Arc<arrow::datatypes::Field>> =
+                orig_filter
+                    .schema()
+                    .fields()
+                    .iter()
+                    .cloned()
+                    .collect();
+            filter_fields.push(Arc::new(
+                arrow::datatypes::Field::new(
+                    "__giql_bin",
+                    arrow::datatypes::DataType::Int64,
+                    false,
+                ),
+            ));
+            filter_fields.push(Arc::new(
+                arrow::datatypes::Field::new(
+                    "__giql_first_bin_l",
+                    arrow::datatypes::DataType::Int64,
+                    false,
+                ),
+            ));
+            filter_fields.push(Arc::new(
+                arrow::datatypes::Field::new(
+                    "__giql_first_bin_r",
+                    arrow::datatypes::DataType::Int64,
+                    false,
+                ),
+            ));
+            let filter_schema = Arc::new(
+                arrow::datatypes::Schema::new(filter_fields),
+            );
+
+            Some(JoinFilter::new(combined, col_indices, filter_schema))
+        } else {
+            None
+        };
+
+        // Projection: keep only original columns from both sides,
+        // strip __giql_bin and __giql_first_bin.
         let orig_left = left_n - extra;
         let orig_right = right_n - extra;
+        let mut projection: Vec<usize> =
+            (0..orig_left).collect();
+        projection.extend(left_n..left_n + orig_right);
 
-        let mut proj_exprs: Vec<(
-            Arc<dyn datafusion::physical_plan::PhysicalExpr>,
-            String,
-        )> = Vec::new();
+        let new_join = HashJoinExec::try_new(
+            left_expanded,
+            right_expanded,
+            on,
+            extended_filter,
+            hj.join_type(),
+            Some(projection),
+            *hj.partition_mode(),
+            hj.null_equals_null(),
+        )?;
 
-        let filter_schema = filtered.schema();
-
-        // Left original columns
-        for i in 0..orig_left {
-            let name = filter_schema.field(i).name().clone();
-            proj_exprs.push((
-                Arc::new(Column::new(&name, i)),
-                name,
-            ));
-        }
-        // Right original columns (skip left's extra cols)
-        for i in 0..orig_right {
-            let idx = left_n + i;
-            let name = filter_schema.field(idx).name().clone();
-            // Avoid name collisions by keeping original field name
-            proj_exprs.push((
-                Arc::new(Column::new(&name, idx)),
-                filter_schema.field(idx).name().clone(),
-            ));
-        }
-
-        Ok(Arc::new(ProjectionExec::try_new(proj_exprs, filtered)?))
+        Ok(Arc::new(new_join))
     }
 
     fn collect_stats(
