@@ -233,14 +233,14 @@ class TestGIQLCluster:
         """CL-003: Parse CLUSTER with stranded parameter.
 
         Given:
-            A CLUSTER expression with one positional and stranded=true
+            A CLUSTER expression with one positional and stranded := true
         When:
             Parsed with GIQLDialect
         Then:
             GIQLCluster instance has `this` and `stranded` set
         """
         ast = parse_one(
-            "SELECT CLUSTER(interval, stranded=true) FROM features",
+            "SELECT CLUSTER(interval, stranded := true) FROM features",
             dialect=GIQLDialect,
         )
 
@@ -253,14 +253,14 @@ class TestGIQLCluster:
         """CL-004: Parse CLUSTER with distance and stranded.
 
         Given:
-            A CLUSTER expression with two positionals and stranded=true
+            A CLUSTER expression with two positionals and stranded := true
         When:
             Parsed with GIQLDialect
         Then:
             GIQLCluster instance has `this`, `distance`, and `stranded` set
         """
         ast = parse_one(
-            "SELECT CLUSTER(interval, 1000, stranded=true) FROM features",
+            "SELECT CLUSTER(interval, 1000, stranded := true) FROM features",
             dialect=GIQLDialect,
         )
 
@@ -335,14 +335,14 @@ class TestGIQLMerge:
         """MG-003: Parse MERGE with stranded parameter.
 
         Given:
-            A MERGE expression with one positional and stranded=true
+            A MERGE expression with one positional and stranded := true
         When:
             Parsed with GIQLDialect
         Then:
             GIQLMerge instance has `this` and `stranded` set
         """
         ast = parse_one(
-            "SELECT MERGE(interval, stranded=true) FROM features",
+            "SELECT MERGE(interval, stranded := true) FROM features",
             dialect=GIQLDialect,
         )
 
@@ -355,14 +355,14 @@ class TestGIQLMerge:
         """MG-004: Parse MERGE with distance and stranded.
 
         Given:
-            A MERGE expression with two positionals and stranded=true
+            A MERGE expression with two positionals and stranded := true
         When:
             Parsed with GIQLDialect
         Then:
             GIQLMerge instance has `this`, `distance`, and `stranded` set
         """
         ast = parse_one(
-            "SELECT MERGE(interval, 1000, stranded=true) FROM features",
+            "SELECT MERGE(interval, 1000, stranded := true) FROM features",
             dialect=GIQLDialect,
         )
 
@@ -548,14 +548,14 @@ class TestGIQLDistance:
         """DI-002: Parse DISTANCE with stranded and signed.
 
         Given:
-            A DISTANCE expression with two positionals and stranded=true, signed=true
+            A DISTANCE expression with two positionals and stranded := true, signed := true
         When:
             Parsed with GIQLDialect
         Then:
             GIQLDistance instance has `this`, `expression`, `stranded`, and `signed` set
         """
         ast = parse_one(
-            "SELECT DISTANCE(a.interval, b.interval, stranded=true, signed=true) FROM a, b",
+            "SELECT DISTANCE(a.interval, b.interval, stranded := true, signed := true) FROM a, b",
             dialect=GIQLDialect,
         )
 
@@ -570,14 +570,14 @@ class TestGIQLDistance:
         """DI-003: Parse DISTANCE with only stranded.
 
         Given:
-            A DISTANCE expression with two positionals and only stranded=true
+            A DISTANCE expression with two positionals and only stranded := true
         When:
             Parsed with GIQLDialect
         Then:
             GIQLDistance instance has `this`, `expression`, and `stranded` set; `signed` absent
         """
         ast = parse_one(
-            "SELECT DISTANCE(a.interval, b.interval, stranded=true) FROM a, b",
+            "SELECT DISTANCE(a.interval, b.interval, stranded := true) FROM a, b",
             dialect=GIQLDialect,
         )
 
@@ -615,14 +615,14 @@ class TestGIQLNearest:
         """NR-002: Parse NEAREST with k parameter.
 
         Given:
-            A NEAREST expression with one positional and k=3
+            A NEAREST expression with one positional and k := 3
         When:
             Parsed with GIQLDialect
         Then:
             GIQLNearest instance has `this` and `k` set
         """
         ast = parse_one(
-            "SELECT NEAREST(genes, k=3) FROM peaks",
+            "SELECT NEAREST(genes, k := 3) FROM peaks",
             dialect=GIQLDialect,
         )
 
@@ -642,7 +642,7 @@ class TestGIQLNearest:
             GIQLNearest instance has all provided args set
         """
         ast = parse_one(
-            "SELECT NEAREST(genes, k=5, max_distance=100000, stranded=true, signed=true) FROM peaks",
+            "SELECT NEAREST(genes, k := 5, max_distance := 100000, stranded := true, signed := true) FROM peaks",
             dialect=GIQLDialect,
         )
 
