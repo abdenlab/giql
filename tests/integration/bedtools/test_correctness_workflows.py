@@ -150,7 +150,9 @@ def test_workflow_merge_then_intersect(duckdb_connection):
     )
     giql_result = duckdb_connection.execute(sql).fetchall()
 
-    comparison = compare_results(giql_result, bedtools_final)
+    # MERGE outputs BED3 (chrom, start, end); compare only coordinates
+    bedtools_coords = [row[:3] for row in bedtools_final]
+    comparison = compare_results(giql_result, bedtools_coords)
     assert comparison.match, comparison.failure_message()
 
 
