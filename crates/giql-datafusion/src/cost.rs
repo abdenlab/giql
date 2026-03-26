@@ -1,6 +1,13 @@
 use crate::stats::IntervalStats;
 use crate::IntersectsOptimizerConfig;
 
+/// Which side of the join has fewer rows and should be materialized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SmallSide {
+    Left,
+    Right,
+}
+
 /// Join algorithm selected by the cost model.
 #[derive(Debug, Clone, PartialEq)]
 pub enum JoinStrategy {
@@ -9,9 +16,8 @@ pub enum JoinStrategy {
     /// Sweep-line join: sort both sides by start, sweep with an active
     /// set. O((n+m) log(n+m) + k).
     SweepLine {
-        /// True if the input is already sorted and the sort step can
-        /// be skipped.
-        skip_sort: bool,
+        /// Which side to materialize (the smaller one).
+        build_side: SmallSide,
     },
     /// Binned equi-join: expand intervals into genome bins, hash-join
     /// on bin ID. O(n+m+k) amortized for uniform widths.
@@ -55,25 +61,24 @@ impl CostModel {
         left: &IntervalStats,
         right: &IntervalStats,
     ) -> JoinStrategy {
+        let build_side = if left.row_count <= right.row_count {
+            SmallSide::Left
+        } else {
+            SmallSide::Right
+        };
+
         // Short-circuit 1: heavy-tailed distribution.
-        // If p99/median > threshold on either side, wide outliers will
-        // replicate across many bins, destroying binning performance.
         if left.width.p99_median_ratio > self.p99_median_threshold
             || right.width.p99_median_ratio > self.p99_median_threshold
         {
-            let skip_sort = left.is_sorted_by_start
-                || right.is_sorted_by_start;
-            return JoinStrategy::SweepLine { skip_sort };
+            return JoinStrategy::SweepLine { build_side };
         }
 
         // Short-circuit 2: high width variance.
-        // No single bin size works well when CV is high.
         if left.width.cv > self.cv_threshold
             || right.width.cv > self.cv_threshold
         {
-            let skip_sort = left.is_sorted_by_start
-                || right.is_sorted_by_start;
-            return JoinStrategy::SweepLine { skip_sort };
+            return JoinStrategy::SweepLine { build_side };
         }
 
         // Cost comparison: estimate binned vs sweep costs.
@@ -84,9 +89,7 @@ impl CostModel {
         if binned_cost < sweep_cost {
             JoinStrategy::BinnedJoin { bin_size }
         } else {
-            let skip_sort = left.is_sorted_by_start
-                || right.is_sorted_by_start;
-            JoinStrategy::SweepLine { skip_sort }
+            JoinStrategy::SweepLine { build_side }
         }
     }
 
@@ -240,17 +243,17 @@ mod tests {
     }
 
     #[test]
-    fn test_sorted_input_sets_skip_sort() {
+    fn test_smaller_side_becomes_build() {
         let model = CostModel::new(&default_config());
-        // High CV triggers sweep line; sorted input should set skip_sort
-        let left = make_stats(1_000_000, 100.0, 500.0, 1000.0, 5000.0, 2.0, true);
+        // High CV triggers sweep line; left has fewer rows
+        let left = make_stats(100_000, 100.0, 500.0, 1000.0, 5000.0, 2.0, true);
         let right = make_stats(1_000_000, 100.0, 500.0, 1000.0, 5000.0, 0.5, false);
 
         match model.decide(&left, &right) {
-            JoinStrategy::SweepLine { skip_sort } => {
-                assert!(skip_sort);
+            JoinStrategy::SweepLine { build_side } => {
+                assert_eq!(build_side, SmallSide::Left);
             }
-            other => panic!("Expected SweepLine with skip_sort, got {:?}", other),
+            other => panic!("Expected SweepLine, got {:?}", other),
         }
     }
 
@@ -266,15 +269,15 @@ mod tests {
     }
 
     #[test]
-    fn test_both_sorted_selects_sweep_with_skip() {
+    fn test_right_build_when_right_smaller() {
         let model = CostModel::new(&default_config());
-        // CV just above threshold, both sides sorted
-        let left = make_stats(100_000, 100.0, 200.0, 500.0, 600.0, 1.6, true);
+        // CV above threshold, right has fewer rows
+        let left = make_stats(500_000, 100.0, 200.0, 500.0, 600.0, 1.6, true);
         let right = make_stats(100_000, 100.0, 200.0, 500.0, 600.0, 0.5, true);
 
         match model.decide(&left, &right) {
-            JoinStrategy::SweepLine { skip_sort } => {
-                assert!(skip_sort);
+            JoinStrategy::SweepLine { build_side } => {
+                assert_eq!(build_side, SmallSide::Right);
             }
             other => panic!("Expected SweepLine, got {:?}", other),
         }

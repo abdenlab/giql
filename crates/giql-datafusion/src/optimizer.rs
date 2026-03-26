@@ -6,7 +6,8 @@ use datafusion::config::ConfigOptions;
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_plan::ExecutionPlan;
 
-use crate::cost::{CostModel, JoinStrategy};
+use crate::cost::{CostModel, JoinStrategy, SmallSide};
+use crate::exec::sweep_line::BuildSide;
 use crate::exec::{BinExpandExec, SweepLineJoinExec};
 use crate::pattern::{detect_interval_join, IntervalJoinMatch};
 use crate::stats;
@@ -93,14 +94,18 @@ impl IntersectsOptimizerRule {
         eprintln!("INTERSECTS optimizer: selected {strategy:?}");
 
         match strategy {
-            JoinStrategy::SweepLine { skip_sort } => {
+            JoinStrategy::SweepLine { build_side } => {
+                let bs = match build_side {
+                    SmallSide::Left => BuildSide::Left,
+                    SmallSide::Right => BuildSide::Right,
+                };
                 Ok(Arc::new(SweepLineJoinExec::new(
                     join_match.left,
                     join_match.right,
                     join_match.left_cols,
                     join_match.right_cols,
                     join_match.output_schema,
-                    skip_sort,
+                    bs,
                 )))
             }
             JoinStrategy::BinnedJoin { bin_size } => {
