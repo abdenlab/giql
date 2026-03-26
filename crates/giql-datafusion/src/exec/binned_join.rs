@@ -40,7 +40,7 @@ pub struct BinnedJoinExec {
     right_cols: IntervalColumns,
     bin_size: usize,
     schema: SchemaRef,
-    properties: PlanProperties,
+    properties: Arc<PlanProperties>,
 }
 
 impl BinnedJoinExec {
@@ -52,12 +52,12 @@ impl BinnedJoinExec {
         schema: SchemaRef,
         bin_size: usize,
     ) -> Self {
-        let properties = PlanProperties::new(
+        let properties = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(schema.clone()),
             Partitioning::UnknownPartitioning(1),
             EmissionType::Final,
             Boundedness::Bounded,
-        );
+        ));
 
         Self {
             left,
@@ -94,7 +94,7 @@ impl ExecutionPlan for BinnedJoinExec {
         self.schema.clone()
     }
 
-    fn properties(&self) -> &PlanProperties {
+    fn properties(&self) -> &Arc<PlanProperties> {
         &self.properties
     }
 

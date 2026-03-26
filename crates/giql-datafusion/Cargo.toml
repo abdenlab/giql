@@ -6,11 +6,11 @@ description = "DataFusion optimizer for genomic interval (INTERSECTS) joins"
 license = "MIT"
 
 [dependencies]
-arrow = { version = "55", default-features = false, features = ["prettyprint"] }
-datafusion = "47"
+arrow = { version = "58", default-features = false, features = ["prettyprint"] }
+datafusion = "53"
 futures = "0.3"
 log = "0.4"
-parquet = "55"
+parquet = "58"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 
 [dev-dependencies]

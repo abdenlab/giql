@@ -349,7 +349,8 @@ impl IntersectsOptimizerRule {
             hj.join_type(),
             Some(projection),
             *hj.partition_mode(),
-            hj.null_equals_null(),
+            hj.null_equality(),
+            false,
         )?;
 
         Ok(Arc::new(new_join))

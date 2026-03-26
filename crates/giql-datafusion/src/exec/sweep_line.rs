@@ -17,8 +17,8 @@ use datafusion::common::Result;
 use datafusion::execution::SendableRecordBatchStream;
 use datafusion::physical_expr::expressions::Column;
 use datafusion::physical_expr::{
-    EquivalenceProperties, LexRequirement, Partitioning,
-    PhysicalSortRequirement,
+    EquivalenceProperties, LexRequirement, OrderingRequirements,
+    Partitioning, PhysicalSortRequirement,
 };
 use datafusion::physical_plan::execution_plan::{
     Boundedness, EmissionType,
@@ -55,7 +55,7 @@ pub struct SweepLineJoinExec {
     right_cols: IntervalColumns,
     build_side: BuildSide,
     schema: SchemaRef,
-    properties: PlanProperties,
+    properties: Arc<PlanProperties>,
     metrics: ExecutionPlanMetricsSet,
 }
 
@@ -68,12 +68,12 @@ impl SweepLineJoinExec {
         schema: SchemaRef,
         build_side: BuildSide,
     ) -> Self {
-        let properties = PlanProperties::new(
+        let properties = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(schema.clone()),
             Partitioning::UnknownPartitioning(1),
             EmissionType::Incremental,
             Boundedness::Bounded,
-        );
+        ));
         Self {
             left,
             right,
@@ -86,8 +86,8 @@ impl SweepLineJoinExec {
         }
     }
 
-    fn sort_requirement(cols: &IntervalColumns) -> LexRequirement {
-        LexRequirement::new(vec![
+    fn sort_requirement(cols: &IntervalColumns) -> OrderingRequirements {
+        let lex = LexRequirement::new(vec![
             PhysicalSortRequirement::new(
                 Arc::new(Column::new(&cols.chrom_col, cols.chrom_idx)),
                 Some(SortOptions {
@@ -103,6 +103,8 @@ impl SweepLineJoinExec {
                 }),
             ),
         ])
+        .expect("sort requirement should be non-empty");
+        OrderingRequirements::new(lex)
     }
 }
 
@@ -130,7 +132,7 @@ impl ExecutionPlan for SweepLineJoinExec {
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }
-    fn properties(&self) -> &PlanProperties {
+    fn properties(&self) -> &Arc<PlanProperties> {
         &self.properties
     }
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
@@ -138,7 +140,7 @@ impl ExecutionPlan for SweepLineJoinExec {
     }
     fn required_input_ordering(
         &self,
-    ) -> Vec<Option<LexRequirement>> {
+    ) -> Vec<Option<OrderingRequirements>> {
         vec![
             Some(Self::sort_requirement(&self.left_cols)),
             Some(Self::sort_requirement(&self.right_cols)),

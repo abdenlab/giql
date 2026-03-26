@@ -38,7 +38,7 @@ pub struct BinExpandExec {
     end_col_idx: usize,
     bin_size: usize,
     schema: SchemaRef,
-    properties: PlanProperties,
+    properties: Arc<PlanProperties>,
 }
 
 impl BinExpandExec {
@@ -64,12 +64,12 @@ impl BinExpandExec {
         let schema =
             Arc::new(arrow::datatypes::Schema::new(fields));
 
-        let properties = PlanProperties::new(
+        let properties = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(schema.clone()),
             input.properties().partitioning.clone(),
             EmissionType::Incremental,
             Boundedness::Bounded,
-        );
+        ));
 
         Self {
             input,
@@ -112,7 +112,7 @@ impl ExecutionPlan for BinExpandExec {
         self.schema.clone()
     }
 
-    fn properties(&self) -> &PlanProperties {
+    fn properties(&self) -> &Arc<PlanProperties> {
         &self.properties
     }
 
