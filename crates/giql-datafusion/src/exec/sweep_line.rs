@@ -4,32 +4,30 @@ use std::sync::Arc;
 
 use arrow::array::{
     Array, ArrayRef, Int32Array, Int64Array, RecordBatch, StringArray,
-    StringViewArray,
+    StringViewArray, UInt32Array,
 };
+use arrow::compute;
 use arrow::datatypes::SchemaRef;
 use datafusion::common::Result;
 use datafusion::execution::SendableRecordBatchStream;
 use datafusion::physical_expr::{EquivalenceProperties, Partitioning};
-use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::execution_plan::{
     Boundedness, EmissionType,
 };
+use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties,
 };
 
 use crate::pattern::IntervalColumns;
 
-/// Custom execution plan implementing the sweep-line interval join.
+/// Sweep-line interval join parallelized by chromosome.
 ///
-/// Both inputs are sorted by `(chrom, start)`, then swept left to
-/// right. For each left interval, all right intervals whose start is
-/// less than the left's end are candidates; those whose end is greater
-/// than the left's start are matches.
-///
-/// Complexity: O((n+m) log(n+m) + k) where k is the output size.
-/// If `skip_sort` is true, the sort is assumed already done and the
-/// complexity is O(n+m+k).
+/// 1. Collect and concat both inputs into contiguous Arrow arrays
+/// 2. Assign integer chromosome IDs (avoids String comparisons)
+/// 3. Sort by (chrom_id, start) and split at chromosome boundaries
+/// 4. Sweep each chromosome in parallel via tokio::spawn
+/// 5. Build output with vectorized compute::take
 #[derive(Debug)]
 pub struct SweepLineJoinExec {
     left: Arc<dyn ExecutionPlan>,
@@ -75,11 +73,7 @@ impl DisplayAs for SweepLineJoinExec {
         _t: DisplayFormatType,
         f: &mut fmt::Formatter<'_>,
     ) -> fmt::Result {
-        write!(
-            f,
-            "SweepLineJoinExec: skip_sort={}",
-            self.skip_sort
-        )
+        write!(f, "SweepLineJoinExec: skip_sort={}", self.skip_sort)
     }
 }
 
@@ -123,9 +117,6 @@ impl ExecutionPlan for SweepLineJoinExec {
         _partition: usize,
         context: Arc<datafusion::execution::TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
-        // Collect ALL partitions from both children. DataFusion may
-        // split inputs across multiple partitions (default =
-        // num_cpus). We must read every partition to get all rows.
         let left = self.left.clone();
         let right = self.right.clone();
         let left_cols = self.left_cols.clone();
@@ -134,26 +125,96 @@ impl ExecutionPlan for SweepLineJoinExec {
         let ctx = context;
 
         let stream = futures::stream::once(async move {
-            let left_batches =
-                collect_all_partitions(&left, &ctx).await?;
-            let right_batches =
-                collect_all_partitions(&right, &ctx).await?;
+            let left_batches = datafusion::physical_plan::collect(
+                left, ctx.clone(),
+            )
+            .await?;
+            let right_batches = datafusion::physical_plan::collect(
+                right, ctx,
+            )
+            .await?;
 
-            let left_intervals =
-                extract_intervals(&left_batches, &left_cols)?;
-            let right_intervals =
-                extract_intervals(&right_batches, &right_cols)?;
+            let left_concat = concat_batches(&left_batches)?;
+            let right_concat = concat_batches(&right_batches)?;
 
-            let matches = sweep_line_join(
-                &left_intervals,
-                &right_intervals,
-            );
+            if left_concat.num_rows() == 0
+                || right_concat.num_rows() == 0
+            {
+                return Ok(RecordBatch::new_empty(schema));
+            }
 
-            build_output_batch(
+            // Extract typed columns — no String allocation
+            let l_chrom_ids = chrom_to_ids(
+                left_concat.column(left_cols.chrom_idx),
+            )?;
+            let l_starts = as_i64_slice(
+                left_concat.column(left_cols.start_idx),
+            )?;
+            let l_ends = as_i64_slice(
+                left_concat.column(left_cols.end_idx),
+            )?;
+
+            let r_chrom_ids = chrom_to_ids(
+                right_concat.column(right_cols.chrom_idx),
+            )?;
+            let r_starts = as_i64_slice(
+                right_concat.column(right_cols.start_idx),
+            )?;
+            let r_ends = as_i64_slice(
+                right_concat.column(right_cols.end_idx),
+            )?;
+
+            // Sort indices by (chrom_id, start)
+            let l_order = argsort_by_chrom_start(&l_chrom_ids, &l_starts);
+            let r_order = argsort_by_chrom_start(&r_chrom_ids, &r_starts);
+
+            // Split at chromosome boundaries
+            let l_groups = split_by_chrom(&l_order, &l_chrom_ids);
+            let r_groups = split_by_chrom(&r_order, &r_chrom_ids);
+
+            // Parallel sweep per chromosome
+            let mut handles = Vec::with_capacity(l_groups.len());
+            for (chrom_id, l_range) in &l_groups {
+                let r_range = match r_groups
+                    .binary_search_by_key(chrom_id, |(c, _)| *c)
+                {
+                    Ok(pos) => r_groups[pos].1.clone(),
+                    Err(_) => continue,
+                };
+
+                let l_idx: Arc<[u32]> =
+                    l_order[l_range.clone()].into();
+                let r_idx: Arc<[u32]> =
+                    r_order[r_range].into();
+                let ls = l_starts.clone();
+                let le = l_ends.clone();
+                let rs = r_starts.clone();
+                let re = r_ends.clone();
+
+                handles.push(tokio::spawn(async move {
+                    sweep_chrom(&l_idx, &ls, &le, &r_idx, &rs, &re)
+                }));
+            }
+
+            let mut all_left: Vec<u32> = Vec::new();
+            let mut all_right: Vec<u32> = Vec::new();
+            for h in handles {
+                let (li, ri) = h.await.map_err(|e| {
+                    datafusion::error::DataFusionError::External(
+                        Box::new(e),
+                    )
+                })?;
+                all_left.extend_from_slice(&li);
+                all_right.extend_from_slice(&ri);
+            }
+
+            // Vectorized output
+            build_output_take(
                 &schema,
-                &left_batches,
-                &right_batches,
-                &matches,
+                &left_concat,
+                &right_concat,
+                &all_left,
+                &all_right,
             )
         });
 
@@ -164,231 +225,201 @@ impl ExecutionPlan for SweepLineJoinExec {
     }
 }
 
-/// A flattened interval with a pointer back to its batch and row.
-#[derive(Debug, Clone)]
-struct FlatInterval {
-    chrom: String,
-    start: i64,
-    end: i64,
-    batch_idx: usize,
-    row_idx: usize,
+// ── Column extraction (zero-copy where possible) ────────────────
+
+/// Map chromosome strings to dense integer IDs. Uses a sorted unique
+/// list so IDs are consistent across left/right.
+fn chrom_to_ids(col: &ArrayRef) -> Result<Vec<u32>> {
+    let n = col.len();
+    // Build string→id map from unique values
+    let mut unique: Vec<String> = Vec::new();
+    if let Some(arr) = col.as_any().downcast_ref::<StringArray>() {
+        for i in 0..n {
+            let s = arr.value(i);
+            if !unique.contains(&s.to_string()) {
+                unique.push(s.to_string());
+            }
+        }
+        unique.sort();
+        let map: std::collections::HashMap<&str, u32> = unique
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (s.as_str(), i as u32))
+            .collect();
+        return Ok((0..n).map(|i| map[arr.value(i)]).collect());
+    }
+    if let Some(arr) = col.as_any().downcast_ref::<StringViewArray>()
+    {
+        for i in 0..n {
+            let s = arr.value(i);
+            if !unique.contains(&s.to_string()) {
+                unique.push(s.to_string());
+            }
+        }
+        unique.sort();
+        let map: std::collections::HashMap<&str, u32> = unique
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (s.as_str(), i as u32))
+            .collect();
+        return Ok((0..n).map(|i| map[arr.value(i)]).collect());
+    }
+    Err(datafusion::error::DataFusionError::Internal(
+        "Unsupported string type".to_string(),
+    ))
 }
 
-/// Extract all intervals from record batches into a flat sorted vec.
-fn extract_intervals(
-    batches: &[RecordBatch],
-    cols: &IntervalColumns,
-) -> Result<Vec<FlatInterval>> {
-    let mut intervals = Vec::new();
+/// Get a reference to the i64 values, converting Int32 if needed.
+fn as_i64_slice(col: &ArrayRef) -> Result<Arc<[i64]>> {
+    if let Some(arr) = col.as_any().downcast_ref::<Int64Array>() {
+        return Ok(arr.values().to_vec().into());
+    }
+    if let Some(arr) = col.as_any().downcast_ref::<Int32Array>() {
+        return Ok(
+            arr.values().iter().map(|&v| v as i64).collect::<Vec<_>>().into()
+        );
+    }
+    Err(datafusion::error::DataFusionError::Internal(
+        "Column is not Int32 or Int64".to_string(),
+    ))
+}
 
-    for (batch_idx, batch) in batches.iter().enumerate() {
-        let chrom_col = batch.column(cols.chrom_idx);
-        let start_col = batch.column(cols.start_idx);
-        let end_col = batch.column(cols.end_idx);
+// ── Sorting and grouping ────────────────────────────────────────
 
-        for row_idx in 0..batch.num_rows() {
-            if chrom_col.is_null(row_idx)
-                || start_col.is_null(row_idx)
-                || end_col.is_null(row_idx)
-            {
-                continue;
-            }
-            let chrom = get_string_value(chrom_col.as_ref(), row_idx)
-                .ok_or_else(|| {
-                    datafusion::error::DataFusionError::Internal(
-                        "Chrom column has unsupported string type"
-                            .to_string(),
-                    )
-                })?;
-            let start = get_i64_value(start_col.as_ref(), row_idx)
-                .ok_or_else(|| {
-                    datafusion::error::DataFusionError::Internal(
-                        "Start column is not Int32 or Int64".to_string(),
-                    )
-                })?;
-            let end = get_i64_value(end_col.as_ref(), row_idx)
-                .ok_or_else(|| {
-                    datafusion::error::DataFusionError::Internal(
-                        "End column is not Int32 or Int64".to_string(),
-                    )
-                })?;
-            intervals.push(FlatInterval {
-                chrom,
-                start,
-                end,
-                batch_idx,
-                row_idx,
-            });
-        }
+/// Sort indices by (chrom_id, start).
+fn argsort_by_chrom_start(
+    chrom_ids: &[u32],
+    starts: &[i64],
+) -> Vec<u32> {
+    let n = chrom_ids.len();
+    let mut indices: Vec<u32> = (0..n as u32).collect();
+    indices.sort_unstable_by(|&a, &b| {
+        let a = a as usize;
+        let b = b as usize;
+        chrom_ids[a]
+            .cmp(&chrom_ids[b])
+            .then(starts[a].cmp(&starts[b]))
+    });
+    indices
+}
+
+/// Split sorted indices into contiguous chromosome ranges.
+/// Returns Vec<(chrom_id, Range<usize>)> sorted by chrom_id.
+fn split_by_chrom(
+    sorted_indices: &[u32],
+    chrom_ids: &[u32],
+) -> Vec<(u32, std::ops::Range<usize>)> {
+    if sorted_indices.is_empty() {
+        return vec![];
     }
 
-    // Sort by (chrom, start)
-    intervals.sort_by(|a, b| {
-        a.chrom.cmp(&b.chrom).then(a.start.cmp(&b.start))
-    });
+    let mut groups = Vec::new();
+    let mut start = 0;
+    let mut cur_chrom = chrom_ids[sorted_indices[0] as usize];
 
-    Ok(intervals)
+    for i in 1..sorted_indices.len() {
+        let c = chrom_ids[sorted_indices[i] as usize];
+        if c != cur_chrom {
+            groups.push((cur_chrom, start..i));
+            start = i;
+            cur_chrom = c;
+        }
+    }
+    groups.push((cur_chrom, start..sorted_indices.len()));
+    groups
 }
 
-/// Core sweep-line algorithm.
-///
-/// Both inputs must be sorted by (chrom, start). For each chromosome,
-/// maintains an active set of right intervals and sweeps left to right.
-fn sweep_line_join(
-    left: &[FlatInterval],
-    right: &[FlatInterval],
-) -> Vec<(usize, usize, usize, usize)> {
-    // (left_batch, left_row, right_batch, right_row)
-    let mut matches = Vec::new();
+// ── Core sweep ──────────────────────────────────────────────────
 
-    let mut right_idx = 0;
-    let mut active: Vec<usize> = Vec::new(); // indices into right
+/// Sweep-line for one chromosome. Inputs are sorted index slices.
+fn sweep_chrom(
+    left_indices: &[u32],
+    left_starts: &[i64],
+    left_ends: &[i64],
+    right_indices: &[u32],
+    right_starts: &[i64],
+    right_ends: &[i64],
+) -> (Vec<u32>, Vec<u32>) {
+    let mut match_left = Vec::new();
+    let mut match_right = Vec::new();
 
-    for l in left {
+    let mut r_cursor = 0usize;
+    let mut active: Vec<usize> = Vec::new();
 
-        // Advance right_idx to add right intervals that START before
-        // ANY future left interval could end. Since left is sorted by
-        // start, and a future left interval's end could be arbitrarily
-        // large, we add all right intervals with start < l.end.
-        // This is conservative — we check exact overlap below.
-        while right_idx < right.len() {
-            let r = &right[right_idx];
-            if r.chrom < l.chrom {
-                right_idx += 1;
-                continue;
-            }
-            if r.chrom > l.chrom {
+    for &li in left_indices {
+        let l_start = left_starts[li as usize];
+        let l_end = left_ends[li as usize];
+
+        // Add right intervals with start < l_end
+        while r_cursor < right_indices.len() {
+            let ri = right_indices[r_cursor] as usize;
+            if right_starts[ri] >= l_end {
                 break;
             }
-            if r.start >= l.end {
-                break;
-            }
-            active.push(right_idx);
-            right_idx += 1;
+            active.push(r_cursor);
+            r_cursor += 1;
         }
 
-        // Remove only truly expired intervals: those whose END is at
-        // or before the current left START. Since left is sorted by
-        // start, any interval with end <= l.start can never overlap
-        // any future left interval either.
-        //
-        // We do NOT filter on r.start < l.end here because a wide
-        // right interval (r.start before a previous narrow left's
-        // end) may still be needed by a LATER wider left interval.
-        active.retain(|&ri| {
-            let r = &right[ri];
-            r.chrom == l.chrom && r.end > l.start
+        // Remove expired (end <= l_start)
+        active.retain(|&pos| {
+            right_ends[right_indices[pos] as usize] > l_start
         });
 
-        // Emit matches: check the full overlap condition inline.
-        for &ri in &active {
-            let r = &right[ri];
-            if r.start < l.end {
-                matches.push((
-                    l.batch_idx,
-                    l.row_idx,
-                    r.batch_idx,
-                    r.row_idx,
-                ));
+        // Emit overlapping pairs
+        for &pos in &active {
+            let ri = right_indices[pos];
+            if right_starts[ri as usize] < l_end {
+                match_left.push(li);
+                match_right.push(ri);
             }
         }
     }
 
-    matches
+    (match_left, match_right)
 }
 
-/// Build the output RecordBatch from matched pairs.
-fn build_output_batch(
+// ── Output construction ─────────────────────────────────────────
+
+fn concat_batches(batches: &[RecordBatch]) -> Result<RecordBatch> {
+    if batches.is_empty() {
+        return Err(datafusion::error::DataFusionError::Internal(
+            "No batches to concatenate".to_string(),
+        ));
+    }
+    if batches.len() == 1 {
+        return Ok(batches[0].clone());
+    }
+    let schema = batches[0].schema();
+    Ok(compute::concat_batches(&schema, batches)?)
+}
+
+fn build_output_take(
     schema: &SchemaRef,
-    left_batches: &[RecordBatch],
-    right_batches: &[RecordBatch],
-    matches: &[(usize, usize, usize, usize)],
+    left: &RecordBatch,
+    right: &RecordBatch,
+    left_idx: &[u32],
+    right_idx: &[u32],
 ) -> Result<RecordBatch> {
-    if matches.is_empty() {
+    if left_idx.is_empty() {
         return Ok(RecordBatch::new_empty(schema.clone()));
     }
 
-    let left_schema = left_batches[0].schema();
-    let right_schema = right_batches[0].schema();
-    let num_left_cols = left_schema.fields().len();
-    let num_right_cols = right_schema.fields().len();
+    let li = UInt32Array::from(left_idx.to_vec());
+    let ri = UInt32Array::from(right_idx.to_vec());
 
-    let mut columns: Vec<ArrayRef> =
-        Vec::with_capacity(num_left_cols + num_right_cols);
+    let mut columns: Vec<ArrayRef> = Vec::with_capacity(
+        left.num_columns() + right.num_columns(),
+    );
 
-    for col_idx in 0..num_left_cols {
-        let values: Vec<ArrayRef> = matches
-            .iter()
-            .map(|&(lb, lr, _, _)| {
-                left_batches[lb].column(col_idx).slice(lr, 1)
-            })
-            .collect();
-
-        let refs: Vec<&dyn Array> =
-            values.iter().map(|a| a.as_ref()).collect();
-        columns.push(arrow::compute::concat(&refs)?);
+    for c in 0..left.num_columns() {
+        columns
+            .push(compute::take(left.column(c).as_ref(), &li, None)?);
     }
-
-    for col_idx in 0..num_right_cols {
-        let values: Vec<ArrayRef> = matches
-            .iter()
-            .map(|&(_, _, rb, rr)| {
-                right_batches[rb].column(col_idx).slice(rr, 1)
-            })
-            .collect();
-
-        let refs: Vec<&dyn Array> =
-            values.iter().map(|a| a.as_ref()).collect();
-        columns.push(arrow::compute::concat(&refs)?);
+    for c in 0..right.num_columns() {
+        columns.push(
+            compute::take(right.column(c).as_ref(), &ri, None)?,
+        );
     }
 
     Ok(RecordBatch::try_new(schema.clone(), columns)?)
-}
-
-/// Collect all record batches from all partitions of an execution
-/// plan. Uses DataFusion's `collect` which spawns partition tasks
-/// concurrently — required because RepartitionExec uses shared
-/// channels that break under sequential execution.
-async fn collect_all_partitions(
-    plan: &Arc<dyn ExecutionPlan>,
-    context: &Arc<datafusion::execution::TaskContext>,
-) -> Result<Vec<RecordBatch>> {
-    datafusion::physical_plan::collect(
-        plan.clone(),
-        context.clone(),
-    )
-    .await
-}
-
-/// Extract an i64 value from an array that may be Int32Array or
-/// Int64Array.
-fn get_i64_value(array: &dyn Array, idx: usize) -> Option<i64> {
-    array
-        .as_any()
-        .downcast_ref::<Int64Array>()
-        .map(|arr| arr.value(idx))
-        .or_else(|| {
-            array
-                .as_any()
-                .downcast_ref::<Int32Array>()
-                .map(|arr| arr.value(idx) as i64)
-        })
-}
-
-/// Extract a string value from an array that may be StringArray or
-/// StringViewArray (DataFusion v47+ uses StringViewArray by default).
-fn get_string_value(
-    array: &dyn Array,
-    idx: usize,
-) -> Option<String> {
-    array
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .map(|arr| arr.value(idx).to_string())
-        .or_else(|| {
-            array
-                .as_any()
-                .downcast_ref::<StringViewArray>()
-                .map(|arr| arr.value(idx).to_string())
-        })
 }
