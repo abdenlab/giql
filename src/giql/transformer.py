@@ -582,6 +582,10 @@ class MergeTransformer:
             exp.Ordered(this=exp.column(start_col, quoted=True)), append=True, copy=False
         )
 
+        # Preserve any existing CTEs from the original query
+        if query.args.get("with_"):
+            final_query.set("with_", query.args["with_"].copy())
+
         return final_query
 
 
@@ -978,9 +982,7 @@ class CoverageTransformer:
 
         # LEFT JOIN source ON overlap conditions
         source_table = exp.to_table(table_name) if table_name else exp.to_table("source")
-        source_table.set(
-            "alias", exp.TableAlias(this=exp.Identifier(this=source_ref))
-        )
+        source_table.set("alias", exp.TableAlias(this=exp.Identifier(this=source_ref)))
 
         join_condition = exp.And(
             this=exp.And(

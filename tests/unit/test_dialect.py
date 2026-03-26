@@ -236,12 +236,12 @@ class TestGIQLDialect:
         assert len(nodes) == 1
 
     def test_gd_015_nearest_with_k(self):
-        """GIVEN a query with `NEAREST(genes, k=3)`
+        """GIVEN a query with `NEAREST(genes, k := 3)`
         WHEN the query is parsed
         THEN the AST contains a GIQLNearest node with k arg set.
         """
         ast = parse_one(
-            "SELECT NEAREST(genes, k=3) FROM t",
+            "SELECT NEAREST(genes, k := 3) FROM t",
             dialect=GIQLDialect,
         )
         nodes = list(ast.find_all(GIQLNearest))

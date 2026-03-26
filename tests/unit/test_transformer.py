@@ -95,9 +95,9 @@ class TestClusterTransformer:
         assert "1000" in sql
 
     def test_ct_004_cluster_stranded_partitions_by_strand(self):
-        """GIVEN a parsed SELECT with CLUSTER(interval, stranded=true) WHEN transform is called THEN the result partitions by chrom AND strand."""
+        """GIVEN a parsed SELECT with CLUSTER(interval, stranded := true) WHEN transform is called THEN the result partitions by chrom AND strand."""
         sql = _transform_and_sql(
-            "SELECT *, CLUSTER(interval, stranded=true) FROM features",
+            "SELECT *, CLUSTER(interval, stranded := true) FROM features",
             ClusterTransformer,
         )
         upper = sql.upper()
@@ -209,9 +209,9 @@ class TestMergeTransformer:
         assert "1000" in sql
 
     def test_mt_004_merge_stranded_adds_strand_to_group_by(self):
-        """GIVEN a parsed SELECT with MERGE(interval, stranded=true) WHEN transform is called THEN strand appears in GROUP BY and partition."""
+        """GIVEN a parsed SELECT with MERGE(interval, stranded := true) WHEN transform is called THEN strand appears in GROUP BY and partition."""
         sql = _transform_and_sql(
-            "SELECT MERGE(interval, stranded=true) FROM features",
+            "SELECT MERGE(interval, stranded := true) FROM features",
             MergeTransformer,
         )
         upper = sql.upper()

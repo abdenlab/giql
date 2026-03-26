@@ -244,14 +244,14 @@ class TestBaseGIQLGenerator:
 
     def test_bg_011_distance_stranded(self, tables_two):
         """
-        GIVEN a GIQLDistance node with stranded=true
+        GIVEN a GIQLDistance node with stranded := true
         WHEN generate is called
         THEN output contains strand NULL checks and strand flip logic.
         """
         generator = BaseGIQLGenerator(tables=tables_two)
 
         ast = parse_one(
-            "SELECT DISTANCE(a.interval, b.interval, stranded=true) AS dist "
+            "SELECT DISTANCE(a.interval, b.interval, stranded := true) AS dist "
             "FROM features_a a CROSS JOIN features_b b",
             dialect=GIQLDialect,
         )
@@ -265,14 +265,14 @@ class TestBaseGIQLGenerator:
 
     def test_bg_012_distance_signed(self, tables_two):
         """
-        GIVEN a GIQLDistance node with signed=true
+        GIVEN a GIQLDistance node with signed := true
         WHEN generate is called
         THEN output contains signed distance (negative for upstream).
         """
         generator = BaseGIQLGenerator(tables=tables_two)
 
         ast = parse_one(
-            "SELECT DISTANCE(a.interval, b.interval, signed=true) AS dist "
+            "SELECT DISTANCE(a.interval, b.interval, signed := true) AS dist "
             "FROM features_a a CROSS JOIN features_b b",
             dialect=GIQLDialect,
         )
@@ -286,14 +286,14 @@ class TestBaseGIQLGenerator:
 
     def test_bg_013_distance_stranded_and_signed(self, tables_two):
         """
-        GIVEN a GIQLDistance node with stranded=true and signed=true
+        GIVEN a GIQLDistance node with stranded := true and signed := true
         WHEN generate is called
         THEN output contains both strand flip and signed distance.
         """
         generator = BaseGIQLGenerator(tables=tables_two)
 
         ast = parse_one(
-            "SELECT DISTANCE(a.interval, b.interval, stranded=true, signed=true) AS dist "
+            "SELECT DISTANCE(a.interval, b.interval, stranded := true, signed := true) AS dist "
             "FROM features_a a CROSS JOIN features_b b",
             dialect=GIQLDialect,
         )
@@ -343,7 +343,7 @@ class TestBaseGIQLGenerator:
         generator = BaseGIQLGenerator(tables=tables_peaks_and_genes)
 
         ast = parse_one(
-            "SELECT * FROM NEAREST(genes, reference='chr1:1000-2000')",
+            "SELECT * FROM NEAREST(genes, reference := 'chr1:1000-2000')",
             dialect=GIQLDialect,
         )
         sql = generator.generate(ast)
@@ -357,14 +357,14 @@ class TestBaseGIQLGenerator:
 
     def test_bg_016_nearest_k5(self, tables_peaks_and_genes):
         """
-        GIVEN a GIQLNearest node with k=5
+        GIVEN a GIQLNearest node with k := 5
         WHEN generate is called
         THEN output has LIMIT 5.
         """
         generator = BaseGIQLGenerator(tables=tables_peaks_and_genes)
 
         ast = parse_one(
-            "SELECT * FROM NEAREST(genes, reference='chr1:1000-2000', k=5)",
+            "SELECT * FROM NEAREST(genes, reference := 'chr1:1000-2000', k := 5)",
             dialect=GIQLDialect,
         )
         sql = generator.generate(ast)
@@ -373,14 +373,14 @@ class TestBaseGIQLGenerator:
 
     def test_bg_017_nearest_max_distance(self, tables_peaks_and_genes):
         """
-        GIVEN a GIQLNearest node with max_distance=100000
+        GIVEN a GIQLNearest node with max_distance := 100000
         WHEN generate is called
         THEN the distance threshold appears in the WHERE clause.
         """
         generator = BaseGIQLGenerator(tables=tables_peaks_and_genes)
 
         ast = parse_one(
-            "SELECT * FROM NEAREST(genes, reference='chr1:1000-2000', max_distance=100000)",
+            "SELECT * FROM NEAREST(genes, reference := 'chr1:1000-2000', max_distance := 100000)",
             dialect=GIQLDialect,
         )
         sql = generator.generate(ast)
@@ -399,7 +399,7 @@ class TestBaseGIQLGenerator:
 
         ast = parse_one(
             "SELECT * FROM peaks "
-            "CROSS JOIN LATERAL NEAREST(genes, reference=peaks.interval, k=3)",
+            "CROSS JOIN LATERAL NEAREST(genes, reference := peaks.interval, k := 3)",
             dialect=GIQLDialect,
         )
         sql = generator.generate(ast)
@@ -412,7 +412,7 @@ class TestBaseGIQLGenerator:
 
     def test_bg_019_nearest_stranded(self, tables_peaks_and_genes):
         """
-        GIVEN a GIQLNearest node with stranded=true
+        GIVEN a GIQLNearest node with stranded := true
         WHEN generate is called
         THEN output includes strand matching in WHERE clause.
         """
@@ -420,7 +420,7 @@ class TestBaseGIQLGenerator:
 
         ast = parse_one(
             "SELECT * FROM peaks "
-            "CROSS JOIN LATERAL NEAREST(genes, reference=peaks.interval, k=3, stranded=true)",
+            "CROSS JOIN LATERAL NEAREST(genes, reference := peaks.interval, k := 3, stranded := true)",
             dialect=GIQLDialect,
         )
         sql = generator.generate(ast)
