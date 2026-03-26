@@ -3,7 +3,10 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
-use arrow::array::{Array, ArrayRef, Int64Array, RecordBatch, StringArray};
+use arrow::array::{
+    Array, ArrayRef, Int64Array, RecordBatch, StringArray,
+    StringViewArray,
+};
 use arrow::datatypes::SchemaRef;
 use datafusion::common::Result;
 use datafusion::execution::SendableRecordBatchStream;
@@ -231,16 +234,7 @@ fn extract_interval_rows(
     let mut rows = Vec::new();
 
     for (batch_idx, batch) in batches.iter().enumerate() {
-        let chroms = batch
-            .column(cols.chrom_idx)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .ok_or_else(|| {
-                datafusion::error::DataFusionError::Internal(
-                    "Chrom column is not StringArray".to_string(),
-                )
-            })?;
-
+        let chrom_col = batch.column(cols.chrom_idx);
         let starts = batch
             .column(cols.start_idx)
             .as_any()
@@ -262,14 +256,21 @@ fn extract_interval_rows(
             })?;
 
         for row_idx in 0..batch.num_rows() {
-            if chroms.is_null(row_idx)
+            if chrom_col.is_null(row_idx)
                 || starts.is_null(row_idx)
                 || ends.is_null(row_idx)
             {
                 continue;
             }
+            let chrom = get_string_value(chrom_col.as_ref(), row_idx)
+                .ok_or_else(|| {
+                    datafusion::error::DataFusionError::Internal(
+                        "Chrom column has unsupported string type"
+                            .to_string(),
+                    )
+                })?;
             rows.push(IntervalRow {
-                chrom: chroms.value(row_idx).to_string(),
+                chrom,
                 start: starts.value(row_idx),
                 end: ends.value(row_idx),
                 row_ref: RowRef {
@@ -349,4 +350,22 @@ async fn collect_batches(
     }
 
     Ok(batches)
+}
+
+/// Extract a string value from an array that may be StringArray or
+/// StringViewArray (DataFusion v47+ uses StringViewArray by default).
+fn get_string_value(
+    array: &dyn Array,
+    idx: usize,
+) -> Option<String> {
+    array
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .map(|arr| arr.value(idx).to_string())
+        .or_else(|| {
+            array
+                .as_any()
+                .downcast_ref::<StringViewArray>()
+                .map(|arr| arr.value(idx).to_string())
+        })
 }
