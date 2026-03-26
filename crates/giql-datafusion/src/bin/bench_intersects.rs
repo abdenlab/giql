@@ -48,6 +48,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut op = "join".to_string();
     let mut no_optimizer = false;
     let mut force_binned = false;
+    let mut sql_binned: Option<usize> = None;
 
     let mut i = 3;
     while i < args.len() {
@@ -66,6 +67,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--force-binned" => {
                 force_binned = true;
             }
+            "--sql-binned" => {
+                i += 1;
+                sql_binned = Some(args[i].parse()?);
+            }
             _ => {
                 eprintln!("Unknown arg: {}", args[i]);
                 std::process::exit(1);
@@ -74,12 +79,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         i += 1;
     }
 
-    let sql = match op.as_str() {
-        "join" => INTERSECT_JOIN_SQL,
-        "pairs" => INTERSECT_PAIRS_SQL,
-        _ => {
-            eprintln!("Unknown op: {op}. Use 'join' or 'pairs'.");
-            std::process::exit(1);
+    let sql: String = if let Some(bs) = sql_binned {
+        // Run the pure SQL binned approach through Rust DF
+        format!(
+            "WITH __giql_left AS (\
+             SELECT *, UNNEST(range(CAST(\"start\" / {bs} AS BIGINT), \
+             CAST((\"end\" - 1) / {bs} + 1 AS BIGINT))) AS __giql_bin \
+             FROM a), \
+             __giql_right AS (\
+             SELECT *, UNNEST(range(CAST(\"start\" / {bs} AS BIGINT), \
+             CAST((\"end\" - 1) / {bs} + 1 AS BIGINT))) AS __giql_bin \
+             FROM b) \
+             SELECT DISTINCT \
+             l.\"chrom\", l.\"start\", l.\"end\", \
+             r.\"chrom\" AS chrom_r, r.\"start\" AS start_r, r.\"end\" AS end_r \
+             FROM __giql_left AS l \
+             JOIN __giql_right AS r \
+             ON l.\"chrom\" = r.\"chrom\" AND l.__giql_bin = r.__giql_bin \
+             WHERE l.\"start\" < r.\"end\" AND l.\"end\" > r.\"start\""
+        )
+    } else {
+        match op.as_str() {
+            "join" => INTERSECT_JOIN_SQL.to_string(),
+            "pairs" => INTERSECT_PAIRS_SQL.to_string(),
+            _ => {
+                eprintln!("Unknown op: {op}. Use 'join' or 'pairs'.");
+                std::process::exit(1);
+            }
         }
     };
 
@@ -111,12 +137,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     // Warmup
-    let _ = ctx.sql(sql).await?.collect().await?;
+    let _ = ctx.sql(&sql).await?.collect().await?;
 
     // Timed reps
     for rep in 0..reps {
         let t0 = Instant::now();
-        let batches = ctx.sql(sql).await?.collect().await?;
+        let batches = ctx.sql(&sql).await?.collect().await?;
         let elapsed = t0.elapsed().as_secs_f64();
         let n_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
 
