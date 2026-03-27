@@ -4,7 +4,7 @@
 //! - OptimizerRule trait implementation (name, apply_order, supports_rewrite)
 //! - Join type filtering (inner only, skip left/right/full outer)
 //! - Already-binned join detection (skip re-rewrite)
-//! - Overlap pattern detection (start/end column name variants)
+//! - giql_intersects() function detection
 //! - Adaptive bin sizing from table statistics
 //! - Canonical-bin dedup filter correctness
 //! - Full pipeline integration through DataFusion with the logical rule
@@ -23,16 +23,12 @@ use parquet::arrow::ArrowWriter;
 use tempfile::TempDir;
 
 use giql_datafusion::logical_rule::IntersectsLogicalRule;
-use giql_datafusion::{IntersectsOptimizerConfig, register_optimizer};
+use giql_datafusion::register_optimizer;
 
 // ── Helpers ─────────────────────────────────────────────────────
 
-fn default_config() -> IntersectsOptimizerConfig {
-    IntersectsOptimizerConfig::default()
-}
-
 fn make_rule() -> IntersectsLogicalRule {
-    IntersectsLogicalRule::new(default_config())
+    IntersectsLogicalRule::new()
 }
 
 fn write_intervals_parquet(
@@ -94,29 +90,12 @@ fn write_intervals_parquet_custom_schema(
     path
 }
 
-/// Create a SessionContext with the logical rule enabled.
-fn make_ctx_with_logical_rule() -> SessionContext {
-    let config = IntersectsOptimizerConfig {
-        enable_logical_rule: true,
-        ..default_config()
-    };
+/// Create a SessionContext with the logical rule and UDF registered.
+fn make_ctx() -> SessionContext {
     let state = SessionStateBuilder::new()
         .with_default_features()
         .build();
-    let state = register_optimizer(state, config);
-    SessionContext::from(state)
-}
-
-/// Create a SessionContext with the logical rule disabled.
-fn make_ctx_without_logical_rule() -> SessionContext {
-    let config = IntersectsOptimizerConfig {
-        enable_logical_rule: false,
-        ..default_config()
-    };
-    let state = SessionStateBuilder::new()
-        .with_default_features()
-        .build();
-    let state = register_optimizer(state, config);
+    let state = register_optimizer(state);
     SessionContext::from(state)
 }
 
@@ -125,8 +104,7 @@ const INTERSECTS_SQL: &str = "\
            b.chrom AS chrom_b, b.start AS start_b, b.\"end\" AS end_b \
     FROM a JOIN b \
     ON a.chrom = b.chrom \
-    AND a.start < b.\"end\" \
-    AND a.\"end\" > b.start";
+    AND giql_intersects(a.start, a.\"end\", b.start, b.\"end\")";
 
 // ── OptimizerRule trait tests ───────────────────────────────────
 
@@ -159,13 +137,12 @@ fn test_rule_supports_rewrite() {
 
 #[test]
 fn test_rewrite_skips_non_join_plan() {
-    // Given a non-join logical plan (TableScan),
+    // Given a non-join logical plan (EmptyRelation),
     // When the rule is applied,
     // Then the plan is returned unchanged.
     let rule = make_rule();
     let config = datafusion::optimizer::OptimizerContext::new();
 
-    // Create a simple empty relation plan (not a join)
     let plan = LogicalPlan::EmptyRelation(
         datafusion::logical_expr::EmptyRelation {
             produce_one_row: false,
@@ -181,10 +158,10 @@ fn test_rewrite_skips_non_join_plan() {
 
 #[tokio::test]
 async fn test_rewrite_skips_left_join() {
-    // Given a LEFT JOIN with interval overlap predicates,
+    // Given a LEFT JOIN with overlap predicates,
     // When the logical rule is applied,
     // Then the plan is not rewritten (only INNER joins are supported).
-    let ctx = SessionContext::new();
+    let ctx = make_ctx();
     let schema = Arc::new(Schema::new(vec![
         Field::new("chrom", DataType::Utf8, false),
         Field::new("start", DataType::Int64, false),
@@ -218,8 +195,7 @@ async fn test_rewrite_skips_left_join() {
                b.chrom, b.start, b.\"end\" \
         FROM a LEFT JOIN b \
         ON a.chrom = b.chrom \
-        AND a.start < b.\"end\" \
-        AND a.\"end\" > b.start";
+        AND giql_intersects(a.start, a.\"end\", b.start, b.\"end\")";
 
     let df = ctx.sql(left_join_sql).await.unwrap();
     let plan = df.logical_plan().clone();
@@ -227,21 +203,16 @@ async fn test_rewrite_skips_left_join() {
     let rule = make_rule();
     let config = datafusion::optimizer::OptimizerContext::new();
 
-    // Walk the plan tree looking for join nodes
     let result = rule.rewrite(plan, &config).unwrap();
-    // Either the plan is not transformed (because it's not a Join
-    // at top level), or if DataFusion restructured it, the rule
-    // should still not rewrite non-inner joins.
-    // The important thing is that the rule doesn't panic.
     let _ = result;
 }
 
 #[tokio::test]
 async fn test_rewrite_skips_right_join() {
-    // Given a RIGHT JOIN with interval overlap predicates,
+    // Given a RIGHT JOIN with overlap predicates,
     // When the logical rule is applied,
     // Then the plan is not rewritten (only INNER joins are supported).
-    let ctx = SessionContext::new();
+    let ctx = make_ctx();
     let schema = Arc::new(Schema::new(vec![
         Field::new("chrom", DataType::Utf8, false),
         Field::new("start", DataType::Int64, false),
@@ -275,8 +246,7 @@ async fn test_rewrite_skips_right_join() {
                b.chrom, b.start, b.\"end\" \
         FROM a RIGHT JOIN b \
         ON a.chrom = b.chrom \
-        AND a.start < b.\"end\" \
-        AND a.\"end\" > b.start";
+        AND giql_intersects(a.start, a.\"end\", b.start, b.\"end\")";
 
     let df = ctx.sql(right_join_sql).await.unwrap();
     let plan = df.logical_plan().clone();
@@ -290,10 +260,10 @@ async fn test_rewrite_skips_right_join() {
 
 #[tokio::test]
 async fn test_rewrite_skips_full_outer_join() {
-    // Given a FULL OUTER JOIN with interval overlap predicates,
+    // Given a FULL OUTER JOIN with overlap predicates,
     // When the logical rule is applied,
     // Then the plan is not rewritten.
-    let ctx = SessionContext::new();
+    let ctx = make_ctx();
     let schema = Arc::new(Schema::new(vec![
         Field::new("chrom", DataType::Utf8, false),
         Field::new("start", DataType::Int64, false),
@@ -327,8 +297,7 @@ async fn test_rewrite_skips_full_outer_join() {
                b.chrom, b.start, b.\"end\" \
         FROM a FULL OUTER JOIN b \
         ON a.chrom = b.chrom \
-        AND a.start < b.\"end\" \
-        AND a.\"end\" > b.start";
+        AND giql_intersects(a.start, a.\"end\", b.start, b.\"end\")";
 
     let df = ctx.sql(full_join_sql).await.unwrap();
     let plan = df.logical_plan().clone();
@@ -340,70 +309,67 @@ async fn test_rewrite_skips_full_outer_join() {
     let _ = result;
 }
 
-// ── Register optimizer with logical rule enabled/disabled ───────
+// ── Raw overlap predicates are NOT rewritten ────────────────────
 
-#[test]
-fn test_register_optimizer_with_logical_rule_enabled() {
-    // Given a default config with enable_logical_rule = true,
-    // When register_optimizer is called,
-    // Then both logical and physical rules are added.
-    let state = SessionStateBuilder::new()
-        .with_default_features()
-        .build();
-    let n_logical_before = state.optimizers().len();
-    let n_physical_before = state.physical_optimizers().len();
+#[tokio::test]
+async fn test_rewrite_skips_raw_overlap_predicates() {
+    // Given a standard inner join with raw overlap predicates
+    // (no giql_intersects function call),
+    // When the logical rule is applied,
+    // Then the plan is not rewritten.
+    let ctx = make_ctx();
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("chrom", DataType::Utf8, false),
+        Field::new("start", DataType::Int64, false),
+        Field::new("end", DataType::Int64, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(StringArray::from(vec!["chr1"])),
+            Arc::new(Int64Array::from(vec![100])),
+            Arc::new(Int64Array::from(vec![200])),
+        ],
+    )
+    .unwrap();
 
-    let config = IntersectsOptimizerConfig {
-        enable_logical_rule: true,
-        ..default_config()
-    };
-    let state = register_optimizer(state, config);
+    let table = datafusion::datasource::MemTable::try_new(
+        schema.clone(),
+        vec![vec![batch.clone()]],
+    )
+    .unwrap();
+    let table2 = datafusion::datasource::MemTable::try_new(
+        schema,
+        vec![vec![batch]],
+    )
+    .unwrap();
+    ctx.register_table("a", Arc::new(table)).unwrap();
+    ctx.register_table("b", Arc::new(table2)).unwrap();
 
-    assert_eq!(
-        state.optimizers().len(),
-        n_logical_before + 1,
-        "Should add one logical rule"
-    );
-    assert_eq!(
-        state.physical_optimizers().len(),
-        n_physical_before + 1,
-        "Should add one physical rule"
-    );
+    let raw_sql = "\
+        SELECT a.chrom, a.start, a.\"end\", \
+               b.chrom, b.start, b.\"end\" \
+        FROM a JOIN b \
+        ON a.chrom = b.chrom \
+        AND a.start < b.\"end\" \
+        AND a.\"end\" > b.start";
 
-    let last_logical = state.optimizers().last().unwrap();
-    assert_eq!(last_logical.name(), "intersects_logical_binned");
-}
+    let df = ctx.sql(raw_sql).await.unwrap();
+    let plan = df.logical_plan().clone();
 
-#[test]
-fn test_register_optimizer_with_logical_rule_disabled() {
-    // Given a config with enable_logical_rule = false,
-    // When register_optimizer is called,
-    // Then only the physical rule is added, not the logical rule.
-    let state = SessionStateBuilder::new()
-        .with_default_features()
-        .build();
-    let n_logical_before = state.optimizers().len();
-    let n_physical_before = state.physical_optimizers().len();
+    let rule = make_rule();
+    let config = datafusion::optimizer::OptimizerContext::new();
 
-    let config = IntersectsOptimizerConfig {
-        enable_logical_rule: false,
-        ..default_config()
-    };
-    let state = register_optimizer(state, config);
-
-    assert_eq!(
-        state.optimizers().len(),
-        n_logical_before,
-        "Should NOT add a logical rule"
-    );
-    assert_eq!(
-        state.physical_optimizers().len(),
-        n_physical_before + 1,
-        "Should still add the physical rule"
+    let result = rule.rewrite(plan, &config).unwrap();
+    // The plan should NOT be rewritten since there's no
+    // giql_intersects() function call.
+    assert!(
+        !result.transformed,
+        "Raw overlap predicates should not trigger the rule"
     );
 }
 
-// ── Adaptive bin sizing integration tests ───────────────────────
+// ── Correctness integration tests ───────────────────────────────
 
 #[tokio::test]
 async fn test_logical_rule_produces_correct_results_simple() {
@@ -427,7 +393,7 @@ async fn test_logical_rule_produces_correct_results_simple() {
         &[400, 900],
     );
 
-    let ctx = make_ctx_with_logical_rule();
+    let ctx = make_ctx();
     ctx.register_parquet("a", path_a.to_str().unwrap(), Default::default())
         .await
         .unwrap();
@@ -469,7 +435,7 @@ async fn test_logical_rule_no_false_positives_adjacent() {
         &[300],
     );
 
-    let ctx = make_ctx_with_logical_rule();
+    let ctx = make_ctx();
     ctx.register_parquet("a", path_a.to_str().unwrap(), Default::default())
         .await
         .unwrap();
@@ -507,7 +473,7 @@ async fn test_logical_rule_containment() {
         &[300],
     );
 
-    let ctx = make_ctx_with_logical_rule();
+    let ctx = make_ctx();
     ctx.register_parquet("a", path_a.to_str().unwrap(), Default::default())
         .await
         .unwrap();
@@ -545,7 +511,7 @@ async fn test_logical_rule_different_chroms_no_overlap() {
         &[500, 600],
     );
 
-    let ctx = make_ctx_with_logical_rule();
+    let ctx = make_ctx();
     ctx.register_parquet("a", path_a.to_str().unwrap(), Default::default())
         .await
         .unwrap();
@@ -567,11 +533,9 @@ async fn test_logical_rule_different_chroms_no_overlap() {
 async fn test_no_duplicate_pairs_wide_intervals() {
     // Given wide intervals that span multiple bins,
     // When the logical rule rewrites to a binned join,
-    // Then each overlapping pair appears exactly once (dedup filter
-    // eliminates multi-bin duplicates).
+    // Then each overlapping pair appears exactly once.
     let dir = TempDir::new().unwrap();
 
-    // Wide intervals spanning many bins (default bin ~10k)
     let path_a = write_intervals_parquet(
         dir.path(),
         "a.parquet",
@@ -587,7 +551,7 @@ async fn test_no_duplicate_pairs_wide_intervals() {
         &[30000, 80000],
     );
 
-    let ctx = make_ctx_with_logical_rule();
+    let ctx = make_ctx();
     ctx.register_parquet("a", path_a.to_str().unwrap(), Default::default())
         .await
         .unwrap();
@@ -601,8 +565,8 @@ async fn test_no_duplicate_pairs_wide_intervals() {
         batches.iter().map(|b| b.num_rows()).sum();
 
     // a[0,40000) overlaps b[10000,30000) -> yes
-    // a[0,40000) overlaps b[60000,80000) -> no (40000 < 60000)
-    // a[50000,90000) overlaps b[10000,30000) -> no (50000 >= 30000)
+    // a[0,40000) overlaps b[60000,80000) -> no
+    // a[50000,90000) overlaps b[10000,30000) -> no
     // a[50000,90000) overlaps b[60000,80000) -> yes
     assert_eq!(total_rows, 2);
 }
@@ -612,11 +576,9 @@ async fn test_no_duplicate_pairs_many_bins() {
     // Given an interval that spans many bins and overlaps with
     // multiple other intervals,
     // When the logical rule rewrites to a binned join,
-    // Then each pair appears exactly once regardless of how many
-    // bins they share.
+    // Then each pair appears exactly once.
     let dir = TempDir::new().unwrap();
 
-    // One very wide interval on each side, plus a narrow one
     let path_a = write_intervals_parquet(
         dir.path(),
         "a.parquet",
@@ -632,7 +594,7 @@ async fn test_no_duplicate_pairs_many_bins() {
         &[15000, 70000, 300000],
     );
 
-    let ctx = make_ctx_with_logical_rule();
+    let ctx = make_ctx();
     ctx.register_parquet("a", path_a.to_str().unwrap(), Default::default())
         .await
         .unwrap();
@@ -647,7 +609,7 @@ async fn test_no_duplicate_pairs_many_bins() {
 
     // a[0,100000) overlaps b[5000,15000)  -> yes
     // a[0,100000) overlaps b[50000,70000) -> yes
-    // a[0,100000) overlaps b[200000,300000) -> no (100000 <= 200000)
+    // a[0,100000) overlaps b[200000,300000) -> no
     assert_eq!(total_rows, 2);
 }
 
@@ -657,11 +619,9 @@ async fn test_no_duplicate_pairs_many_bins() {
 async fn test_narrow_intervals_produce_small_bin_size() {
     // Given tables with narrow intervals (width ~100bp),
     // When the logical rule processes them,
-    // Then the bin size should be small (clamped to minimum 1000)
-    // and the result should still be correct.
+    // Then the result should still be correct.
     let dir = TempDir::new().unwrap();
 
-    // 100 narrow intervals of width 100
     let chroms: Vec<&str> = vec!["chr1"; 100];
     let starts: Vec<i64> = (0..100).map(|i| i * 200).collect();
     let ends: Vec<i64> = starts.iter().map(|s| s + 100).collect();
@@ -673,9 +633,10 @@ async fn test_narrow_intervals_produce_small_bin_size() {
         &starts,
         &ends,
     );
-    // Overlapping intervals offset by 50
-    let starts_b: Vec<i64> = (0..100).map(|i| i * 200 + 50).collect();
-    let ends_b: Vec<i64> = starts_b.iter().map(|s| s + 100).collect();
+    let starts_b: Vec<i64> =
+        (0..100).map(|i| i * 200 + 50).collect();
+    let ends_b: Vec<i64> =
+        starts_b.iter().map(|s| s + 100).collect();
     let path_b = write_intervals_parquet(
         dir.path(),
         "b.parquet",
@@ -684,7 +645,7 @@ async fn test_narrow_intervals_produce_small_bin_size() {
         &ends_b,
     );
 
-    let ctx = make_ctx_with_logical_rule();
+    let ctx = make_ctx();
     ctx.register_parquet("a", path_a.to_str().unwrap(), Default::default())
         .await
         .unwrap();
@@ -697,10 +658,6 @@ async fn test_narrow_intervals_produce_small_bin_size() {
     let total_rows: usize =
         batches.iter().map(|b| b.num_rows()).sum();
 
-    // Each a interval [i*200, i*200+100) overlaps b[i*200+50, i*200+150)
-    // Plus a[i*200, i*200+100) may also overlap b[(i-1)*200+50, (i-1)*200+150)
-    // when i*200 < (i-1)*200+150, i.e., 200 < 150 -> never.
-    // So exactly 100 pairs.
     assert_eq!(total_rows, 100);
 }
 
@@ -708,8 +665,7 @@ async fn test_narrow_intervals_produce_small_bin_size() {
 async fn test_wide_intervals_produce_large_bin_size() {
     // Given tables with wide intervals (width ~50000bp),
     // When the logical rule processes them,
-    // Then the result should still be correct with the adaptively
-    // chosen larger bin size.
+    // Then the result should still be correct.
     let dir = TempDir::new().unwrap();
 
     let path_a = write_intervals_parquet(
@@ -727,7 +683,7 @@ async fn test_wide_intervals_produce_large_bin_size() {
         &[75000, 175000],
     );
 
-    let ctx = make_ctx_with_logical_rule();
+    let ctx = make_ctx();
     ctx.register_parquet("a", path_a.to_str().unwrap(), Default::default())
         .await
         .unwrap();
@@ -771,7 +727,7 @@ async fn test_multi_chromosome_intersects() {
         &[400, 400, 400],
     );
 
-    let ctx = make_ctx_with_logical_rule();
+    let ctx = make_ctx();
     ctx.register_parquet("a", path_a.to_str().unwrap(), Default::default())
         .await
         .unwrap();
@@ -800,7 +756,6 @@ async fn test_many_to_many_overlap() {
     // Then all valid pairs are returned exactly once.
     let dir = TempDir::new().unwrap();
 
-    // Three intervals each spanning [0,300), [100,400), [200,500)
     let path_a = write_intervals_parquet(
         dir.path(),
         "a.parquet",
@@ -808,7 +763,6 @@ async fn test_many_to_many_overlap() {
         &[0, 100, 200],
         &[300, 400, 500],
     );
-    // Three intervals each spanning [150,350), [250,450), [350,550)
     let path_b = write_intervals_parquet(
         dir.path(),
         "b.parquet",
@@ -817,7 +771,7 @@ async fn test_many_to_many_overlap() {
         &[350, 450, 550],
     );
 
-    let ctx = make_ctx_with_logical_rule();
+    let ctx = make_ctx();
     ctx.register_parquet("a", path_a.to_str().unwrap(), Default::default())
         .await
         .unwrap();
@@ -830,88 +784,7 @@ async fn test_many_to_many_overlap() {
     let total_rows: usize =
         batches.iter().map(|b| b.num_rows()).sum();
 
-    // a[0,300) vs b[150,350) -> yes (0<350, 300>150)
-    // a[0,300) vs b[250,450) -> yes (0<450, 300>250)
-    // a[0,300) vs b[350,550) -> no  (300 <= 350)
-    // a[100,400) vs b[150,350) -> yes
-    // a[100,400) vs b[250,450) -> yes
-    // a[100,400) vs b[350,550) -> yes (100<550, 400>350)
-    // a[200,500) vs b[150,350) -> yes (200<350, 500>150)
-    // a[200,500) vs b[250,450) -> yes
-    // a[200,500) vs b[350,550) -> yes (200<550, 500>350)
     assert_eq!(total_rows, 8);
-}
-
-// ── Logical rule vs no logical rule consistency ─────────────────
-
-#[tokio::test]
-async fn test_logical_rule_matches_baseline_results() {
-    // Given the same data,
-    // When an INTERSECTS join is executed with and without the
-    // logical rule,
-    // Then both produce the same number of results.
-    let dir = TempDir::new().unwrap();
-
-    let path_a = write_intervals_parquet(
-        dir.path(),
-        "a.parquet",
-        &["chr1", "chr1", "chr2", "chr2"],
-        &[100, 500, 200, 800],
-        &[400, 900, 600, 1200],
-    );
-    let path_b = write_intervals_parquet(
-        dir.path(),
-        "b.parquet",
-        &["chr1", "chr1", "chr2"],
-        &[300, 700, 400],
-        &[600, 1000, 700],
-    );
-
-    // With logical rule
-    let ctx_with = make_ctx_with_logical_rule();
-    ctx_with
-        .register_parquet("a", path_a.to_str().unwrap(), Default::default())
-        .await
-        .unwrap();
-    ctx_with
-        .register_parquet("b", path_b.to_str().unwrap(), Default::default())
-        .await
-        .unwrap();
-
-    let result_with = ctx_with.sql(INTERSECTS_SQL).await.unwrap();
-    let batches_with = result_with.collect().await.unwrap();
-    let rows_with: usize =
-        batches_with.iter().map(|b| b.num_rows()).sum();
-
-    // Without logical rule
-    let ctx_without = make_ctx_without_logical_rule();
-    ctx_without
-        .register_parquet("a", path_a.to_str().unwrap(), Default::default())
-        .await
-        .unwrap();
-    ctx_without
-        .register_parquet("b", path_b.to_str().unwrap(), Default::default())
-        .await
-        .unwrap();
-
-    let result_without = ctx_without.sql(INTERSECTS_SQL).await.unwrap();
-    let batches_without = result_without.collect().await.unwrap();
-    let rows_without: usize =
-        batches_without.iter().map(|b| b.num_rows()).sum();
-
-    assert_eq!(
-        rows_with, rows_without,
-        "Logical rule should produce same count as baseline"
-    );
-
-    // Also verify the expected count:
-    // chr1: a[100,400) x b[300,600) -> yes
-    //        a[100,400) x b[700,1000) -> no
-    //        a[500,900) x b[300,600) -> yes
-    //        a[500,900) x b[700,1000) -> yes
-    // chr2: a[200,600) x b[400,700) -> yes
-    //        a[800,1200) x b[400,700) -> no
-    assert_eq!(rows_with, 4);
 }
 
 // ── Empty tables ────────────────────────────────────────────────
@@ -931,15 +804,13 @@ async fn test_logical_rule_empty_right_table() {
         &[200, 400],
     );
 
-    // Empty table - at least one row needed for Parquet writing,
-    // so we'll use the memory table approach
     let schema = Arc::new(Schema::new(vec![
         Field::new("chrom", DataType::Utf8, false),
         Field::new("start", DataType::Int64, false),
         Field::new("end", DataType::Int64, false),
     ]));
 
-    let ctx = make_ctx_with_logical_rule();
+    let ctx = make_ctx();
     ctx.register_parquet("a", path_a.to_str().unwrap(), Default::default())
         .await
         .unwrap();
@@ -984,7 +855,7 @@ async fn test_logical_rule_single_row_overlap() {
         &[400],
     );
 
-    let ctx = make_ctx_with_logical_rule();
+    let ctx = make_ctx();
     ctx.register_parquet("a", path_a.to_str().unwrap(), Default::default())
         .await
         .unwrap();
@@ -1022,7 +893,7 @@ async fn test_logical_rule_single_row_no_overlap() {
         &[400],
     );
 
-    let ctx = make_ctx_with_logical_rule();
+    let ctx = make_ctx();
     ctx.register_parquet("a", path_a.to_str().unwrap(), Default::default())
         .await
         .unwrap();
@@ -1044,8 +915,7 @@ async fn test_logical_rule_single_row_no_overlap() {
 async fn test_logical_rule_identical_intervals() {
     // Given two tables with identical intervals,
     // When the logical rule processes the join,
-    // Then all N*M pairs are returned where both are on the same
-    // chrom.
+    // Then all N*M pairs are returned.
     let dir = TempDir::new().unwrap();
 
     let path_a = write_intervals_parquet(
@@ -1063,7 +933,7 @@ async fn test_logical_rule_identical_intervals() {
         &[200, 200],
     );
 
-    let ctx = make_ctx_with_logical_rule();
+    let ctx = make_ctx();
     ctx.register_parquet("a", path_a.to_str().unwrap(), Default::default())
         .await
         .unwrap();
@@ -1105,7 +975,7 @@ async fn test_logical_rule_one_bp_overlap() {
         &[300],
     );
 
-    let ctx = make_ctx_with_logical_rule();
+    let ctx = make_ctx();
     ctx.register_parquet("a", path_a.to_str().unwrap(), Default::default())
         .await
         .unwrap();
@@ -1121,13 +991,14 @@ async fn test_logical_rule_one_bp_overlap() {
     assert_eq!(total_rows, 1);
 }
 
-// ── Column name variants (chromStart/chromEnd) ──────────────────
+// ── Custom column names (chromStart/chromEnd) ───────────────────
 
 #[tokio::test]
 async fn test_logical_rule_chromstart_chromend_columns() {
     // Given tables with BED-style column names (chromStart, chromEnd),
-    // When an INTERSECTS join is executed with the logical rule,
-    // Then the column names are recognized and overlaps are found.
+    // When an INTERSECTS join is executed with giql_intersects()
+    // using those column names explicitly,
+    // Then the overlaps are found correctly.
     let dir = TempDir::new().unwrap();
 
     let schema = Arc::new(Schema::new(vec![
@@ -1153,7 +1024,7 @@ async fn test_logical_rule_chromstart_chromend_columns() {
         &[600],
     );
 
-    let ctx = make_ctx_with_logical_rule();
+    let ctx = make_ctx();
     ctx.register_parquet("a", path_a.to_str().unwrap(), Default::default())
         .await
         .unwrap();
@@ -1167,8 +1038,9 @@ async fn test_logical_rule_chromstart_chromend_columns() {
                b.\"chromEnd\" AS end_b \
         FROM a JOIN b \
         ON a.chrom = b.chrom \
-        AND a.\"chromStart\" < b.\"chromEnd\" \
-        AND a.\"chromEnd\" > b.\"chromStart\"";
+        AND giql_intersects(\
+            a.\"chromStart\", a.\"chromEnd\", \
+            b.\"chromStart\", b.\"chromEnd\")";
 
     let result = ctx.sql(sql).await.unwrap();
     let batches = result.collect().await.unwrap();
@@ -1176,7 +1048,7 @@ async fn test_logical_rule_chromstart_chromend_columns() {
         batches.iter().map(|b| b.num_rows()).sum();
 
     // a[100,300) x b[200,600) -> yes
-    // a[500,700) x b[200,600) -> yes (500 < 600, 700 > 200)
+    // a[500,700) x b[200,600) -> yes
     assert_eq!(total_rows, 2);
 }
 
@@ -1204,7 +1076,7 @@ async fn test_logical_rule_output_values_correct() {
         &[400],
     );
 
-    let ctx = make_ctx_with_logical_rule();
+    let ctx = make_ctx();
     ctx.register_parquet("a", path_a.to_str().unwrap(), Default::default())
         .await
         .unwrap();
@@ -1219,8 +1091,6 @@ async fn test_logical_rule_output_values_correct() {
     let batch = &batches[0];
     assert_eq!(batch.num_rows(), 1);
 
-    // Check the values: should have a.start=100, a.end=300,
-    // b.start=200, b.end=400
     let a_start = batch
         .column_by_name("start")
         .unwrap()
@@ -1254,38 +1124,58 @@ async fn test_logical_rule_output_values_correct() {
     assert_eq!(b_end.value(0), 400);
 }
 
-/// Tables aliased as "peaks" and "genes" — not starting with 'a' or 'l'.
-/// This previously broke with the alphabetical is_from_left heuristic.
+/// Tables aliased as "peaks" and "genes" — not starting with
+/// 'a' or 'l'. Verifies giql_intersects() works with any table
+/// names.
 #[tokio::test]
 async fn test_logical_rule_non_al_table_aliases() {
     let dir = TempDir::new().unwrap();
     let left_path = write_intervals_parquet(
-        dir.path(), "peaks.parquet",
-        &["chr1", "chr1"], &[100, 300], &[250, 500],
+        dir.path(),
+        "peaks.parquet",
+        &["chr1", "chr1"],
+        &[100, 300],
+        &[250, 500],
     );
     let right_path = write_intervals_parquet(
-        dir.path(), "genes.parquet",
-        &["chr1", "chr1"], &[200, 400], &[350, 600],
+        dir.path(),
+        "genes.parquet",
+        &["chr1", "chr1"],
+        &[200, 400],
+        &[350, 600],
     );
 
-    let ctx = make_ctx_with_logical_rule();
-    ctx.register_parquet("peaks", left_path.to_str().unwrap(), Default::default())
-        .await.unwrap();
-    ctx.register_parquet("genes", right_path.to_str().unwrap(), Default::default())
-        .await.unwrap();
+    let ctx = make_ctx();
+    ctx.register_parquet(
+        "peaks",
+        left_path.to_str().unwrap(),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    ctx.register_parquet(
+        "genes",
+        right_path.to_str().unwrap(),
+        Default::default(),
+    )
+    .await
+    .unwrap();
 
     let sql = r#"
         SELECT peaks.chrom, peaks.start, peaks."end",
-               genes.chrom AS chrom_b, genes.start AS start_b, genes."end" AS end_b
+               genes.chrom AS chrom_b, genes.start AS start_b,
+               genes."end" AS end_b
         FROM peaks JOIN genes
         ON peaks.chrom = genes.chrom
-        AND peaks.start < genes."end"
-        AND peaks."end" > genes.start
+        AND giql_intersects(
+            peaks.start, peaks."end",
+            genes.start, genes."end")
     "#;
 
     let result = ctx.sql(sql).await.unwrap();
     let batches = result.collect().await.unwrap();
-    let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    let total_rows: usize =
+        batches.iter().map(|b| b.num_rows()).sum();
 
     // [100,250) overlaps [200,350): yes
     // [300,500) overlaps [200,350): yes

@@ -1,8 +1,5 @@
-use std::sync::Arc;
-
 use datafusion::common::tree_node::Transformed;
 use datafusion::common::{Column, Result, ScalarValue};
-use datafusion::datasource::listing::ListingTable;
 use datafusion::datasource::source_as_provider;
 use datafusion::logical_expr::expr::ScalarFunction;
 use datafusion::logical_expr::{
@@ -12,29 +9,30 @@ use datafusion::logical_expr::{
 use datafusion::optimizer::{OptimizerConfig, OptimizerRule};
 use datafusion::prelude::*;
 
-use crate::IntersectsOptimizerConfig;
-
 /// Logical optimizer rule that rewrites interval overlap joins into
 /// binned equi-joins using UNNEST.
 ///
-/// Detects:
-///   `JOIN ON a.chrom = b.chrom WHERE a.start < b.end AND a.end > b.start`
+/// Detects `giql_intersects(start_a, end_a, start_b, end_b)` function
+/// calls in join filters (emitted by the GIQL transpiler's
+/// `"datafusion"` dialect) and rewrites them to:
 ///
-/// Rewrites to:
-///   `SELECT DISTINCT ... FROM Unnest(a + bins) JOIN Unnest(b + bins)
+///   `SELECT ... FROM Unnest(a + bins) JOIN Unnest(b + bins)
 ///    ON chrom = chrom AND bin = bin WHERE start < end AND end > start`
 ///
-/// DataFusion handles UNNEST, hash join, and DISTINCT natively with
-/// full parallelism. The physical optimizer rule handles sweep-line
-/// for heavy-tailed distributions; this rule handles the binned case.
+/// DataFusion handles UNNEST, hash join, and dedup natively with
+/// full parallelism.
 #[derive(Debug)]
-pub struct IntersectsLogicalRule {
-    config: IntersectsOptimizerConfig,
-}
+pub struct IntersectsLogicalRule;
 
 impl IntersectsLogicalRule {
-    pub fn new(config: IntersectsOptimizerConfig) -> Self {
-        Self { config }
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for IntersectsLogicalRule {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -76,12 +74,9 @@ impl OptimizerRule for IntersectsLogicalRule {
             return Ok(Transformed::no(plan));
         }
 
-        // Detect interval overlap pattern in the filter
-        let left_schema = join.left.schema();
+        // Detect giql_intersects() function call in the filter
         let overlap = match &join.filter {
-            Some(filter) => {
-                detect_overlap_columns(filter, &left_schema)
-            }
+            Some(filter) => detect_giql_intersects(filter),
             None => None,
         };
 
@@ -89,14 +84,11 @@ impl OptimizerRule for IntersectsLogicalRule {
             return Ok(Transformed::no(plan));
         };
 
-        // Get stats from TableScan children to decide strategy.
-        // If stats aren't available (common for ListingTable without
-        // collect_statistics), default to binned with a reasonable
-        // bin size. The physical optimizer rule will still catch
-        // heavy-tailed distributions via Parquet metadata sampling
-        // and replace with sweep-line if needed.
-        let left_stats = get_table_stats(&join.left);
-        let right_stats = get_table_stats(&join.right);
+        // Get stats from TableScan children for adaptive bin sizing.
+        let left_stats =
+            get_table_stats(&join.left, &start_a.name, &end_a.name);
+        let right_stats =
+            get_table_stats(&join.right, &start_b.name, &end_b.name);
 
         let bin_size = choose_bin_size(&left_stats, &right_stats);
 
@@ -105,84 +97,60 @@ impl OptimizerRule for IntersectsLogicalRule {
              bin_size={bin_size}"
         );
 
-        let rewritten =
-            rewrite_to_binned(join, bin_size, &start_a, &start_b)?;
+        // Replace giql_intersects() with real overlap predicates
+        // before building the binned join, since the placeholder
+        // UDF cannot execute.
+        let rewritten_filter = join.filter.as_ref().map(|f| {
+            replace_giql_intersects(
+                f, &start_a, &end_a, &start_b, &end_b,
+            )
+        });
+
+        let rewritten = rewrite_to_binned(
+            join,
+            bin_size,
+            &start_a,
+            &end_a,
+            &start_b,
+            &end_b,
+            rewritten_filter.as_ref(),
+        )?;
         Ok(Transformed::yes(rewritten))
     }
 }
 
 // ── Pattern detection ───────────────────────────────────────────
 
-/// Detect interval overlap predicates in a filter expression.
+/// Detect `giql_intersects(start_a, end_a, start_b, end_b)` in a
+/// filter expression. Searches through AND-combined predicates.
 ///
-/// Looks for `col_a < col_b AND col_c > col_d` where:
-/// - One comparison has a "start" col on one side and "end" on the other
-/// - The other has "end" on one side and "start" on the other
-///
-/// Returns `(start_a, end_a, start_b, end_b)` column names.
-/// Detect interval overlap predicates in a filter expression.
-///
-/// Checks the join's left child schema to determine which columns
-/// belong to which side — no heuristics based on table name.
-fn detect_overlap_columns(
+/// Returns `(start_a, end_a, start_b, end_b)` column references.
+fn detect_giql_intersects(
     expr: &Expr,
-    left_schema: &datafusion::common::DFSchemaRef,
 ) -> Option<(Column, Column, Column, Column)> {
-    let Expr::BinaryExpr(BinaryExpr {
-        left,
-        op: Operator::And,
-        right,
-    }) = expr
-    else {
-        return None;
-    };
-
-    try_extract_overlap(left, right, left_schema)
-        .or_else(|| try_extract_overlap(right, left, left_schema))
-}
-
-fn try_extract_overlap(
-    pred_a: &Expr,
-    pred_b: &Expr,
-    left_schema: &datafusion::common::DFSchemaRef,
-) -> Option<(Column, Column, Column, Column)> {
-    let (lt_left, lt_right) = extract_comparison(pred_a, Operator::Lt)?;
-    let (gt_left, gt_right) = extract_comparison(pred_b, Operator::Gt)?;
-
-    let all = [&lt_left, &lt_right, &gt_left, &gt_right];
-
-    let is_left = |c: &Column| column_in_schema(c, left_schema);
-
-    let left_start = all.iter().find(|c| is_start(&c.name) && is_left(c));
-    let left_end = all.iter().find(|c| is_end(&c.name) && is_left(c));
-    let right_start = all.iter().find(|c| is_start(&c.name) && !is_left(c));
-    let right_end = all.iter().find(|c| is_end(&c.name) && !is_left(c));
-
-    Some((
-        (*left_start?).clone(),
-        (*left_end?).clone(),
-        (*right_start?).clone(),
-        (*right_end?).clone(),
-    ))
-}
-
-fn extract_comparison(
-    expr: &Expr,
-    expected_op: Operator,
-) -> Option<(Column, Column)> {
-    let Expr::BinaryExpr(BinaryExpr { left, op, right }) = expr else {
-        return None;
-    };
-    if *op != expected_op {
-        return None;
+    match expr {
+        Expr::ScalarFunction(func)
+            if func.name() == "giql_intersects"
+                && func.args.len() == 4 =>
+        {
+            let start_a = extract_column(&func.args[0])?;
+            let end_a = extract_column(&func.args[1])?;
+            let start_b = extract_column(&func.args[2])?;
+            let end_b = extract_column(&func.args[3])?;
+            Some((start_a, end_a, start_b, end_b))
+        }
+        Expr::BinaryExpr(BinaryExpr {
+            left,
+            op: Operator::And,
+            right,
+        }) => detect_giql_intersects(left)
+            .or_else(|| detect_giql_intersects(right)),
+        _ => None,
     }
-    let left_col = extract_column(left)?;
-    let right_col = extract_column(right)?;
-    Some((left_col, right_col))
 }
 
 /// Extract a Column from an Expr, handling TryCast/Cast wrappers
-/// that DataFusion may insert.
+/// that DataFusion may insert during type coercion.
 fn extract_column(expr: &Expr) -> Option<Column> {
     match expr {
         Expr::Column(c) => Some(c.clone()),
@@ -192,131 +160,89 @@ fn extract_column(expr: &Expr) -> Option<Column> {
     }
 }
 
-fn is_start(name: &str) -> bool {
-    let n = name.to_lowercase();
-    n == "start" || n == "chromstart" || n == "pos_start" || n == "begin"
-}
-
-fn is_end(name: &str) -> bool {
-    let n = name.to_lowercase();
-    n == "end" || n == "chromend" || n == "pos_end" || n == "stop"
-}
-
-/// Check whether a column belongs to a schema by matching its
-/// qualified name against the schema's columns.
-fn column_in_schema(
-    col: &Column,
-    schema: &datafusion::common::DFSchemaRef,
-) -> bool {
-    schema.has_column(col)
+/// Replace `giql_intersects(start_a, end_a, start_b, end_b)` in an
+/// expression tree with `start_a < end_b AND end_a > start_b`.
+fn replace_giql_intersects(
+    expr: &Expr,
+    start_a: &Column,
+    end_a: &Column,
+    start_b: &Column,
+    end_b: &Column,
+) -> Expr {
+    match expr {
+        Expr::ScalarFunction(func)
+            if func.name() == "giql_intersects" =>
+        {
+            // start_a < end_b AND end_a > start_b
+            Expr::BinaryExpr(BinaryExpr {
+                left: Box::new(Expr::BinaryExpr(BinaryExpr {
+                    left: Box::new(Expr::Column(start_a.clone())),
+                    op: Operator::Lt,
+                    right: Box::new(Expr::Column(end_b.clone())),
+                })),
+                op: Operator::And,
+                right: Box::new(Expr::BinaryExpr(BinaryExpr {
+                    left: Box::new(Expr::Column(end_a.clone())),
+                    op: Operator::Gt,
+                    right: Box::new(Expr::Column(start_b.clone())),
+                })),
+            })
+        }
+        Expr::BinaryExpr(BinaryExpr { left, op, right }) => {
+            Expr::BinaryExpr(BinaryExpr {
+                left: Box::new(replace_giql_intersects(
+                    left, start_a, end_a, start_b, end_b,
+                )),
+                op: *op,
+                right: Box::new(replace_giql_intersects(
+                    right, start_a, end_a, start_b, end_b,
+                )),
+            })
+        }
+        other => other.clone(),
+    }
 }
 
 // ── Stats collection ────────────────────────────────────────────
 
 struct LogicalStats {
+    #[allow(dead_code)]
     row_count: Option<usize>,
+    #[allow(dead_code)]
     start_min: Option<i64>,
     start_max: Option<i64>,
+    #[allow(dead_code)]
     end_min: Option<i64>,
     end_max: Option<i64>,
 }
 
-fn get_table_stats(plan: &LogicalPlan) -> Option<LogicalStats> {
+fn get_table_stats(
+    plan: &LogicalPlan,
+    start_col_name: &str,
+    end_col_name: &str,
+) -> Option<LogicalStats> {
     match plan {
         LogicalPlan::TableScan(ts) => {
-            let provider = match source_as_provider(&ts.source) {
-                Ok(p) => p,
-                Err(e) => {
-                    log::debug!(
-                        "  get_table_stats: source_as_provider failed: {e}"
-                    );
-                    return None;
-                }
-            };
-
-            // Try TableProvider::statistics() first
-            if let Some(stats) = provider.statistics() {
-                return stats_to_logical(&stats, &ts.source.schema());
-            }
-
-            // Fall back to reading Parquet metadata directly
-            let listing = match provider
-                .as_any()
-                .downcast_ref::<ListingTable>()
-            {
-                Some(lt) => lt,
-                None => {
-                    log::debug!(
-                        "  get_table_stats: not a ListingTable: {}",
-                        std::any::type_name_of_val(provider.as_ref()),
-                    );
-                    return None;
-                }
-            };
-            let paths = listing.table_paths();
-            let path = paths.first()?;
-            let path_str = path.as_str();
-
-            // ListingTableUrl stores file:// URLs; extract the
-            // filesystem path
-            let fs_path = if let Some(p) = path_str.strip_prefix("file://") {
-                std::path::PathBuf::from(p)
-            } else {
-                std::path::PathBuf::from(format!("/{path_str}"))
-            };
-
-            let schema = ts.source.schema();
-            let start_col = schema
-                .fields()
-                .iter()
-                .find(|f| is_start(f.name()))?
-                .name()
-                .as_str();
-            let end_col = schema
-                .fields()
-                .iter()
-                .find(|f| is_end(f.name()))?
-                .name()
-                .as_str();
-
-            // Read Parquet metadata (file footer only — fast)
-            let meta = crate::stats::metadata::collect_metadata(
-                &fs_path, start_col, end_col,
+            let provider = source_as_provider(&ts.source).ok()?;
+            let stats = provider.statistics()?;
+            stats_to_logical(
+                &stats,
+                &ts.source.schema(),
+                start_col_name,
+                end_col_name,
             )
-            .ok()?;
-
-            // Aggregate per-row-group bounds
-            let start_min = meta.row_group_bounds.iter()
-                .map(|rg| rg.min_start)
-                .min();
-            let start_max = meta.row_group_bounds.iter()
-                .map(|rg| rg.max_start)
-                .max();
-            let end_min = meta.row_group_bounds.iter()
-                .map(|rg| rg.min_end)
-                .min();
-            let end_max = meta.row_group_bounds.iter()
-                .map(|rg| rg.max_end)
-                .max();
-
-            Some(LogicalStats {
-                row_count: Some(meta.total_rows),
-                start_min,
-                start_max,
-                end_min,
-                end_max,
-            })
         }
-        _ => plan
-            .inputs()
-            .first()
-            .and_then(|child| get_table_stats(child)),
+        _ => plan.inputs().first().and_then(|child| {
+            get_table_stats(child, start_col_name, end_col_name)
+        }),
     }
 }
 
 fn stats_to_logical(
     stats: &datafusion::common::Statistics,
     schema: &arrow::datatypes::SchemaRef,
+    start_col_name: &str,
+    end_col_name: &str,
 ) -> Option<LogicalStats> {
     let row_count = match stats.num_rows {
         datafusion::common::stats::Precision::Exact(n) => Some(n),
@@ -326,11 +252,11 @@ fn stats_to_logical(
     let start_idx = schema
         .fields()
         .iter()
-        .position(|f| is_start(f.name()))?;
+        .position(|f| f.name() == start_col_name)?;
     let end_idx = schema
         .fields()
         .iter()
-        .position(|f| is_end(f.name()))?;
+        .position(|f| f.name() == end_col_name)?;
     let col_stats = &stats.column_statistics;
     let start_stats = col_stats.get(start_idx)?;
     let end_stats = col_stats.get(end_idx)?;
@@ -362,15 +288,11 @@ fn scalar_to_i64(
 /// Default bin size when stats are unavailable.
 const DEFAULT_BIN_SIZE: usize = 10_000;
 
-/// Choose a bin size from Parquet metadata.
+/// Choose a bin size from table statistics.
 ///
 /// The width signal `max(end) - max(start)` approximates the width
 /// of the widest intervals. We use this as the bin size so that most
 /// intervals fit in a single bin (replication factor ≈ 1).
-///
-/// Always returns `Some(bin_size)` — binned joins are correct for
-/// all distributions, and DataFusion's native UNNEST + hash join is
-/// fast enough that adaptive bin sizing is the only knob needed.
 fn choose_bin_size(
     left: &Option<LogicalStats>,
     right: &Option<LogicalStats>,
@@ -404,7 +326,8 @@ fn choose_bin_size(
         }
         (None, None) => {
             log::debug!(
-                "INTERSECTS logical: using default bin_size={DEFAULT_BIN_SIZE}"
+                "INTERSECTS logical: using default \
+                 bin_size={DEFAULT_BIN_SIZE}"
             );
             DEFAULT_BIN_SIZE
         }
@@ -430,7 +353,10 @@ fn rewrite_to_binned(
     join: &Join,
     bin_size: usize,
     start_a: &Column,
+    end_a: &Column,
     start_b: &Column,
+    end_b: &Column,
+    rewritten_filter: Option<&Expr>,
 ) -> Result<LogicalPlan> {
     let bs = bin_size as i64;
 
@@ -445,12 +371,16 @@ fn rewrite_to_binned(
         "__giql_bins_l",
         bs,
         &left_alias,
+        start_a,
+        end_a,
     )?;
     let right_expanded = expand_with_bins(
         (*join.right).clone(),
         "__giql_bins_r",
         bs,
         &right_alias,
+        start_b,
+        end_b,
     )?;
 
     // Equi-keys: original keys re-qualified with the aliases +
@@ -483,22 +413,20 @@ fn rewrite_to_binned(
             }
         })
         .collect();
-    left_keys.push(col(format!(
-        "{left_alias}.__giql_bins_l"
-    )));
-    right_keys.push(col(format!(
-        "{right_alias}.__giql_bins_r"
-    )));
+    left_keys
+        .push(col(format!("{left_alias}.__giql_bins_l")));
+    right_keys
+        .push(col(format!("{right_alias}.__giql_bins_r")));
 
-    // Build the join with the original filter and extra bin equi-keys.
-    // Wrap in a subquery alias to isolate the schema, then project
-    // away the bin columns and add DISTINCT.
+    // Build the join with the rewritten filter (giql_intersects
+    // replaced with real overlap predicates) and extra bin
+    // equi-keys.
     let joined = LogicalPlanBuilder::from(left_expanded)
         .join_with_expr_keys(
             right_expanded,
             JoinType::Inner,
             (left_keys, right_keys),
-            join.filter.clone(),
+            rewritten_filter.cloned(),
         )?
         .build()?;
 
@@ -506,38 +434,36 @@ fn rewrite_to_binned(
     // multi-bin matches. For each pair, only emit from the bin
     // that equals the GREATER of the two intervals' first bins.
     // This makes DISTINCT unnecessary.
-    //
-    // We use GREATEST(left_first_bin, right_first_bin) but since
-    // DataFusion doesn't have GREATEST, we use:
-    //   CASE WHEN left_first_bin >= right_first_bin
-    //        THEN left_first_bin
-    //        ELSE right_first_bin END
-    //
-    // Actually, we use the simpler approach: just keep the row
-    // where __giql_bins equals the max of (start_a/B, start_b/B).
-    // Since we already have the start columns, we can compute this.
     let left_first_bin = cast(
-        Expr::Column(start_a.clone()),
+        Expr::Column(Column::new(
+            Some(left_alias.clone()),
+            &start_a.name,
+        )),
         arrow::datatypes::DataType::Int64,
     ) / lit(bs);
     let right_first_bin = cast(
-        Expr::Column(start_b.clone()),
+        Expr::Column(Column::new(
+            Some(right_alias.clone()),
+            &start_b.name,
+        )),
         arrow::datatypes::DataType::Int64,
     ) / lit(bs);
 
-    // canonical_bin = CASE WHEN l_fb >= r_fb THEN l_fb ELSE r_fb END
-    let canonical_bin = Expr::Case(datafusion::logical_expr::expr::Case {
-        expr: None,
-        when_then_expr: vec![(
-            Box::new(left_first_bin.clone().gt_eq(right_first_bin.clone())),
-            Box::new(left_first_bin),
-        )],
-        else_expr: Some(Box::new(right_first_bin)),
-    });
+    // canonical_bin = CASE WHEN l_fb >= r_fb THEN l_fb ELSE r_fb
+    let canonical_bin =
+        Expr::Case(datafusion::logical_expr::expr::Case {
+            expr: None,
+            when_then_expr: vec![(
+                Box::new(
+                    left_first_bin.clone().gt_eq(right_first_bin.clone()),
+                ),
+                Box::new(left_first_bin),
+            )],
+            else_expr: Some(Box::new(right_first_bin)),
+        });
 
-    // We need the bins column from the left side. After the join
-    // with aliases, the left bin column is qualified.
-    let bins_col = col(format!("{left_alias}.__giql_bins_l"));
+    let bins_col =
+        col(format!("{left_alias}.__giql_bins_l"));
     let dedup_filter = bins_col.eq(canonical_bin);
 
     let filtered = LogicalPlanBuilder::from(joined)
@@ -568,44 +494,28 @@ fn expand_with_bins(
     bin_col_name: &str,
     bin_size: i64,
     table_alias: &str,
+    start_col: &Column,
+    end_col: &Column,
 ) -> Result<LogicalPlan> {
     let schema = input.schema().clone();
 
-    // Find start and end columns
-    let start_col = schema
-        .columns()
-        .into_iter()
-        .find(|c| is_start(&c.name))
-        .ok_or_else(|| {
-            datafusion::error::DataFusionError::Plan(
-                "No start column found".to_string(),
-            )
-        })?;
-    let end_col = schema
-        .columns()
-        .into_iter()
-        .find(|c| is_end(&c.name))
-        .ok_or_else(|| {
-            datafusion::error::DataFusionError::Plan(
-                "No end column found".to_string(),
-            )
-        })?;
-
     // Cast start/end to Int64 first, then compute bin boundaries:
-    //   range(CAST(start AS BIGINT) / B, (CAST(end AS BIGINT) - 1) / B + 1)
+    //   range(CAST(start AS BIGINT) / B, (CAST(end AS BIGINT) - 1)
+    //   / B + 1)
     let start_i64 = cast(
-        Expr::Column(start_col),
+        Expr::Column(start_col.clone()),
         arrow::datatypes::DataType::Int64,
     );
     let end_i64 = cast(
-        Expr::Column(end_col),
+        Expr::Column(end_col.clone()),
         arrow::datatypes::DataType::Int64,
     );
     let start_bin = start_i64 / lit(bin_size);
-    let end_bin = (end_i64 - lit(1i64)) / lit(bin_size) + lit(1i64);
+    let end_bin =
+        (end_i64 - lit(1i64)) / lit(bin_size) + lit(1i64);
 
-    // Build: SELECT *, range(start_bin, end_bin) AS __giql_bins FROM input
-    // Then UNNEST(__giql_bins)
+    // Build: SELECT *, range(start_bin, end_bin) AS __giql_bins
+    // FROM input. Then UNNEST(__giql_bins)
     let range_expr =
         Expr::ScalarFunction(ScalarFunction::new_udf(
             datafusion::functions_nested::range::range_udf(),

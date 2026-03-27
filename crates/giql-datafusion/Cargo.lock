@@ -1539,7 +1539,6 @@ version = "0.1.0"
 dependencies = [
  "arrow",
  "datafusion",
- "futures",
  "log",
  "parquet",
  "tempfile",

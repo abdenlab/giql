@@ -1,116 +1,130 @@
 //! DataFusion optimizer for genomic interval (INTERSECTS) joins.
 //!
-//! This crate provides a [`PhysicalOptimizerRule`] that reads Parquet
-//! metadata and lightweight sampling to choose between sweep-line and
-//! binned equi-join algorithms for interval overlap joins.
+//! This crate provides a logical [`OptimizerRule`] that detects
+//! `giql_intersects()` function calls in join filters and rewrites
+//! them into binned equi-joins using UNNEST. Bin size is chosen
+//! adaptively from table statistics when available.
+//!
+//! The `giql_intersects` function is a placeholder UDF emitted by the
+//! GIQL transpiler's `"datafusion"` dialect. It preserves INTERSECTS
+//! semantics through the SQL layer so the optimizer can match on it
+//! directly, without heuristic pattern detection.
 //!
 //! # Usage
 //!
 //! ```rust,no_run
 //! use datafusion::execution::SessionStateBuilder;
 //! use datafusion::prelude::*;
-//! use giql_datafusion::{IntersectsOptimizerConfig, register_optimizer};
+//! use giql_datafusion::register_optimizer;
 //!
-//! let config = IntersectsOptimizerConfig::default();
 //! let state = SessionStateBuilder::new()
 //!     .with_default_features()
 //!     .build();
-//! let state = register_optimizer(state, config);
+//! let state = register_optimizer(state);
 //! let ctx = SessionContext::from(state);
 //! ```
 
-pub mod cost;
-pub mod exec;
 pub mod logical_rule;
-pub mod optimizer;
-pub mod pattern;
-pub mod pruning;
-pub mod stats;
 
-pub use cost::JoinStrategy;
 pub use logical_rule::IntersectsLogicalRule;
-pub use optimizer::IntersectsOptimizerRule;
 
-use datafusion::execution::SessionState;
-use datafusion::optimizer::OptimizerRule;
-use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use std::sync::Arc;
 
-/// Configuration for the INTERSECTS join optimizer.
-#[derive(Debug, Clone)]
-pub struct IntersectsOptimizerConfig {
-    /// Threshold for p99/median width ratio. Above this, sweep line is
-    /// chosen to avoid binning replication blowup on wide intervals.
-    pub p99_median_threshold: f64,
+use datafusion::common::Result;
+use datafusion::execution::SessionState;
+use datafusion::logical_expr::{
+    ColumnarValue, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl,
+    Signature, TypeSignature, Volatility,
+};
+use datafusion::optimizer::OptimizerRule;
 
-    /// Threshold for coefficient of variation. Above this, sweep line
-    /// is chosen because no single bin size works well.
-    pub cv_threshold: f64,
+// ── Placeholder UDF ─────────────────────────────────────────────
 
-    /// Maximum number of row groups to sample for width distribution.
-    pub max_sample_row_groups: usize,
-
-    /// Enable the logical optimizer rule that rewrites interval
-    /// overlap joins to UNNEST-based binned equi-joins. When false,
-    /// only the physical sweep-line optimizer is active. Enabled by
-    /// default.
-    pub enable_logical_rule: bool,
+/// Placeholder `giql_intersects(start_a, end_a, start_b, end_b)` UDF.
+///
+/// Exists only so DataFusion's SQL parser accepts the function call.
+/// The logical optimizer rule rewrites it away before execution.
+#[derive(Debug, Hash, PartialEq, Eq)]
+struct GiqlIntersectsUdf {
+    signature: Signature,
 }
 
-impl Default for IntersectsOptimizerConfig {
-    fn default() -> Self {
+impl GiqlIntersectsUdf {
+    fn new() -> Self {
         Self {
-            p99_median_threshold: 10.0,
-            cv_threshold: 1.5,
-            max_sample_row_groups: 3,
-            enable_logical_rule: true,
+            signature: Signature::new(
+                TypeSignature::Any(4),
+                Volatility::Immutable,
+            ),
         }
     }
 }
 
-/// Build a [`SessionState`] with the INTERSECTS optimizer rules.
+impl ScalarUDFImpl for GiqlIntersectsUdf {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn name(&self) -> &str {
+        "giql_intersects"
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(
+        &self,
+        _arg_types: &[arrow::datatypes::DataType],
+    ) -> Result<arrow::datatypes::DataType> {
+        Ok(arrow::datatypes::DataType::Boolean)
+    }
+
+    fn invoke_with_args(
+        &self,
+        _args: ScalarFunctionArgs,
+    ) -> Result<ColumnarValue> {
+        Err(datafusion::error::DataFusionError::Internal(
+            "giql_intersects should be rewritten by the logical \
+             optimizer rule — was the IntersectsLogicalRule registered?"
+                .into(),
+        ))
+    }
+}
+
+/// Create the placeholder `giql_intersects` scalar UDF.
+pub fn giql_intersects_udf() -> ScalarUDF {
+    ScalarUDF::from(GiqlIntersectsUdf::new())
+}
+
+// ── Registration ────────────────────────────────────────────────
+
+/// Build a [`SessionState`] with the INTERSECTS logical optimizer
+/// rule and the `giql_intersects` placeholder UDF.
 ///
-/// The physical rule detects interval overlap joins and replaces them
-/// with sweep-line execution plans for heavy-tailed distributions,
-/// deferring to DataFusion's default join for uniform data.
-///
-/// The logical rule (experimental, disabled by default) rewrites
-/// interval overlap joins to UNNEST-based binned equi-joins at the
-/// logical level, enabling DataFusion's native parallel execution.
-/// Enable by setting `enable_logical_rule = true` in the config.
-pub fn register_optimizer(
-    state: SessionState,
-    config: IntersectsOptimizerConfig,
-) -> SessionState {
+/// The logical rule detects `giql_intersects()` calls in join
+/// filters and rewrites them into binned equi-joins with adaptive
+/// bin sizing from table statistics.
+pub fn register_optimizer(state: SessionState) -> SessionState {
     use datafusion::execution::SessionStateBuilder;
 
-    // Physical rule: sweep-line for heavy-tailed distributions
-    let physical_rule: Arc<dyn PhysicalOptimizerRule + Send + Sync> =
-        Arc::new(IntersectsOptimizerRule::new(config.clone()));
+    let logical_rule: Arc<dyn OptimizerRule + Send + Sync> =
+        Arc::new(IntersectsLogicalRule::new());
 
-    let mut physical_rules: Vec<
-        Arc<dyn PhysicalOptimizerRule + Send + Sync>,
-    > = state.physical_optimizers().to_vec();
-    physical_rules.push(physical_rule);
+    let mut logical_rules: Vec<Arc<dyn OptimizerRule + Send + Sync>> =
+        state.optimizers().to_vec();
+    logical_rules.push(logical_rule);
 
-    let builder = if config.enable_logical_rule {
-        let logical_rule: Arc<dyn OptimizerRule + Send + Sync> =
-            Arc::new(IntersectsLogicalRule::new(config));
+    let udf = Arc::new(giql_intersects_udf());
 
-        let mut logical_rules: Vec<
-            Arc<dyn OptimizerRule + Send + Sync>,
-        > = state.optimizers().to_vec();
-        logical_rules.push(logical_rule);
+    let mut scalar_fns: Vec<Arc<ScalarUDF>> =
+        state.scalar_functions().values().cloned().collect();
+    scalar_fns.push(udf);
 
-        SessionStateBuilder::new_from_existing(state)
-            .with_optimizer_rules(logical_rules)
-            .with_physical_optimizer_rules(physical_rules)
-    } else {
-        SessionStateBuilder::new_from_existing(state)
-            .with_physical_optimizer_rules(physical_rules)
-    };
-
-    builder.build()
+    SessionStateBuilder::new_from_existing(state)
+        .with_optimizer_rules(logical_rules)
+        .with_scalar_functions(scalar_fns)
+        .build()
 }
 
 #[cfg(test)]
@@ -118,67 +132,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_default_config() {
-        let config = IntersectsOptimizerConfig::default();
-        assert!((config.p99_median_threshold - 10.0).abs() < f64::EPSILON);
-        assert!((config.cv_threshold - 1.5).abs() < f64::EPSILON);
-        assert_eq!(config.max_sample_row_groups, 3);
-    }
-
-    #[test]
-    fn test_custom_config_used_by_cost_model() {
-        let config = IntersectsOptimizerConfig {
-            p99_median_threshold: 5.0,
-            cv_threshold: 1.0,
-            max_sample_row_groups: 1,
-            enable_logical_rule: false,
-        };
-        let model = cost::CostModel::new(&config);
-
-        // With p99/median = 6.0 > 5.0 (custom threshold), should
-        // short-circuit to sweep line even though default threshold
-        // would not trigger.
-        let stats = stats::IntervalStats {
-            row_count: 100_000,
-            domain_min: 0,
-            domain_max: 1_000_000,
-            is_sorted_by_start: false,
-            row_group_bounds: vec![],
-            width: stats::WidthStats {
-                median: 100.0,
-                mean: 120.0,
-                p95: 500.0,
-                p99: 600.0,
-                cv: 0.5,
-                p99_median_ratio: 6.0,
-            },
-        };
-
-        match model.decide(&stats, &stats) {
-            JoinStrategy::SweepLine { .. } => {}
-            other => panic!(
-                "Expected SweepLine with custom threshold, got {:?}",
-                other
-            ),
-        }
-    }
-
-    #[test]
-    fn test_register_optimizer_adds_rule() {
+    fn test_register_optimizer_adds_rule_and_udf() {
         use datafusion::execution::SessionStateBuilder;
 
         let state = SessionStateBuilder::new()
             .with_default_features()
             .build();
-        let n_before = state.physical_optimizers().len();
+        let n_before = state.optimizers().len();
 
-        let config = IntersectsOptimizerConfig::default();
-        let state = register_optimizer(state, config);
-        let n_after = state.physical_optimizers().len();
+        let state = register_optimizer(state);
 
-        assert_eq!(n_after, n_before + 1);
+        // Logical rule was added
+        assert_eq!(state.optimizers().len(), n_before + 1);
+        let last_rule = state.optimizers().last().unwrap();
+        assert_eq!(last_rule.name(), "intersects_logical_binned");
 
-        let last_rule = state.physical_optimizers().last().unwrap();
-        assert_eq!(last_rule.name(), "intersects_optimizer");
+        // UDF was registered
+        assert!(
+            state.scalar_functions().contains_key("giql_intersects")
+        );
     }
 }
