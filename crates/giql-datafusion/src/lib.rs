@@ -21,15 +21,18 @@
 
 pub mod cost;
 pub mod exec;
+pub mod logical_rule;
 pub mod optimizer;
 pub mod pattern;
 pub mod pruning;
 pub mod stats;
 
 pub use cost::JoinStrategy;
+pub use logical_rule::IntersectsLogicalRule;
 pub use optimizer::IntersectsOptimizerRule;
 
 use datafusion::execution::SessionState;
+use datafusion::optimizer::OptimizerRule;
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use std::sync::Arc;
 
@@ -46,6 +49,12 @@ pub struct IntersectsOptimizerConfig {
 
     /// Maximum number of row groups to sample for width distribution.
     pub max_sample_row_groups: usize,
+
+    /// Enable the experimental logical optimizer rule that rewrites
+    /// interval overlap joins to UNNEST-based binned equi-joins.
+    /// When false (default), only the physical sweep-line optimizer
+    /// is active.
+    pub enable_logical_rule: bool,
 }
 
 impl Default for IntersectsOptimizerConfig {
@@ -54,28 +63,54 @@ impl Default for IntersectsOptimizerConfig {
             p99_median_threshold: 10.0,
             cv_threshold: 1.5,
             max_sample_row_groups: 3,
+            enable_logical_rule: false,
         }
     }
 }
 
-/// Build a [`SessionState`] with the INTERSECTS optimizer rule
-/// appended to the default physical optimizer rules.
+/// Build a [`SessionState`] with the INTERSECTS optimizer rules.
+///
+/// The physical rule detects interval overlap joins and replaces them
+/// with sweep-line execution plans for heavy-tailed distributions,
+/// deferring to DataFusion's default join for uniform data.
+///
+/// The logical rule (experimental, disabled by default) rewrites
+/// interval overlap joins to UNNEST-based binned equi-joins at the
+/// logical level, enabling DataFusion's native parallel execution.
+/// Enable by setting `enable_logical_rule = true` in the config.
 pub fn register_optimizer(
     state: SessionState,
     config: IntersectsOptimizerConfig,
 ) -> SessionState {
     use datafusion::execution::SessionStateBuilder;
 
-    let rule: Arc<dyn PhysicalOptimizerRule + Send + Sync> =
-        Arc::new(IntersectsOptimizerRule::new(config));
+    // Physical rule: sweep-line for heavy-tailed distributions
+    let physical_rule: Arc<dyn PhysicalOptimizerRule + Send + Sync> =
+        Arc::new(IntersectsOptimizerRule::new(config.clone()));
 
-    let mut rules: Vec<Arc<dyn PhysicalOptimizerRule + Send + Sync>> =
-        state.physical_optimizers().to_vec();
-    rules.push(rule);
+    let mut physical_rules: Vec<
+        Arc<dyn PhysicalOptimizerRule + Send + Sync>,
+    > = state.physical_optimizers().to_vec();
+    physical_rules.push(physical_rule);
 
-    SessionStateBuilder::new_from_existing(state)
-        .with_physical_optimizer_rules(rules)
-        .build()
+    let builder = if config.enable_logical_rule {
+        let logical_rule: Arc<dyn OptimizerRule + Send + Sync> =
+            Arc::new(IntersectsLogicalRule::new(config));
+
+        let mut logical_rules: Vec<
+            Arc<dyn OptimizerRule + Send + Sync>,
+        > = state.optimizers().to_vec();
+        logical_rules.push(logical_rule);
+
+        SessionStateBuilder::new_from_existing(state)
+            .with_optimizer_rules(logical_rules)
+            .with_physical_optimizer_rules(physical_rules)
+    } else {
+        SessionStateBuilder::new_from_existing(state)
+            .with_physical_optimizer_rules(physical_rules)
+    };
+
+    builder.build()
 }
 
 #[cfg(test)]
@@ -96,6 +131,7 @@ mod tests {
             p99_median_threshold: 5.0,
             cv_threshold: 1.0,
             max_sample_row_groups: 1,
+            enable_logical_rule: false,
         };
         let model = cost::CostModel::new(&config);
 

@@ -120,6 +120,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 p99_median_threshold: f64::MAX,
                 cv_threshold: f64::MAX,
                 max_sample_row_groups: 3,
+                enable_logical_rule: false,
             }
         } else {
             IntersectsOptimizerConfig::default()
