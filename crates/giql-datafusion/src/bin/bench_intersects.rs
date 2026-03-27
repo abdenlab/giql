@@ -49,6 +49,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut no_optimizer = false;
     let mut force_binned = false;
     let mut sql_binned: Option<usize> = None;
+    let mut enable_logical = false;
 
     let mut i = 3;
     while i < args.len() {
@@ -70,6 +71,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--sql-binned" => {
                 i += 1;
                 sql_binned = Some(args[i].parse()?);
+            }
+            "--enable-logical-rule" => {
+                enable_logical = true;
             }
             _ => {
                 eprintln!("Unknown arg: {}", args[i]);
@@ -115,15 +119,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         SessionContext::new()
     } else {
         let config = if force_binned {
-            // Set thresholds so high that sweep-line is never chosen
             IntersectsOptimizerConfig {
                 p99_median_threshold: f64::MAX,
                 cv_threshold: f64::MAX,
                 max_sample_row_groups: 3,
-                enable_logical_rule: false,
+                enable_logical_rule: enable_logical,
             }
         } else {
-            IntersectsOptimizerConfig::default()
+            IntersectsOptimizerConfig {
+                enable_logical_rule: enable_logical,
+                ..Default::default()
+            }
         };
         let state = SessionStateBuilder::new()
             .with_default_features()

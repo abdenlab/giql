@@ -117,8 +117,8 @@ impl OptimizerRule for IntersectsLogicalRule {
              bin_size={bin_size}"
         );
 
-        // Rewrite to binned equi-join
-        let rewritten = rewrite_to_binned(join, bin_size)?;
+        let rewritten =
+            rewrite_to_binned(join, bin_size, &start_a, &start_b)?;
         Ok(Transformed::yes(rewritten))
     }
 }
@@ -373,32 +373,86 @@ fn should_use_binned(
 
 // ── Plan rewrite ────────────────────────────────────────────────
 
+/// Extract table name from a logical plan (walks to TableScan).
+fn get_table_name(plan: &LogicalPlan) -> Option<String> {
+    match plan {
+        LogicalPlan::TableScan(ts) => {
+            Some(ts.table_name.table().to_string())
+        }
+        _ => plan
+            .inputs()
+            .first()
+            .and_then(|child| get_table_name(child)),
+    }
+}
+
 fn rewrite_to_binned(
     join: &Join,
     bin_size: usize,
+    start_a: &Column,
+    start_b: &Column,
 ) -> Result<LogicalPlan> {
     let bs = bin_size as i64;
+
+    // Get table names for aliasing after UNNEST
+    let left_alias = get_table_name(&join.left)
+        .unwrap_or_else(|| "l".to_string());
+    let right_alias = get_table_name(&join.right)
+        .unwrap_or_else(|| "r".to_string());
 
     let left_expanded = expand_with_bins(
         (*join.left).clone(),
         "__giql_bins_l",
         bs,
+        &left_alias,
     )?;
     let right_expanded = expand_with_bins(
         (*join.right).clone(),
         "__giql_bins_r",
         bs,
+        &right_alias,
     )?;
 
-    // Original equi-keys + bin columns (differently named to avoid collision)
-    let mut left_keys: Vec<Expr> =
-        join.on.iter().map(|(l, _)| l.clone()).collect();
-    let mut right_keys: Vec<Expr> =
-        join.on.iter().map(|(_, r)| r.clone()).collect();
-    left_keys.push(col("__giql_bins_l"));
-    right_keys.push(col("__giql_bins_r"));
+    // Equi-keys: original keys re-qualified with the aliases +
+    // bin columns
+    let mut left_keys: Vec<Expr> = join
+        .on
+        .iter()
+        .map(|(l, _)| {
+            if let Expr::Column(c) = l {
+                Expr::Column(Column::new(
+                    Some(left_alias.clone()),
+                    &c.name,
+                ))
+            } else {
+                l.clone()
+            }
+        })
+        .collect();
+    let mut right_keys: Vec<Expr> = join
+        .on
+        .iter()
+        .map(|(_, r)| {
+            if let Expr::Column(c) = r {
+                Expr::Column(Column::new(
+                    Some(right_alias.clone()),
+                    &c.name,
+                ))
+            } else {
+                r.clone()
+            }
+        })
+        .collect();
+    left_keys.push(col(format!(
+        "{left_alias}.__giql_bins_l"
+    )));
+    right_keys.push(col(format!(
+        "{right_alias}.__giql_bins_r"
+    )));
 
-    // Build: join → project (strip __giql_bins) → distinct
+    // Build the join with the original filter and extra bin equi-keys.
+    // Wrap in a subquery alias to isolate the schema, then project
+    // away the bin columns and add DISTINCT.
     let joined = LogicalPlanBuilder::from(left_expanded)
         .join_with_expr_keys(
             right_expanded,
@@ -408,8 +462,51 @@ fn rewrite_to_binned(
         )?
         .build()?;
 
-    // Project away __giql_bins columns from the new join's schema
-    let output_exprs: Vec<Expr> = joined
+    // Add canonical-bin filter to eliminate duplicates from
+    // multi-bin matches. For each pair, only emit from the bin
+    // that equals the GREATER of the two intervals' first bins.
+    // This makes DISTINCT unnecessary.
+    //
+    // We use GREATEST(left_first_bin, right_first_bin) but since
+    // DataFusion doesn't have GREATEST, we use:
+    //   CASE WHEN left_first_bin >= right_first_bin
+    //        THEN left_first_bin
+    //        ELSE right_first_bin END
+    //
+    // Actually, we use the simpler approach: just keep the row
+    // where __giql_bins equals the max of (start_a/B, start_b/B).
+    // Since we already have the start columns, we can compute this.
+    let left_first_bin = cast(
+        Expr::Column(start_a.clone()),
+        arrow::datatypes::DataType::Int64,
+    ) / lit(bs);
+    let right_first_bin = cast(
+        Expr::Column(start_b.clone()),
+        arrow::datatypes::DataType::Int64,
+    ) / lit(bs);
+
+    // canonical_bin = CASE WHEN l_fb >= r_fb THEN l_fb ELSE r_fb END
+    let canonical_bin = Expr::Case(datafusion::logical_expr::expr::Case {
+        expr: None,
+        when_then_expr: vec![(
+            Box::new(left_first_bin.clone().gt_eq(right_first_bin.clone())),
+            Box::new(left_first_bin),
+        )],
+        else_expr: Some(Box::new(right_first_bin)),
+    });
+
+    // We need the bins column from the left side. After the join
+    // with aliases, the left bin column is qualified.
+    let bins_col = col(format!("{left_alias}.__giql_bins_l"));
+    let dedup_filter = bins_col.eq(canonical_bin);
+
+    let filtered = LogicalPlanBuilder::from(joined)
+        .filter(dedup_filter)?
+        .build()?;
+
+    // Now project to strip bin columns. DISTINCT → PROJECT ordering
+    // prevents the schema mismatch from projection pushdown.
+    let output_exprs: Vec<Expr> = filtered
         .schema()
         .columns()
         .into_iter()
@@ -417,19 +514,20 @@ fn rewrite_to_binned(
         .map(|c| Expr::Column(c))
         .collect();
 
-    let projected = LogicalPlanBuilder::from(joined)
-        .project(output_exprs)?
+    LogicalPlanBuilder::from(filtered)
         .distinct()?
-        .build()?;
-
-    Ok(projected)
+        .project(output_exprs)?
+        .build()
 }
 
-/// Add a `range(start/B, (end-1)/B + 1)` column and unnest it.
+/// Add a `range(start/B, (end-1)/B + 1)` column, unnest it, and
+/// wrap in a SubqueryAlias to preserve the table qualifier for
+/// the join filter.
 fn expand_with_bins(
     input: LogicalPlan,
     bin_col_name: &str,
     bin_size: i64,
+    table_alias: &str,
 ) -> Result<LogicalPlan> {
     let schema = input.schema().clone();
 
@@ -486,7 +584,11 @@ fn expand_with_bins(
         .project(proj_exprs)?
         .build()?;
 
+    // Unnest the bin list column, then re-apply the table alias
+    // so that qualified column references (e.g., a.start) in the
+    // join filter resolve correctly against this side.
     LogicalPlanBuilder::from(with_bins)
         .unnest_column(bin_col_name)?
+        .alias(table_alias)?
         .build()
 }

@@ -63,7 +63,7 @@ impl Default for IntersectsOptimizerConfig {
             p99_median_threshold: 10.0,
             cv_threshold: 1.5,
             max_sample_row_groups: 3,
-            enable_logical_rule: false,
+            enable_logical_rule: true,
         }
     }
 }
