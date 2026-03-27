@@ -570,8 +570,9 @@ fn rewrite_to_binned(
         .filter(dedup_filter)?
         .build()?;
 
-    // Now project to strip bin columns. DISTINCT → PROJECT ordering
-    // prevents the schema mismatch from projection pushdown.
+    // Project to strip bin columns. The canonical-bin filter above
+    // already ensures each pair appears exactly once, so DISTINCT
+    // is unnecessary.
     let output_exprs: Vec<Expr> = filtered
         .schema()
         .columns()
@@ -581,7 +582,6 @@ fn rewrite_to_binned(
         .collect();
 
     LogicalPlanBuilder::from(filtered)
-        .distinct()?
         .project(output_exprs)?
         .build()
 }
