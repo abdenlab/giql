@@ -125,11 +125,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 max_sample_row_groups: 3,
                 enable_logical_rule: enable_logical,
             }
-        } else {
+        } else if enable_logical {
             IntersectsOptimizerConfig {
-                enable_logical_rule: enable_logical,
+                enable_logical_rule: true,
                 ..Default::default()
             }
+        } else {
+            IntersectsOptimizerConfig::default()
         };
         let state = SessionStateBuilder::new()
             .with_default_features()

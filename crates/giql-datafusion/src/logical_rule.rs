@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use datafusion::common::tree_node::Transformed;
 use datafusion::common::{Column, Result, ScalarValue};
+use datafusion::datasource::listing::ListingTable;
 use datafusion::datasource::source_as_provider;
 use datafusion::logical_expr::expr::ScalarFunction;
 use datafusion::logical_expr::{
@@ -103,14 +104,7 @@ impl OptimizerRule for IntersectsLogicalRule {
         let left_stats = get_table_stats(&join.left);
         let right_stats = get_table_stats(&join.right);
 
-        let bin_size = match should_use_binned(
-            &left_stats,
-            &right_stats,
-            &self.config,
-        ) {
-            Some(bs) => bs,
-            None => return Ok(Transformed::no(plan)),
-        };
+        let bin_size = choose_bin_size(&left_stats, &right_stats);
 
         eprintln!(
             "INTERSECTS logical rule: rewriting to binned join, \
@@ -256,50 +250,123 @@ struct LogicalStats {
 fn get_table_stats(plan: &LogicalPlan) -> Option<LogicalStats> {
     match plan {
         LogicalPlan::TableScan(ts) => {
-            let provider = source_as_provider(&ts.source).ok()?;
-            eprintln!(
-                "  get_table_stats: provider type: {}",
-                std::any::type_name_of_val(provider.as_ref()),
-            );
-            let stats = provider.statistics();
-            eprintln!("  get_table_stats: statistics = {stats:?}");
-            let stats = stats?;
-            let row_count = match stats.num_rows {
-                datafusion::common::stats::Precision::Exact(n) => Some(n),
-                datafusion::common::stats::Precision::Inexact(n) => Some(n),
-                _ => None,
+            let provider = match source_as_provider(&ts.source) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!(
+                        "  get_table_stats: source_as_provider failed: {e}"
+                    );
+                    return None;
+                }
             };
 
-            // Find start and end column stats
-            let schema = ts.source.schema();
-            let start_idx = schema
-                .fields()
-                .iter()
-                .position(|f| is_start(f.name()))?;
-            let end_idx = schema
-                .fields()
-                .iter()
-                .position(|f| is_end(f.name()))?;
+            // Try TableProvider::statistics() first
+            if let Some(stats) = provider.statistics() {
+                return stats_to_logical(&stats, &ts.source.schema());
+            }
 
-            let col_stats = &stats.column_statistics;
-            let start_stats = col_stats.get(start_idx)?;
-            let end_stats = col_stats.get(end_idx)?;
+            // Fall back to reading Parquet metadata directly
+            let listing = match provider
+                .as_any()
+                .downcast_ref::<ListingTable>()
+            {
+                Some(lt) => lt,
+                None => {
+                    eprintln!(
+                        "  get_table_stats: not a ListingTable: {}",
+                        std::any::type_name_of_val(provider.as_ref()),
+                    );
+                    return None;
+                }
+            };
+            let paths = listing.table_paths();
+            let path = paths.first()?;
+            let path_str = path.as_str();
+
+            // ListingTableUrl stores file:// URLs; extract the
+            // filesystem path
+            let fs_path = if let Some(p) = path_str.strip_prefix("file://") {
+                std::path::PathBuf::from(p)
+            } else {
+                std::path::PathBuf::from(format!("/{path_str}"))
+            };
+
+            let schema = ts.source.schema();
+            let start_col = schema
+                .fields()
+                .iter()
+                .find(|f| is_start(f.name()))?
+                .name()
+                .as_str();
+            let end_col = schema
+                .fields()
+                .iter()
+                .find(|f| is_end(f.name()))?
+                .name()
+                .as_str();
+
+            // Read Parquet metadata (file footer only — fast)
+            let meta = crate::stats::metadata::collect_metadata(
+                &fs_path, start_col, end_col,
+            )
+            .ok()?;
+
+            // Aggregate per-row-group bounds
+            let start_min = meta.row_group_bounds.iter()
+                .map(|rg| rg.min_start)
+                .min();
+            let start_max = meta.row_group_bounds.iter()
+                .map(|rg| rg.max_start)
+                .max();
+            let end_min = meta.row_group_bounds.iter()
+                .map(|rg| rg.min_end)
+                .min();
+            let end_max = meta.row_group_bounds.iter()
+                .map(|rg| rg.max_end)
+                .max();
 
             Some(LogicalStats {
-                row_count,
-                start_min: scalar_to_i64(&start_stats.min_value),
-                start_max: scalar_to_i64(&start_stats.max_value),
-                end_min: scalar_to_i64(&end_stats.min_value),
-                end_max: scalar_to_i64(&end_stats.max_value),
+                row_count: Some(meta.total_rows),
+                start_min,
+                start_max,
+                end_min,
+                end_max,
             })
         }
-        _ => {
-            // Try first child
-            plan.inputs()
-                .first()
-                .and_then(|child| get_table_stats(child))
-        }
+        _ => plan
+            .inputs()
+            .first()
+            .and_then(|child| get_table_stats(child)),
     }
+}
+
+fn stats_to_logical(
+    stats: &datafusion::common::Statistics,
+    schema: &arrow::datatypes::SchemaRef,
+) -> Option<LogicalStats> {
+    let row_count = match stats.num_rows {
+        datafusion::common::stats::Precision::Exact(n) => Some(n),
+        datafusion::common::stats::Precision::Inexact(n) => Some(n),
+        _ => None,
+    };
+    let start_idx = schema
+        .fields()
+        .iter()
+        .position(|f| is_start(f.name()))?;
+    let end_idx = schema
+        .fields()
+        .iter()
+        .position(|f| is_end(f.name()))?;
+    let col_stats = &stats.column_statistics;
+    let start_stats = col_stats.get(start_idx)?;
+    let end_stats = col_stats.get(end_idx)?;
+    Some(LogicalStats {
+        row_count,
+        start_min: scalar_to_i64(&start_stats.min_value),
+        start_max: scalar_to_i64(&start_stats.max_value),
+        end_min: scalar_to_i64(&end_stats.min_value),
+        end_max: scalar_to_i64(&end_stats.max_value),
+    })
 }
 
 fn scalar_to_i64(
@@ -321,54 +388,53 @@ fn scalar_to_i64(
 /// Default bin size when stats are unavailable.
 const DEFAULT_BIN_SIZE: usize = 10_000;
 
-fn should_use_binned(
+/// Choose a bin size from Parquet metadata.
+///
+/// The width signal `max(end) - max(start)` approximates the width
+/// of the widest intervals. We use this as the bin size so that most
+/// intervals fit in a single bin (replication factor ≈ 1).
+///
+/// Always returns `Some(bin_size)` — binned joins are correct for
+/// all distributions, and DataFusion's native UNNEST + hash join is
+/// fast enough that adaptive bin sizing is the only knob needed.
+fn choose_bin_size(
     left: &Option<LogicalStats>,
     right: &Option<LogicalStats>,
-    config: &IntersectsOptimizerConfig,
-) -> Option<usize> {
-    // If stats are available, use them to decide
-    if let (Some(left), Some(right)) = (left, right) {
-        let l_width_at_max =
-            left.end_max.unwrap_or(0) - left.start_max.unwrap_or(0);
-        let l_width_at_min =
-            left.end_min.unwrap_or(0) - left.start_min.unwrap_or(0);
-        let r_width_at_max =
-            right.end_max.unwrap_or(0) - right.start_max.unwrap_or(0);
-        let r_width_at_min =
-            right.end_min.unwrap_or(0) - right.start_min.unwrap_or(0);
+) -> usize {
+    let width_from_stats = |s: &LogicalStats| -> Option<i64> {
+        let max_start = s.start_max?;
+        let max_end = s.end_max?;
+        Some((max_end - max_start).max(1))
+    };
 
-        let l_ratio = if l_width_at_min > 0 {
-            l_width_at_max as f64 / l_width_at_min as f64
-        } else {
-            f64::MAX
-        };
-        let r_ratio = if r_width_at_min > 0 {
-            r_width_at_max as f64 / r_width_at_min as f64
-        } else {
-            f64::MAX
-        };
+    let l_width = left.as_ref().and_then(width_from_stats);
+    let r_width = right.as_ref().and_then(width_from_stats);
 
-        if l_ratio > config.p99_median_threshold
-            || r_ratio > config.p99_median_threshold
-        {
-            return None; // → sweep-line (physical rule)
+    match (l_width, r_width) {
+        (Some(l), Some(r)) => {
+            let w = l.max(r) as usize;
+            let bin_size = w.clamp(1_000, 1_000_000);
+            eprintln!(
+                "INTERSECTS logical: adaptive bin_size={bin_size} \
+                 (from widths l={l}, r={r})"
+            );
+            bin_size
         }
-
-        let max_width =
-            l_width_at_max.max(r_width_at_max).max(1) as usize;
-        return Some(max_width.clamp(1_000, 1_000_000));
+        (Some(w), None) | (None, Some(w)) => {
+            let bin_size = (w as usize).clamp(1_000, 1_000_000);
+            eprintln!(
+                "INTERSECTS logical: adaptive bin_size={bin_size} \
+                 (partial stats, width={w})"
+            );
+            bin_size
+        }
+        (None, None) => {
+            eprintln!(
+                "INTERSECTS logical: using default bin_size={DEFAULT_BIN_SIZE}"
+            );
+            DEFAULT_BIN_SIZE
+        }
     }
-
-    // No stats → default to binned. The physical optimizer rule
-    // will still catch heavy-tailed distributions via Parquet
-    // metadata sampling and override with sweep-line if needed.
-    // But since the logical rule has already rewritten the plan,
-    // the physical rule won't see the original join pattern.
-    //
-    // This is the right trade-off: binned is correct for all
-    // distributions (just not always optimal), and DataFusion's
-    // native UNNEST + hash join is fast.
-    Some(DEFAULT_BIN_SIZE)
 }
 
 // ── Plan rewrite ────────────────────────────────────────────────
