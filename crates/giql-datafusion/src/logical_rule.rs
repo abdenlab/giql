@@ -77,21 +77,15 @@ impl OptimizerRule for IntersectsLogicalRule {
         }
 
         // Detect interval overlap pattern in the filter
+        let left_schema = join.left.schema();
         let overlap = match &join.filter {
             Some(filter) => {
-                eprintln!(
-                    "INTERSECTS logical: checking filter: {filter}"
-                );
-                detect_overlap_columns(filter)
+                detect_overlap_columns(filter, &left_schema)
             }
-            None => {
-                eprintln!("INTERSECTS logical: join has no filter");
-                None
-            }
+            None => None,
         };
 
         let Some((start_a, end_a, start_b, end_b)) = overlap else {
-            eprintln!("INTERSECTS logical: no overlap pattern found");
             return Ok(Transformed::no(plan));
         };
 
@@ -106,7 +100,7 @@ impl OptimizerRule for IntersectsLogicalRule {
 
         let bin_size = choose_bin_size(&left_stats, &right_stats);
 
-        eprintln!(
+        log::debug!(
             "INTERSECTS logical rule: rewriting to binned join, \
              bin_size={bin_size}"
         );
@@ -126,8 +120,13 @@ impl OptimizerRule for IntersectsLogicalRule {
 /// - The other has "end" on one side and "start" on the other
 ///
 /// Returns `(start_a, end_a, start_b, end_b)` column names.
+/// Detect interval overlap predicates in a filter expression.
+///
+/// Checks the join's left child schema to determine which columns
+/// belong to which side — no heuristics based on table name.
 fn detect_overlap_columns(
     expr: &Expr,
+    left_schema: &datafusion::common::DFSchemaRef,
 ) -> Option<(Column, Column, Column, Column)> {
     let Expr::BinaryExpr(BinaryExpr {
         left,
@@ -138,31 +137,26 @@ fn detect_overlap_columns(
         return None;
     };
 
-    // Try both orderings
-    try_extract_overlap(left, right)
-        .or_else(|| try_extract_overlap(right, left))
+    try_extract_overlap(left, right, left_schema)
+        .or_else(|| try_extract_overlap(right, left, left_schema))
 }
 
 fn try_extract_overlap(
     pred_a: &Expr,
     pred_b: &Expr,
+    left_schema: &datafusion::common::DFSchemaRef,
 ) -> Option<(Column, Column, Column, Column)> {
     let (lt_left, lt_right) = extract_comparison(pred_a, Operator::Lt)?;
     let (gt_left, gt_right) = extract_comparison(pred_b, Operator::Gt)?;
 
     let all = [&lt_left, &lt_right, &gt_left, &gt_right];
-    eprintln!("INTERSECTS logical: columns in filter:");
-    for c in &all {
-        eprintln!("  {:?} start={} end={} left={}",
-            c, is_start(&c.name), is_end(&c.name), is_from_left(c));
-    }
 
-    let left_start = all.iter().find(|c| is_start(&c.name) && is_from_left(c));
-    let left_end = all.iter().find(|c| is_end(&c.name) && is_from_left(c));
-    let right_start = all.iter().find(|c| is_start(&c.name) && !is_from_left(c));
-    let right_end = all.iter().find(|c| is_end(&c.name) && !is_from_left(c));
+    let is_left = |c: &Column| column_in_schema(c, left_schema);
 
-    eprintln!("  left_start={left_start:?} left_end={left_end:?} right_start={right_start:?} right_end={right_end:?}");
+    let left_start = all.iter().find(|c| is_start(&c.name) && is_left(c));
+    let left_end = all.iter().find(|c| is_end(&c.name) && is_left(c));
+    let right_start = all.iter().find(|c| is_start(&c.name) && !is_left(c));
+    let right_end = all.iter().find(|c| is_end(&c.name) && !is_left(c));
 
     Some((
         (*left_start?).clone(),
@@ -177,11 +171,9 @@ fn extract_comparison(
     expected_op: Operator,
 ) -> Option<(Column, Column)> {
     let Expr::BinaryExpr(BinaryExpr { left, op, right }) = expr else {
-        eprintln!("  extract_comparison: not a BinaryExpr: {expr:?}");
         return None;
     };
     if *op != expected_op {
-        eprintln!("  extract_comparison: op={op:?}, expected={expected_op:?}");
         return None;
     }
     let left_col = extract_column(left)?;
@@ -196,10 +188,7 @@ fn extract_column(expr: &Expr) -> Option<Column> {
         Expr::Column(c) => Some(c.clone()),
         Expr::Cast(cast) => extract_column(&cast.expr),
         Expr::TryCast(tc) => extract_column(&tc.expr),
-        other => {
-            eprintln!("  extract_column: unexpected expr type: {other:?}");
-            None
-        }
+        _ => None,
     }
 }
 
@@ -213,28 +202,13 @@ fn is_end(name: &str) -> bool {
     n == "end" || n == "chromend" || n == "pos_end" || n == "stop"
 }
 
-fn is_from_left(col: &Column) -> bool {
-    // In DataFusion logical plans, qualified columns have a table
-    // relation. We use position in the join: left-side columns
-    // have the left table qualifier. Since we don't know the exact
-    // qualifier, we rely on the join's on-clause to tell us which
-    // table is which. For now, use a simple heuristic: both sides
-    // have the same column names, so the relation qualifier
-    // distinguishes them. If no qualifier, we can't tell.
-    // This works because genomic tables always have qualified refs
-    // in JOIN conditions (e.g., a.start, b.start).
-    col.relation.is_some()
-        && col
-            .relation
-            .as_ref()
-            .map(|r| {
-                let s = r.to_string();
-                // First table alphabetically is "left" — fragile but
-                // works for a.X / b.X patterns. We'll improve this
-                // by checking against the join's child schemas.
-                s.starts_with('a') || s.starts_with('l')
-            })
-            .unwrap_or(false)
+/// Check whether a column belongs to a schema by matching its
+/// qualified name against the schema's columns.
+fn column_in_schema(
+    col: &Column,
+    schema: &datafusion::common::DFSchemaRef,
+) -> bool {
+    schema.has_column(col)
 }
 
 // ── Stats collection ────────────────────────────────────────────
@@ -253,7 +227,7 @@ fn get_table_stats(plan: &LogicalPlan) -> Option<LogicalStats> {
             let provider = match source_as_provider(&ts.source) {
                 Ok(p) => p,
                 Err(e) => {
-                    eprintln!(
+                    log::debug!(
                         "  get_table_stats: source_as_provider failed: {e}"
                     );
                     return None;
@@ -272,7 +246,7 @@ fn get_table_stats(plan: &LogicalPlan) -> Option<LogicalStats> {
             {
                 Some(lt) => lt,
                 None => {
-                    eprintln!(
+                    log::debug!(
                         "  get_table_stats: not a ListingTable: {}",
                         std::any::type_name_of_val(provider.as_ref()),
                     );
@@ -414,7 +388,7 @@ fn choose_bin_size(
         (Some(l), Some(r)) => {
             let w = l.max(r) as usize;
             let bin_size = w.clamp(1_000, 1_000_000);
-            eprintln!(
+            log::debug!(
                 "INTERSECTS logical: adaptive bin_size={bin_size} \
                  (from widths l={l}, r={r})"
             );
@@ -422,14 +396,14 @@ fn choose_bin_size(
         }
         (Some(w), None) | (None, Some(w)) => {
             let bin_size = (w as usize).clamp(1_000, 1_000_000);
-            eprintln!(
+            log::debug!(
                 "INTERSECTS logical: adaptive bin_size={bin_size} \
                  (partial stats, width={w})"
             );
             bin_size
         }
         (None, None) => {
-            eprintln!(
+            log::debug!(
                 "INTERSECTS logical: using default bin_size={DEFAULT_BIN_SIZE}"
             );
             DEFAULT_BIN_SIZE

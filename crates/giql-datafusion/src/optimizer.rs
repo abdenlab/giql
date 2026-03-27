@@ -41,7 +41,7 @@ impl IntersectsOptimizerRule {
         &self,
         plan: Arc<dyn ExecutionPlan>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        eprintln!(
+        log::debug!(
             "INTERSECTS optimizer: visiting node: {}",
             plan.name()
         );
@@ -83,7 +83,7 @@ impl IntersectsOptimizerRule {
         let strategy = match (&left_stats, &right_stats) {
             (Some(left), Some(right)) => cost_model.decide(left, right),
             _ => {
-                eprintln!(
+                log::debug!(
                     "INTERSECTS optimizer: no Parquet stats available, \
                      deferring to DataFusion"
                 );
@@ -91,7 +91,7 @@ impl IntersectsOptimizerRule {
             }
         };
 
-        eprintln!("INTERSECTS optimizer: selected {strategy:?}");
+        log::debug!("INTERSECTS optimizer: selected {strategy:?}");
 
         match strategy {
             JoinStrategy::SweepLine { build_side } => {
@@ -115,7 +115,7 @@ impl IntersectsOptimizerRule {
                 // (BinExpandExec + modified HashJoinExec) exceeds
                 // the gain from bin-based hashing. Defer to
                 // DataFusion's built-in join.
-                eprintln!(
+                log::debug!(
                     "INTERSECTS optimizer: binned strategy selected, \
                      deferring to DataFusion"
                 );

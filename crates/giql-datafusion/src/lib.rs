@@ -50,10 +50,10 @@ pub struct IntersectsOptimizerConfig {
     /// Maximum number of row groups to sample for width distribution.
     pub max_sample_row_groups: usize,
 
-    /// Enable the experimental logical optimizer rule that rewrites
-    /// interval overlap joins to UNNEST-based binned equi-joins.
-    /// When false (default), only the physical sweep-line optimizer
-    /// is active.
+    /// Enable the logical optimizer rule that rewrites interval
+    /// overlap joins to UNNEST-based binned equi-joins. When false,
+    /// only the physical sweep-line optimizer is active. Enabled by
+    /// default.
     pub enable_logical_rule: bool,
 }
 

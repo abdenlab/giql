@@ -1253,3 +1253,42 @@ async fn test_logical_rule_output_values_correct() {
         .unwrap();
     assert_eq!(b_end.value(0), 400);
 }
+
+/// Tables aliased as "peaks" and "genes" — not starting with 'a' or 'l'.
+/// This previously broke with the alphabetical is_from_left heuristic.
+#[tokio::test]
+async fn test_logical_rule_non_al_table_aliases() {
+    let dir = TempDir::new().unwrap();
+    let left_path = write_intervals_parquet(
+        dir.path(), "peaks.parquet",
+        &["chr1", "chr1"], &[100, 300], &[250, 500],
+    );
+    let right_path = write_intervals_parquet(
+        dir.path(), "genes.parquet",
+        &["chr1", "chr1"], &[200, 400], &[350, 600],
+    );
+
+    let ctx = make_ctx_with_logical_rule();
+    ctx.register_parquet("peaks", left_path.to_str().unwrap(), Default::default())
+        .await.unwrap();
+    ctx.register_parquet("genes", right_path.to_str().unwrap(), Default::default())
+        .await.unwrap();
+
+    let sql = r#"
+        SELECT peaks.chrom, peaks.start, peaks."end",
+               genes.chrom AS chrom_b, genes.start AS start_b, genes."end" AS end_b
+        FROM peaks JOIN genes
+        ON peaks.chrom = genes.chrom
+        AND peaks.start < genes."end"
+        AND peaks."end" > genes.start
+    "#;
+
+    let result = ctx.sql(sql).await.unwrap();
+    let batches = result.collect().await.unwrap();
+    let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+
+    // [100,250) overlaps [200,350): yes
+    // [300,500) overlaps [200,350): yes
+    // [300,500) overlaps [400,600): yes
+    assert_eq!(total_rows, 3);
+}

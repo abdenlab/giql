@@ -309,7 +309,7 @@ impl futures::Stream for SweepLineStream {
                     let fut = self.build_fut.as_mut().unwrap();
                     // SAFETY: we only poll this once, and it's
                     // behind an Option that we take after Ready.
-                    let fut = unsafe { Pin::new_unchecked(fut) };
+                    let fut = Pin::new(fut);
                     match fut.poll(cx) {
                         Poll::Pending => return Poll::Pending,
                         Poll::Ready(join_result) => {

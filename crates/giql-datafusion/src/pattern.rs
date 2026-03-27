@@ -149,7 +149,7 @@ fn detect_from_hash_join(
     ) {
         Some(cols) => cols,
         None => {
-            eprintln!(
+            log::debug!(
                 "INTERSECTS optimizer: HashJoinExec filter didn't \
                  match. filter={:?}, indices={:?}",
                 filter_expr, column_indices,
