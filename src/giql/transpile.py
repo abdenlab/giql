@@ -4,6 +4,10 @@ This module provides the main entry point for transpiling GIQL queries
 to standard SQL.
 """
 
+from __future__ import annotations
+
+from typing import Literal
+
 from sqlglot import parse_one
 
 from giql.dialect import GIQLDialect
@@ -45,6 +49,7 @@ def _build_tables(tables: list[str | Table] | None) -> Tables:
 def transpile(
     giql: str,
     tables: list[str | Table] | None = None,
+    dialect: Literal["default", "datafusion"] = "default",
 ) -> str:
     """Transpile a GIQL query to SQL.
 
@@ -60,6 +65,12 @@ def transpile(
         Table configurations. Strings use default column mappings
         (chrom, start, end, strand). Table objects provide custom
         column name mappings.
+    dialect : {"default", "datafusion"}
+        Target SQL dialect. ``"datafusion"`` emits
+        ``giql_intersects()`` function calls for column-to-column
+        INTERSECTS joins, allowing a DataFusion logical optimizer
+        rule to rewrite them into binned equi-joins with adaptive
+        bin sizing. Default emits standard SQL-92 overlap predicates.
 
     Returns
     -------
@@ -69,7 +80,8 @@ def transpile(
     Raises
     ------
     ValueError
-        If the query cannot be parsed or transpiled.
+        If the query cannot be parsed or transpiled, or if an
+        unsupported dialect is specified.
 
     Examples
     --------
@@ -80,19 +92,12 @@ def transpile(
             tables=["peaks"],
         )
 
-    Custom table configuration::
+    DataFusion dialect for optimized interval joins::
 
         sql = transpile(
-            "SELECT * FROM peaks WHERE interval INTERSECTS 'chr1:1000-2000'",
-            tables=[
-                Table(
-                    "peaks",
-                    genomic_col="interval",
-                    chrom_col="chrom",
-                    start_col="start",
-                    end_col="end",
-                )
-            ],
+            "SELECT * FROM a JOIN b ON a.interval INTERSECTS b.interval",
+            tables=["a", "b"],
+            dialect="datafusion",
         )
     """
     # Build tables container
@@ -102,8 +107,17 @@ def transpile(
     merge_transformer = MergeTransformer(tables_container)
     cluster_transformer = ClusterTransformer(tables_container)
 
-    # Initialize generator with table configurations
-    generator = BaseGIQLGenerator(tables=tables_container)
+    # Initialize generator for the target dialect
+    if dialect == "datafusion":
+        from giql.generators.datafusion import DataFusionGIQLGenerator
+
+        generator = DataFusionGIQLGenerator(tables=tables_container)
+    elif dialect == "default":
+        generator = BaseGIQLGenerator(tables=tables_container)
+    else:
+        raise ValueError(
+            f"Unknown dialect: {dialect!r}. Supported: 'default', 'datafusion'"
+        )
 
     # Parse GIQL query
     try:
