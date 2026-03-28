@@ -208,10 +208,8 @@ fn replace_giql_intersects(
 struct LogicalStats {
     #[allow(dead_code)]
     row_count: Option<usize>,
-    #[allow(dead_code)]
     start_min: Option<i64>,
     start_max: Option<i64>,
-    #[allow(dead_code)]
     end_min: Option<i64>,
     end_max: Option<i64>,
 }
@@ -290,17 +288,33 @@ const DEFAULT_BIN_SIZE: usize = 10_000;
 
 /// Choose a bin size from table statistics.
 ///
-/// The width signal `max(end) - max(start)` approximates the width
-/// of the widest intervals. We use this as the bin size so that most
-/// intervals fit in a single bin (replication factor ≈ 1).
+/// Estimates representative interval width from column-level min/max
+/// stats using two independent signals:
+///
+/// - `min(end) - min(start)`: width estimate from the leftmost
+///   interval (the row with the smallest start likely ends near
+///   `min(end)`)
+/// - `max(end) - max(start)`: width estimate from the rightmost
+///   interval (the row with the largest start likely ends near
+///   `max(end)`)
+///
+/// Takes the max of both to be conservative — a larger bin size
+/// means fewer bins per interval, avoiding replication blowup at the
+/// cost of more false-positive bin matches (filtered by the overlap
+/// predicate).
 fn choose_bin_size(
     left: &Option<LogicalStats>,
     right: &Option<LogicalStats>,
 ) -> usize {
     let width_from_stats = |s: &LogicalStats| -> Option<i64> {
+        let min_start = s.start_min?;
         let max_start = s.start_max?;
+        let min_end = s.end_min?;
         let max_end = s.end_max?;
-        Some((max_end - max_start).max(1))
+        // Two independent width estimates; take the max.
+        let w1 = min_end - min_start;
+        let w2 = max_end - max_start;
+        Some(w1.max(w2).max(1))
     };
 
     let l_width = left.as_ref().and_then(width_from_stats);
@@ -308,7 +322,7 @@ fn choose_bin_size(
 
     match (l_width, r_width) {
         (Some(l), Some(r)) => {
-            let w = l.max(r) as usize;
+            let w = l.max(r).max(1) as usize;
             let bin_size = w.clamp(1_000, 1_000_000);
             log::debug!(
                 "INTERSECTS logical: adaptive bin_size={bin_size} \
@@ -317,7 +331,7 @@ fn choose_bin_size(
             bin_size
         }
         (Some(w), None) | (None, Some(w)) => {
-            let bin_size = (w as usize).clamp(1_000, 1_000_000);
+            let bin_size = (w.max(1) as usize).clamp(1_000, 1_000_000);
             log::debug!(
                 "INTERSECTS logical: adaptive bin_size={bin_size} \
                  (partial stats, width={w})"
@@ -336,17 +350,19 @@ fn choose_bin_size(
 
 // ── Plan rewrite ────────────────────────────────────────────────
 
-/// Extract table name from a logical plan (walks to TableScan).
-fn get_table_name(plan: &LogicalPlan) -> Option<String> {
-    match plan {
-        LogicalPlan::TableScan(ts) => {
-            Some(ts.table_name.table().to_string())
-        }
-        _ => plan
-            .inputs()
-            .first()
-            .and_then(|child| get_table_name(child)),
-    }
+/// Extract the table qualifier from a plan's schema.
+///
+/// Uses the qualifier of the first column in the plan's output
+/// schema, which reflects SQL aliases (e.g., `intervals2` in
+/// `FROM intervals JOIN intervals AS intervals2`). This is more
+/// robust than walking to the TableScan, which would return the
+/// physical table name and miss SQL aliases.
+fn get_plan_qualifier(plan: &LogicalPlan) -> Option<String> {
+    plan.schema()
+        .columns()
+        .first()
+        .and_then(|c| c.relation.as_ref())
+        .map(|r| r.table().to_string())
 }
 
 fn rewrite_to_binned(
@@ -360,10 +376,12 @@ fn rewrite_to_binned(
 ) -> Result<LogicalPlan> {
     let bs = bin_size as i64;
 
-    // Get table names for aliasing after UNNEST
-    let left_alias = get_table_name(&join.left)
+    // Get table qualifiers for aliasing after UNNEST. Uses the
+    // schema qualifier (which reflects SQL aliases) so column
+    // references in the filter resolve correctly after the rewrite.
+    let left_alias = get_plan_qualifier(&join.left)
         .unwrap_or_else(|| "l".to_string());
-    let right_alias = get_table_name(&join.right)
+    let right_alias = get_plan_qualifier(&join.right)
         .unwrap_or_else(|| "r".to_string());
 
     let left_expanded = expand_with_bins(
@@ -477,7 +495,9 @@ fn rewrite_to_binned(
         .schema()
         .columns()
         .into_iter()
-        .filter(|c| !c.name.starts_with("__giql_bins"))
+        .filter(|c| {
+            c.name != "__giql_bins_l" && c.name != "__giql_bins_r"
+        })
         .map(|c| Expr::Column(c))
         .collect();
 
