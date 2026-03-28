@@ -1300,3 +1300,66 @@ async fn test_logical_rule_compound_predicate() {
     // [300,500) x [400,600) -> yes
     assert_eq!(total_rows, 1);
 }
+
+// ── Pathological width distribution (sampling) ──────────────────
+
+#[tokio::test]
+async fn test_middle_wide_interval_not_at_extremes() {
+    // Given a "middle-wide" distribution where the widest interval
+    // has neither the smallest start nor the largest end,
+    // When the logical rule processes the join,
+    // Then Parquet sampling detects the actual width and the
+    // result is correct (no duplicates from replication blowup).
+    let dir = TempDir::new().unwrap();
+
+    // Pathological case for column-level heuristics:
+    // - [0, 50): narrow, has min(start) and min(end)
+    // - [1000, 900_000): WIDE (width 899K), middle of coordinate space
+    // - [999_000, 1_000_000): narrow, has max(start) and max(end)
+    //
+    // Column-level: w1=min(end)-min(start)=50, w2=max(end)-max(start)=1000
+    // Both miss the 899K-wide interval. Sampling reads actual widths.
+    let path_a = write_intervals_parquet(
+        dir.path(),
+        "a.parquet",
+        &["chr1", "chr1", "chr1"],
+        &[0, 1000, 999_000],
+        &[50, 900_000, 1_000_000],
+    );
+    let path_b = write_intervals_parquet(
+        dir.path(),
+        "b.parquet",
+        &["chr1", "chr1"],
+        &[500_000, 950_000],
+        &[600_000, 999_500],
+    );
+
+    let ctx = make_ctx();
+    ctx.register_parquet(
+        "a",
+        path_a.to_str().unwrap(),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    ctx.register_parquet(
+        "b",
+        path_b.to_str().unwrap(),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+
+    let result = ctx.sql(INTERSECTS_SQL).await.unwrap();
+    let batches = result.collect().await.unwrap();
+    let total_rows: usize =
+        batches.iter().map(|b| b.num_rows()).sum();
+
+    // a[0,50) x b[500000,600000) -> no
+    // a[0,50) x b[950000,999500) -> no
+    // a[1000,900000) x b[500000,600000) -> yes
+    // a[1000,900000) x b[950000,999500) -> no (900000 <= 950000)
+    // a[999000,1000000) x b[500000,600000) -> no (999000 >= 600000)
+    // a[999000,1000000) x b[950000,999500) -> yes
+    assert_eq!(total_rows, 2);
+}

@@ -1,5 +1,6 @@
 use datafusion::common::tree_node::Transformed;
 use datafusion::common::{Column, Result, ScalarValue};
+use datafusion::datasource::listing::ListingTable;
 use datafusion::datasource::source_as_provider;
 use datafusion::logical_expr::expr::ScalarFunction;
 use datafusion::logical_expr::{
@@ -212,6 +213,8 @@ struct LogicalStats {
     start_max: Option<i64>,
     end_min: Option<i64>,
     end_max: Option<i64>,
+    /// p95 interval width from lightweight Parquet sampling.
+    sampled_width_p95: Option<i64>,
 }
 
 fn get_table_stats(
@@ -222,13 +225,34 @@ fn get_table_stats(
     match plan {
         LogicalPlan::TableScan(ts) => {
             let provider = source_as_provider(&ts.source).ok()?;
-            let stats = provider.statistics()?;
-            stats_to_logical(
-                &stats,
-                &ts.source.schema(),
+
+            let mut stats = provider
+                .statistics()
+                .and_then(|s| {
+                    stats_to_logical(
+                        &s,
+                        &ts.source.schema(),
+                        start_col_name,
+                        end_col_name,
+                    )
+                })
+                .unwrap_or(LogicalStats {
+                    row_count: None,
+                    start_min: None,
+                    start_max: None,
+                    end_min: None,
+                    end_max: None,
+                    sampled_width_p95: None,
+                });
+
+            // Try lightweight Parquet sampling for accurate width
+            stats.sampled_width_p95 = try_sample_from_listing(
+                provider.as_ref(),
                 start_col_name,
                 end_col_name,
-            )
+            );
+
+            Some(stats)
         }
         _ => plan.inputs().first().and_then(|child| {
             get_table_stats(child, start_col_name, end_col_name)
@@ -264,6 +288,7 @@ fn stats_to_logical(
         start_max: scalar_to_i64(&start_stats.max_value),
         end_min: scalar_to_i64(&end_stats.min_value),
         end_max: scalar_to_i64(&end_stats.max_value),
+        sampled_width_p95: None, // filled by try_sample_from_listing
     })
 }
 
@@ -279,6 +304,126 @@ fn scalar_to_i64(
         },
         _ => None,
     }
+}
+
+// ── Lightweight Parquet sampling ─────────────────────────────────
+
+/// Try to sample interval widths from a Parquet-backed ListingTable.
+///
+/// Returns `None` silently if the provider is not a ListingTable,
+/// the file is not Parquet, or any I/O error occurs.
+fn try_sample_from_listing(
+    provider: &dyn datafusion::catalog::TableProvider,
+    start_col: &str,
+    end_col: &str,
+) -> Option<i64> {
+    let listing = provider.as_any().downcast_ref::<ListingTable>()?;
+    let path_str = listing.table_paths().first()?.as_str();
+
+    // ListingTableUrl stores file:// URLs
+    let fs_path = if let Some(p) = path_str.strip_prefix("file://") {
+        std::path::PathBuf::from(p)
+    } else {
+        std::path::PathBuf::from(format!("/{path_str}"))
+    };
+
+    match sample_width_p95(&fs_path, start_col, end_col) {
+        Some(p95) => {
+            log::debug!(
+                "INTERSECTS logical: sampled p95 width={p95} \
+                 from {path_str}"
+            );
+            Some(p95)
+        }
+        None => {
+            log::debug!(
+                "INTERSECTS logical: Parquet sampling failed \
+                 for {path_str}"
+            );
+            None
+        }
+    }
+}
+
+/// Read start/end columns from 1–3 representative Parquet row groups
+/// and return the p95 interval width.
+fn sample_width_p95(
+    path: &std::path::Path,
+    start_col: &str,
+    end_col: &str,
+) -> Option<i64> {
+    use arrow::array::{Array, Int64Array};
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    use parquet::arrow::ProjectionMask;
+
+    let file = std::fs::File::open(path).ok()?;
+    let builder =
+        ParquetRecordBatchReaderBuilder::try_new(file).ok()?;
+
+    let parquet_schema = builder.parquet_schema().clone();
+    let num_row_groups = builder.metadata().num_row_groups();
+    if num_row_groups == 0 {
+        return None;
+    }
+
+    // Find column indices in the Parquet schema
+    let start_idx = parquet_schema
+        .columns()
+        .iter()
+        .position(|c| c.name() == start_col)?;
+    let end_idx = parquet_schema
+        .columns()
+        .iter()
+        .position(|c| c.name() == end_col)?;
+
+    // Select representative row groups: first, middle, last
+    let mut rg_indices = vec![0];
+    if num_row_groups > 2 {
+        rg_indices.push(num_row_groups / 2);
+    }
+    if num_row_groups > 1 {
+        rg_indices.push(num_row_groups - 1);
+    }
+
+    let mask = ProjectionMask::leaves(
+        &parquet_schema,
+        [start_idx, end_idx],
+    );
+
+    let reader = builder
+        .with_projection(mask)
+        .with_row_groups(rg_indices)
+        .build()
+        .ok()?;
+
+    let mut widths: Vec<i64> = Vec::new();
+
+    for batch in reader {
+        let batch = batch.ok()?;
+        // After projection, columns are at indices 0 and 1
+        let starts = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()?;
+        let ends = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<Int64Array>()?;
+
+        for i in 0..batch.num_rows() {
+            if !starts.is_null(i) && !ends.is_null(i) {
+                widths.push(ends.value(i) - starts.value(i));
+            }
+        }
+    }
+
+    if widths.is_empty() {
+        return None;
+    }
+
+    widths.sort_unstable();
+    let p95_idx = (widths.len() * 95 / 100).min(widths.len() - 1);
+    Some(widths[p95_idx])
 }
 
 // ── Strategy decision ───────────────────────────────────────────
@@ -306,6 +451,25 @@ fn choose_bin_size(
     left: &Option<LogicalStats>,
     right: &Option<LogicalStats>,
 ) -> usize {
+    // Tier 1: Use sampled p95 width if available from either side.
+    // This reads actual interval widths from Parquet row groups and
+    // is robust against all endpoint distributions.
+    let sampled = [left, right]
+        .iter()
+        .filter_map(|s| s.as_ref()?.sampled_width_p95)
+        .max();
+
+    if let Some(p95) = sampled {
+        let bin_size =
+            (p95.max(1) as usize).clamp(1_000, 1_000_000);
+        log::debug!(
+            "INTERSECTS logical: bin_size={bin_size} \
+             (from sampled p95 width={p95})"
+        );
+        return bin_size;
+    }
+
+    // Tier 2: Fall back to column-level min/max heuristic.
     let width_from_stats = |s: &LogicalStats| -> Option<i64> {
         let min_start = s.start_min?;
         let max_start = s.start_max?;

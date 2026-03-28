@@ -9,8 +9,8 @@ license = "MIT"
 arrow = { version = "58", default-features = false, features = ["prettyprint"] }
 datafusion = "53"
 log = "0.4"
+parquet = "58"
 
 [dev-dependencies]
-parquet = "58"
 tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
