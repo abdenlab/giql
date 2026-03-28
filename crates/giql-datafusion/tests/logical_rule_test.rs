@@ -1182,3 +1182,121 @@ async fn test_logical_rule_non_al_table_aliases() {
     // [300,500) overlaps [400,600): yes
     assert_eq!(total_rows, 3);
 }
+
+// ── Self-join ───────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_logical_rule_self_join() {
+    // Given a single table joined against itself,
+    // When the logical rule processes the self-join,
+    // Then overlaps are found correctly without alias collisions.
+    let dir = TempDir::new().unwrap();
+    let path = write_intervals_parquet(
+        dir.path(),
+        "intervals.parquet",
+        &["chr1", "chr1", "chr1"],
+        &[100, 200, 500],
+        &[300, 400, 700],
+    );
+
+    let ctx = make_ctx();
+    ctx.register_parquet(
+        "intervals",
+        path.to_str().unwrap(),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+
+    // Use the physical table name (not aliases) so that the
+    // rewritten plan's SubqueryAlias names resolve correctly.
+    let sql = r#"
+        SELECT intervals.chrom, intervals.start, intervals."end"
+        FROM intervals JOIN intervals AS intervals2
+        ON intervals.chrom = intervals2.chrom
+        AND giql_intersects(
+            intervals.start, intervals."end",
+            intervals2.start, intervals2."end")
+    "#;
+
+    let result = ctx.sql(sql).await.unwrap();
+    let batches = result.collect().await.unwrap();
+    let total_rows: usize =
+        batches.iter().map(|b| b.num_rows()).sum();
+
+    // All pairs where intervals overlap (including self-pairs):
+    // [100,300) x [100,300) -> yes
+    // [100,300) x [200,400) -> yes
+    // [100,300) x [500,700) -> no
+    // [200,400) x [100,300) -> yes
+    // [200,400) x [200,400) -> yes
+    // [200,400) x [500,700) -> no
+    // [500,700) x [100,300) -> no
+    // [500,700) x [200,400) -> no
+    // [500,700) x [500,700) -> yes
+    assert_eq!(total_rows, 5);
+}
+
+// ── Compound predicate alongside giql_intersects ────────────────
+
+#[tokio::test]
+async fn test_logical_rule_compound_predicate() {
+    // Given an additional filter alongside giql_intersects,
+    // When the logical rule processes the join,
+    // Then both the overlap and the extra predicate are applied.
+    let dir = TempDir::new().unwrap();
+    let path_a = write_intervals_parquet(
+        dir.path(),
+        "a.parquet",
+        &["chr1", "chr1"],
+        &[100, 300],
+        &[250, 500],
+    );
+    let path_b = write_intervals_parquet(
+        dir.path(),
+        "b.parquet",
+        &["chr1", "chr1"],
+        &[200, 400],
+        &[350, 600],
+    );
+
+    let ctx = make_ctx();
+    ctx.register_parquet(
+        "a",
+        path_a.to_str().unwrap(),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    ctx.register_parquet(
+        "b",
+        path_b.to_str().unwrap(),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+
+    // Extra predicate: only keep pairs where b.start > 300
+    let sql = r#"
+        SELECT a.chrom, a.start, a."end",
+               b.chrom AS chrom_b, b.start AS start_b,
+               b."end" AS end_b
+        FROM a JOIN b
+        ON a.chrom = b.chrom
+        AND giql_intersects(a.start, a."end", b.start, b."end")
+        AND b.start > 300
+    "#;
+
+    let result = ctx.sql(sql).await.unwrap();
+    let batches = result.collect().await.unwrap();
+    let total_rows: usize =
+        batches.iter().map(|b| b.num_rows()).sum();
+
+    // Without the extra predicate, overlaps would be:
+    // [100,250) x [200,350) -> yes
+    // [300,500) x [200,350) -> yes
+    // [300,500) x [400,600) -> yes
+    // With b.start > 300, only b[400,600) qualifies:
+    // [300,500) x [400,600) -> yes
+    assert_eq!(total_rows, 1);
+}

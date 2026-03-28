@@ -377,6 +377,101 @@ class TestTranspileNearest:
         assert "LIMIT 3" in sql
 
 
+class TestTranspileDataFusionDialect:
+    """Tests for the datafusion dialect."""
+
+    def test_datafusion_dialect_intersects_join(self):
+        """
+        GIVEN a GIQL query joining two tables with INTERSECTS
+        WHEN transpiling with dialect="datafusion"
+        THEN should emit giql_intersects() function call with chrom equi-key preserved
+        """
+        sql = transpile(
+            "SELECT a.*, b.* FROM peaks a JOIN genes b ON a.interval INTERSECTS b.region",
+            tables=[
+                Table("peaks", genomic_col="interval"),
+                Table("genes", genomic_col="region"),
+            ],
+            dialect="datafusion",
+        )
+
+        assert "giql_intersects(" in sql
+        assert "JOIN" in sql.upper()
+        # Chrom equi-key should still be standard SQL
+        assert '"chrom"' in sql
+
+    def test_datafusion_dialect_literal_range_unchanged(self):
+        """
+        GIVEN a GIQL query with INTERSECTS and a literal range
+        WHEN transpiling with dialect="datafusion"
+        THEN should emit standard SQL predicates, not giql_intersects()
+        """
+        sql = transpile(
+            "SELECT * FROM peaks WHERE interval INTERSECTS 'chr1:1000-2000'",
+            tables=["peaks"],
+            dialect="datafusion",
+        )
+
+        assert "giql_intersects" not in sql
+        assert "chr1" in sql
+
+    def test_datafusion_dialect_contains_unchanged(self):
+        """
+        GIVEN a GIQL CONTAINS join
+        WHEN transpiling with dialect="datafusion"
+        THEN should emit standard SQL predicates (only INTERSECTS uses the function call)
+        """
+        sql = transpile(
+            "SELECT a.*, b.* FROM peaks a JOIN genes b ON a.interval CONTAINS b.region",
+            tables=[
+                Table("peaks", genomic_col="interval"),
+                Table("genes", genomic_col="region"),
+            ],
+            dialect="datafusion",
+        )
+
+        assert "giql_intersects" not in sql
+
+    def test_default_dialect_unchanged(self):
+        """
+        GIVEN a GIQL INTERSECTS join
+        WHEN transpiling with dialect="default" (or omitted)
+        THEN should emit standard SQL overlap predicates
+        """
+        sql_default = transpile(
+            "SELECT a.*, b.* FROM peaks a JOIN genes b ON a.interval INTERSECTS b.region",
+            tables=[
+                Table("peaks", genomic_col="interval"),
+                Table("genes", genomic_col="region"),
+            ],
+        )
+        sql_explicit = transpile(
+            "SELECT a.*, b.* FROM peaks a JOIN genes b ON a.interval INTERSECTS b.region",
+            tables=[
+                Table("peaks", genomic_col="interval"),
+                Table("genes", genomic_col="region"),
+            ],
+            dialect="default",
+        )
+
+        assert "giql_intersects" not in sql_default
+        assert "giql_intersects" not in sql_explicit
+        assert sql_default == sql_explicit
+
+    def test_invalid_dialect_raises(self):
+        """
+        GIVEN an unsupported dialect string
+        WHEN transpiling
+        THEN should raise ValueError
+        """
+        with pytest.raises(ValueError, match="Unknown dialect"):
+            transpile(
+                "SELECT * FROM peaks WHERE interval INTERSECTS 'chr1:1000-2000'",
+                tables=["peaks"],
+                dialect="postgres",
+            )
+
+
 class TestTranspileErrors:
     """Tests for error handling."""
 
