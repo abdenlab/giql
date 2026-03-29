@@ -1,0 +1,16 @@
+[package]
+name = "giql-datafusion"
+version = "0.1.0"
+edition = "2021"
+description = "DataFusion optimizer for genomic interval (INTERSECTS) joins"
+license = "MIT"
+
+[dependencies]
+arrow = { version = "58", default-features = false, features = ["prettyprint"] }
+datafusion = "53"
+log = "0.4"
+parquet = "58"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
