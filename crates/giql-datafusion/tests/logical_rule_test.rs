@@ -204,7 +204,12 @@ async fn test_rewrite_skips_left_join() {
     let config = datafusion::optimizer::OptimizerContext::new();
 
     let result = rule.rewrite(plan, &config).unwrap();
-    let _ = result;
+    // DataFusion may restructure non-INNER joins before our rule
+    // sees them (e.g., converting to a Filter + CrossJoin), so the
+    // rule may not receive a Join node at all. We verify the rule
+    // does not panic; the important guarantee is that non-INNER
+    // joins are never rewritten to binned joins.
+    assert!(!result.transformed);
 }
 
 #[tokio::test]
@@ -255,7 +260,7 @@ async fn test_rewrite_skips_right_join() {
     let config = datafusion::optimizer::OptimizerContext::new();
 
     let result = rule.rewrite(plan, &config).unwrap();
-    let _ = result;
+    assert!(!result.transformed);
 }
 
 #[tokio::test]
@@ -306,7 +311,7 @@ async fn test_rewrite_skips_full_outer_join() {
     let config = datafusion::optimizer::OptimizerContext::new();
 
     let result = rule.rewrite(plan, &config).unwrap();
-    let _ = result;
+    assert!(!result.transformed);
 }
 
 // ── Raw overlap predicates are NOT rewritten ────────────────────

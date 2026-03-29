@@ -1,6 +1,10 @@
 # macOS
 .DS_store
 
+# Rust
+target/
+Cargo.lock
+
 # Python
 __pycache__/
 *.py[cod]

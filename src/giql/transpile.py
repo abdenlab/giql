@@ -109,13 +109,7 @@ def transpile(
 
     # Initialize generator for the target dialect
     if dialect == "datafusion":
-        try:
-            from giql.generators.datafusion import DataFusionGIQLGenerator
-        except ImportError as e:
-            raise ImportError(
-                "The 'datafusion' dialect requires the "
-                "giql-datafusion package to be installed"
-            ) from e
+        from giql.generators.datafusion import DataFusionGIQLGenerator
 
         generator = DataFusionGIQLGenerator(tables=tables_container)
     elif dialect == "default":

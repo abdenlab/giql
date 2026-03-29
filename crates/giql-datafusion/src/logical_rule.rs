@@ -207,6 +207,8 @@ fn replace_giql_intersects(
 // ── Stats collection ────────────────────────────────────────────
 
 struct LogicalStats {
+    /// Reserved for future use (e.g., skipping binning on tiny
+    /// tables where a nested-loop join would be cheaper).
     #[allow(dead_code)]
     row_count: Option<usize>,
     start_min: Option<i64>,
@@ -320,7 +322,10 @@ fn try_sample_from_listing(
     let listing = provider.as_any().downcast_ref::<ListingTable>()?;
     let path_str = listing.table_paths().first()?.as_str();
 
-    // ListingTableUrl stores file:// URLs
+    // ListingTableUrl stores file:// URLs. For remote sources
+    // (s3://, gs://, etc.) the else branch produces a path that
+    // won't exist on disk — File::open fails and we fall back to
+    // column-level stats gracefully.
     let fs_path = if let Some(p) = path_str.strip_prefix("file://") {
         std::path::PathBuf::from(p)
     } else {
@@ -390,17 +395,24 @@ fn sample_width_p95(
         [start_idx, end_idx],
     );
 
+    // Cap batch size to bound memory for very large row groups.
+    // 100K rows is enough for a stable p95 estimate.
     let reader = builder
         .with_projection(mask)
         .with_row_groups(rg_indices)
+        .with_batch_size(100_000)
         .build()
         .ok()?;
 
     let mut widths: Vec<i64> = Vec::new();
+    const MAX_SAMPLES: usize = 300_000; // ~3 row groups × 100K
 
     for batch in reader {
         let batch = batch.ok()?;
-        // After projection, columns are at indices 0 and 1
+        // ProjectionMask preserves original column order, so
+        // column 0 is start and column 1 is end (assuming
+        // start_idx < end_idx, which holds for all standard
+        // genomic schemas).
         let starts = batch
             .column(0)
             .as_any()
@@ -412,8 +424,16 @@ fn sample_width_p95(
 
         for i in 0..batch.num_rows() {
             if !starts.is_null(i) && !ends.is_null(i) {
-                widths.push(ends.value(i) - starts.value(i));
+                let w = ends.value(i) - starts.value(i);
+                // Skip malformed intervals where end < start
+                if w > 0 {
+                    widths.push(w);
+                }
             }
+        }
+
+        if widths.len() >= MAX_SAMPLES {
+            break;
         }
     }
 
