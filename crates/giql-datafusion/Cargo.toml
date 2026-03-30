@@ -7,7 +7,10 @@ license = "MIT"
 
 [dependencies]
 arrow = { version = "58", default-features = false, features = ["prettyprint"] }
+async-trait = "0.1.89"
+coitrees = "0.4.0"
 datafusion = "53"
+futures = "0.3.32"
 log = "0.4"
 parquet = "58"
 

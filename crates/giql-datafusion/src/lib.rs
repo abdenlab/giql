@@ -24,19 +24,22 @@
 //! let ctx = SessionContext::from(state);
 //! ```
 
+pub mod coitree;
 pub mod logical_rule;
 
-pub use logical_rule::IntersectsLogicalRule;
+pub use logical_rule::{IntersectsConfig, IntersectsLogicalRule};
 
+use std::fmt::Debug;
 use std::sync::Arc;
 
 use datafusion::common::Result;
 use datafusion::execution::SessionState;
 use datafusion::logical_expr::{
-    ColumnarValue, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl,
-    Signature, TypeSignature, Volatility,
+    ColumnarValue, LogicalPlan, ScalarFunctionArgs, ScalarUDF,
+    ScalarUDFImpl, Signature, TypeSignature, Volatility,
 };
 use datafusion::optimizer::OptimizerRule;
+use datafusion::physical_plan::ExecutionPlan;
 
 // ── Placeholder UDF ─────────────────────────────────────────────
 
@@ -99,12 +102,45 @@ pub fn giql_intersects_udf() -> ScalarUDF {
 
 // ── Registration ────────────────────────────────────────────────
 
+// ── Custom query planner ─────────────────────────────────────────
+
+/// Query planner that includes the COI tree extension planner.
+#[derive(Debug)]
+struct GiqlQueryPlanner;
+
+#[async_trait::async_trait]
+impl datafusion::execution::context::QueryPlanner
+    for GiqlQueryPlanner
+{
+    async fn create_physical_plan(
+        &self,
+        logical_plan: &LogicalPlan,
+        session_state: &SessionState,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        use datafusion::physical_planner::{
+            DefaultPhysicalPlanner, PhysicalPlanner,
+        };
+
+        let planner =
+            DefaultPhysicalPlanner::with_extension_planners(vec![
+                Arc::new(coitree::COITreePlanner),
+            ]);
+        planner
+            .create_physical_plan(logical_plan, session_state)
+            .await
+    }
+}
+
+// ── Registration ────────────────────────────────────────────────
+
 /// Build a [`SessionState`] with the INTERSECTS logical optimizer
-/// rule and the `giql_intersects` placeholder UDF.
+/// rule, the `giql_intersects` placeholder UDF, and the COI tree
+/// extension planner.
 ///
 /// The logical rule detects `giql_intersects()` calls in join
-/// filters and rewrites them into binned equi-joins with adaptive
-/// bin sizing from table statistics.
+/// filters and rewrites them into either:
+/// - A binned equi-join (uniform width distributions)
+/// - A COI tree join (non-uniform distributions)
 pub fn register_optimizer(state: SessionState) -> SessionState {
     use datafusion::execution::SessionStateBuilder;
 
@@ -124,6 +160,7 @@ pub fn register_optimizer(state: SessionState) -> SessionState {
     SessionStateBuilder::new_from_existing(state)
         .with_optimizer_rules(logical_rules)
         .with_scalar_functions(scalar_fns)
+        .with_query_planner(Arc::new(GiqlQueryPlanner))
         .build()
 }
 

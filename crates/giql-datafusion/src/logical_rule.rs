@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use datafusion::common::tree_node::Transformed;
 use datafusion::common::{Column, Result, ScalarValue};
 use datafusion::datasource::listing::ListingTable;
@@ -22,12 +24,31 @@ use datafusion::prelude::*;
 ///
 /// DataFusion handles UNNEST, hash join, and dedup natively with
 /// full parallelism.
+/// Configuration for the INTERSECTS logical optimizer rule.
+#[derive(Debug, Clone, Default)]
+pub struct IntersectsConfig {
+    /// Force the binned equi-join strategy instead of the default
+    /// COI tree join. The bin size is chosen adaptively from
+    /// Parquet sampling or column-level statistics. This is an
+    /// escape hatch for benchmarking; COI tree is faster in all
+    /// tested distributions.
+    pub force_binned: bool,
+}
+
 #[derive(Debug)]
-pub struct IntersectsLogicalRule;
+pub struct IntersectsLogicalRule {
+    config: IntersectsConfig,
+}
 
 impl IntersectsLogicalRule {
     pub fn new() -> Self {
-        Self
+        Self {
+            config: IntersectsConfig::default(),
+        }
+    }
+
+    pub fn with_config(config: IntersectsConfig) -> Self {
+        Self { config }
     }
 }
 
@@ -85,38 +106,77 @@ impl OptimizerRule for IntersectsLogicalRule {
             return Ok(Transformed::no(plan));
         };
 
-        // Get stats from TableScan children for adaptive bin sizing.
-        let left_stats =
-            get_table_stats(&join.left, &start_a.name, &end_a.name);
-        let right_stats =
-            get_table_stats(&join.right, &start_b.name, &end_b.name);
+        if self.config.force_binned {
+            // Binned equi-join path (escape hatch for benchmarking).
+            let left_stats = get_table_stats(
+                &join.left, &start_a.name, &end_a.name,
+            );
+            let right_stats = get_table_stats(
+                &join.right, &start_b.name, &end_b.name,
+            );
+            let bin_size =
+                choose_bin_size(&left_stats, &right_stats);
 
-        let bin_size = choose_bin_size(&left_stats, &right_stats);
+            log::debug!(
+                "INTERSECTS logical rule: rewriting to \
+                 binned join (force_binned), bin_size={bin_size}"
+            );
 
-        log::debug!(
-            "INTERSECTS logical rule: rewriting to binned join, \
-             bin_size={bin_size}"
-        );
+            let rewritten_filter =
+                join.filter.as_ref().map(|f| {
+                    replace_giql_intersects(
+                        f, &start_a, &end_a, &start_b, &end_b,
+                    )
+                });
 
-        // Replace giql_intersects() with real overlap predicates
-        // before building the binned join, since the placeholder
-        // UDF cannot execute.
-        let rewritten_filter = join.filter.as_ref().map(|f| {
-            replace_giql_intersects(
-                f, &start_a, &end_a, &start_b, &end_b,
-            )
-        });
+            let rewritten = rewrite_to_binned(
+                join,
+                bin_size,
+                &start_a,
+                &end_a,
+                &start_b,
+                &end_b,
+                rewritten_filter.as_ref(),
+            )?;
+            return Ok(Transformed::yes(rewritten));
+        }
 
-        let rewritten = rewrite_to_binned(
-            join,
-            bin_size,
-            &start_a,
-            &end_a,
-            &start_b,
-            &end_b,
-            rewritten_filter.as_ref(),
-        )?;
-        Ok(Transformed::yes(rewritten))
+        // Default: COI tree join — faster across all tested
+        // distributions, no bin replication overhead.
+        use crate::coitree::COITreeJoinNode;
+        use datafusion::logical_expr::Extension;
+
+        log::debug!("INTERSECTS logical rule: using COI tree join");
+
+        let on: Vec<(Column, Column)> = join
+            .on
+            .iter()
+            .map(|(l, r)| {
+                (
+                    extract_column(l).unwrap_or_else(|| {
+                        Column::new(None::<&str>, "chrom")
+                    }),
+                    extract_column(r).unwrap_or_else(|| {
+                        Column::new(None::<&str>, "chrom")
+                    }),
+                )
+            })
+            .collect();
+
+        let node = COITreeJoinNode {
+            left: Arc::new((*join.left).clone()),
+            right: Arc::new((*join.right).clone()),
+            on,
+            start_a,
+            end_a,
+            start_b,
+            end_b,
+            schema: join.schema.clone(),
+        };
+
+        Ok(Transformed::yes(LogicalPlan::Extension(Extension {
+            node: Arc::new(node),
+        })))
     }
 }
 
@@ -215,8 +275,16 @@ struct LogicalStats {
     start_max: Option<i64>,
     end_min: Option<i64>,
     end_max: Option<i64>,
-    /// p95 interval width from lightweight Parquet sampling.
-    sampled_width_p95: Option<i64>,
+    /// Sampled width statistics from Parquet row groups.
+    sampled: Option<SampledWidthStats>,
+}
+
+/// Width statistics computed from sampled Parquet row groups.
+struct SampledWidthStats {
+    /// Smallest bin size with mean replication <= 2.0.
+    optimal_bin: i64,
+    /// Median interval width.
+    median: i64,
 }
 
 fn get_table_stats(
@@ -244,11 +312,11 @@ fn get_table_stats(
                     start_max: None,
                     end_min: None,
                     end_max: None,
-                    sampled_width_p95: None,
+                    sampled: None,
                 });
 
             // Try lightweight Parquet sampling for accurate width
-            stats.sampled_width_p95 = try_sample_from_listing(
+            stats.sampled = try_sample_from_listing(
                 provider.as_ref(),
                 start_col_name,
                 end_col_name,
@@ -290,7 +358,7 @@ fn stats_to_logical(
         start_max: scalar_to_i64(&start_stats.max_value),
         end_min: scalar_to_i64(&end_stats.min_value),
         end_max: scalar_to_i64(&end_stats.max_value),
-        sampled_width_p95: None, // filled by try_sample_from_listing
+        sampled: None, // filled by try_sample_from_listing
     })
 }
 
@@ -318,7 +386,7 @@ fn try_sample_from_listing(
     provider: &dyn datafusion::catalog::TableProvider,
     start_col: &str,
     end_col: &str,
-) -> Option<i64> {
+) -> Option<SampledWidthStats> {
     let listing = provider.as_any().downcast_ref::<ListingTable>()?;
     let path_str = listing.table_paths().first()?.as_str();
 
@@ -332,13 +400,15 @@ fn try_sample_from_listing(
         std::path::PathBuf::from(format!("/{path_str}"))
     };
 
-    match sample_width_p95(&fs_path, start_col, end_col) {
-        Some(p95) => {
+    match sample_width_stats(&fs_path, start_col, end_col) {
+        Some(stats) => {
             log::debug!(
-                "INTERSECTS logical: sampled p95 width={p95} \
-                 from {path_str}"
+                "INTERSECTS logical: sampled optimal_bin={}, \
+                 median={} from {path_str}",
+                stats.optimal_bin,
+                stats.median
             );
-            Some(p95)
+            Some(stats)
         }
         None => {
             log::debug!(
@@ -351,12 +421,18 @@ fn try_sample_from_listing(
 }
 
 /// Read start/end columns from 1–3 representative Parquet row groups
-/// and return the p95 interval width.
-fn sample_width_p95(
+/// and choose the optimal bin size by minimizing replication cost.
+///
+/// Binary searches for the smallest bin size B such that the mean
+/// replication factor `mean(ceil(w_i / B))` is at most
+/// `TARGET_MEAN_REPLICATION`. This naturally handles all width
+/// distributions: the few wide outliers pull B upward in proportion
+/// to their actual cost, without over-sizing bins for the majority.
+fn sample_width_stats(
     path: &std::path::Path,
     start_col: &str,
     end_col: &str,
-) -> Option<i64> {
+) -> Option<SampledWidthStats> {
     use arrow::array::{Array, Int64Array};
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     use parquet::arrow::ProjectionMask;
@@ -396,7 +472,6 @@ fn sample_width_p95(
     );
 
     // Cap batch size to bound memory for very large row groups.
-    // 100K rows is enough for a stable p95 estimate.
     let reader = builder
         .with_projection(mask)
         .with_row_groups(rg_indices)
@@ -442,8 +517,75 @@ fn sample_width_p95(
     }
 
     widths.sort_unstable();
-    let p95_idx = (widths.len() * 95 / 100).min(widths.len() - 1);
-    Some(widths[p95_idx])
+    let median = widths[widths.len() / 2];
+    let optimal_bin = find_optimal_bin_size(&widths);
+    Some(SampledWidthStats {
+        optimal_bin,
+        median,
+    })
+}
+
+/// Find the smallest bin size B such that the mean replication
+/// factor across all sampled widths is at most TARGET.
+///
+/// Binary searches over [1, max_width]. For each candidate B,
+/// `mean_replication(B) = sum(ceil(w_i / B)) / N`. Since widths
+/// are sorted, all w_i <= B contribute ceil=1 — a binary search
+/// finds the cutoff index, making each evaluation O(N_above_B)
+/// rather than O(N).
+fn find_optimal_bin_size(sorted_widths: &[i64]) -> i64 {
+    /// Target mean replication factor. Each interval is copied
+    /// into ceil(width / bin_size) bins on average. 2.0 means
+    /// the average interval spans at most 2 bins — good
+    /// selectivity with bounded replication.
+    const TARGET_MEAN_REPL: f64 = 2.0;
+
+    let max_width = *sorted_widths.last().unwrap();
+
+    // Binary search: lo always has mean_repl > target,
+    // hi always has mean_repl <= target.
+    let mut lo: i64 = 1;
+    let mut hi: i64 = max_width;
+
+    // At hi = max_width, every interval fits in 1-2 bins, so
+    // mean_repl <= 2.0. At lo = 1, mean_repl = mean(widths).
+    // If even max_width doesn't meet the target (shouldn't happen
+    // since ceil(w/w) <= 2 for all w), return max_width.
+    if mean_replication(sorted_widths, hi) > TARGET_MEAN_REPL {
+        return hi;
+    }
+
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if mid == lo {
+            break;
+        }
+        if mean_replication(sorted_widths, mid) <= TARGET_MEAN_REPL {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+
+    hi
+}
+
+/// Compute mean(ceil(w_i / B)) for a sorted widths array.
+///
+/// All widths <= B have ceil = 1. Binary search finds the cutoff,
+/// then only iterate the tail above B.
+fn mean_replication(sorted_widths: &[i64], bin_size: i64) -> f64 {
+    let n = sorted_widths.len();
+    // Find first index where width > bin_size
+    let cutoff =
+        sorted_widths.partition_point(|&w| w <= bin_size);
+    // All [0..cutoff) contribute 1 each
+    let mut total: i64 = cutoff as i64;
+    // [cutoff..n) contribute ceil(w / bin_size) each
+    for &w in &sorted_widths[cutoff..] {
+        total += (w + bin_size - 1) / bin_size; // ceil division
+    }
+    total as f64 / n as f64
 }
 
 // ── Strategy decision ───────────────────────────────────────────
@@ -451,51 +593,37 @@ fn sample_width_p95(
 /// Default bin size when stats are unavailable.
 const DEFAULT_BIN_SIZE: usize = 10_000;
 
-/// Choose a bin size from table statistics.
+/// Choose a bin size for the forced-binning path.
 ///
-/// Estimates representative interval width from column-level min/max
-/// stats using two independent signals:
-///
-/// - `min(end) - min(start)`: width estimate from the leftmost
-///   interval (the row with the smallest start likely ends near
-///   `min(end)`)
-/// - `max(end) - max(start)`: width estimate from the rightmost
-///   interval (the row with the largest start likely ends near
-///   `max(end)`)
-///
-/// Takes the max of both to be conservative — a larger bin size
-/// means fewer bins per interval, avoiding replication blowup at the
-/// cost of more false-positive bin matches (filtered by the overlap
-/// predicate).
+/// Uses sampled p95 width from Parquet when available, falling
+/// back to a column-level min/max heuristic.
 fn choose_bin_size(
     left: &Option<LogicalStats>,
     right: &Option<LogicalStats>,
 ) -> usize {
-    // Tier 1: Use sampled p95 width if available from either side.
-    // This reads actual interval widths from Parquet row groups and
-    // is robust against all endpoint distributions.
-    let sampled = [left, right]
+    // Tier 1: cost-optimal bin size from Parquet sampling.
+    let sampled: Option<&SampledWidthStats> = [left, right]
         .iter()
-        .filter_map(|s| s.as_ref()?.sampled_width_p95)
-        .max();
+        .filter_map(|s| s.as_ref()?.sampled.as_ref())
+        .next();
 
-    if let Some(p95) = sampled {
-        let bin_size =
-            (p95.max(1) as usize).clamp(1_000, 1_000_000);
+    if let Some(stats) = sampled {
+        let bin_size = (stats.optimal_bin.max(1) as usize)
+            .clamp(1_000, 1_000_000);
         log::debug!(
             "INTERSECTS logical: bin_size={bin_size} \
-             (from sampled p95 width={p95})"
+             (from sampled optimal_bin={})",
+            stats.optimal_bin
         );
         return bin_size;
     }
 
-    // Tier 2: Fall back to column-level min/max heuristic.
+    // Tier 2: column-level min/max heuristic.
     let width_from_stats = |s: &LogicalStats| -> Option<i64> {
         let min_start = s.start_min?;
         let max_start = s.start_max?;
         let min_end = s.end_min?;
         let max_end = s.end_max?;
-        // Two independent width estimates; take the max.
         let w1 = min_end - min_start;
         let w2 = max_end - max_start;
         Some(w1.max(w2).max(1))
@@ -504,32 +632,21 @@ fn choose_bin_size(
     let l_width = left.as_ref().and_then(width_from_stats);
     let r_width = right.as_ref().and_then(width_from_stats);
 
-    match (l_width, r_width) {
+    let bin_size = match (l_width, r_width) {
         (Some(l), Some(r)) => {
-            let w = l.max(r).max(1) as usize;
-            let bin_size = w.clamp(1_000, 1_000_000);
-            log::debug!(
-                "INTERSECTS logical: adaptive bin_size={bin_size} \
-                 (from widths l={l}, r={r})"
-            );
-            bin_size
+            (l.max(r).max(1) as usize).clamp(1_000, 1_000_000)
         }
         (Some(w), None) | (None, Some(w)) => {
-            let bin_size = (w.max(1) as usize).clamp(1_000, 1_000_000);
-            log::debug!(
-                "INTERSECTS logical: adaptive bin_size={bin_size} \
-                 (partial stats, width={w})"
-            );
-            bin_size
+            (w.max(1) as usize).clamp(1_000, 1_000_000)
         }
-        (None, None) => {
-            log::debug!(
-                "INTERSECTS logical: using default \
-                 bin_size={DEFAULT_BIN_SIZE}"
-            );
-            DEFAULT_BIN_SIZE
-        }
-    }
+        (None, None) => DEFAULT_BIN_SIZE,
+    };
+
+    log::debug!(
+        "INTERSECTS logical: bin_size={bin_size} \
+         (column-level heuristic)"
+    );
+    bin_size
 }
 
 // ── Plan rewrite ────────────────────────────────────────────────
