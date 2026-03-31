@@ -1,7 +1,5 @@
 """Tests for the INTERSECTS binned equi-join transpilation."""
 
-import pytest
-
 from giql import Table
 from giql import transpile
 
@@ -13,8 +11,8 @@ class TestTranspileBinnedJoin:
         """
         GIVEN a GIQL query joining two tables with column-to-column INTERSECTS
         WHEN transpiling with default settings
-        THEN should produce CTEs with UNNEST/range, equi-join ON chrom + __giql_bin,
-             WHERE overlap filter, and DISTINCT
+        THEN should produce CTEs with UNNEST/range, equi-join and overlap in ON,
+             and DISTINCT
         """
         sql = transpile(
             """
@@ -37,8 +35,10 @@ class TestTranspileBinnedJoin:
         assert '"chrom"' in sql
         assert "__giql_bin" in sql
 
-        # Overlap filter in WHERE
-        assert "WHERE" in sql_upper
+        # Overlap filter in ON (not WHERE) for correct outer-join semantics
+        assert "ON" in sql_upper
+        assert '"start"' in sql or '"START"' in sql_upper
+        assert '"end"' in sql or '"END"' in sql_upper
 
         # DISTINCT to deduplicate across bins
         assert "DISTINCT" in sql_upper
@@ -243,9 +243,59 @@ class TestTranspileBinnedJoin:
         # Both reference the same underlying table
         assert "FROM peaks" in sql or "FROM PEAKS" in sql_upper
 
-        # Should still have DISTINCT and WHERE
+        # Should still have DISTINCT
         assert "DISTINCT" in sql_upper
-        assert "WHERE" in sql_upper
+
+    def test_invalid_bin_size_raises(self):
+        """
+        GIVEN bin_size=0 or a negative value
+        WHEN calling transpile
+        THEN should raise ValueError
+        """
+        import pytest
+
+        with pytest.raises(ValueError, match="positive"):
+            transpile(
+                "SELECT * FROM a JOIN b ON a.interval INTERSECTS b.interval",
+                tables=["a", "b"],
+                bin_size=0,
+            )
+
+        with pytest.raises(ValueError, match="positive"):
+            transpile(
+                "SELECT * FROM a JOIN b ON a.interval INTERSECTS b.interval",
+                tables=["a", "b"],
+                bin_size=-1,
+            )
+
+    def test_multi_join_all_intersects_rewritten(self):
+        """
+        GIVEN a three-way join with two INTERSECTS conditions
+        WHEN transpiling
+        THEN should create binned CTEs for all three tables, reusing the
+             FROM table CTE, and place equi-join + overlap in each JOIN ON
+        """
+        sql = transpile(
+            """
+            SELECT a.*, b.*, c.*
+            FROM peaks a
+            JOIN genes b ON a.interval INTERSECTS b.interval
+            JOIN exons c ON a.interval INTERSECTS c.interval
+            """,
+            tables=["peaks", "genes", "exons"],
+        )
+
+        # Three distinct CTEs
+        assert "__giql_a_binned" in sql
+        assert "__giql_b_binned" in sql
+        assert "__giql_c_binned" in sql
+
+        # FROM table CTE created only once
+        assert sql.count("FROM peaks") == 1 or sql.upper().count("FROM PEAKS") == 1
+
+        # Both JOINs have equi-join + overlap in ON
+        sql_upper = sql.upper()
+        assert sql_upper.count("__GIQL_BIN") >= 4  # at least 2 per JOIN ON
 
 
 class TestBinnedJoinDataFusion:
