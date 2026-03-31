@@ -580,15 +580,19 @@ class MergeTransformer:
 
 
 class IntersectsBinnedJoinTransformer:
-    """Transforms column-to-column INTERSECTS joins into binned equi-joins.
+    """Transforms column-to-column INTERSECTS into binned equi-joins.
 
-    Rewrites:
+    Handles both explicit JOIN ON and implicit cross-join (WHERE) patterns:
 
+        -- Explicit JOIN
         SELECT a.*, b.*
-        FROM peaks a
-        JOIN genes b ON a.interval INTERSECTS b.region
+        FROM peaks a JOIN genes b ON a.interval INTERSECTS b.region
 
-    Into:
+        -- Implicit cross-join
+        SELECT a.*, b.*
+        FROM peaks a, genes b WHERE a.interval INTERSECTS b.interval
+
+    Both are rewritten to:
 
         WITH __giql_a_binned AS (
             SELECT *, UNNEST(range(
@@ -596,19 +600,15 @@ class IntersectsBinnedJoinTransformer:
                 CAST(("end" - 1) / B + 1 AS BIGINT)
             )) AS __giql_bin FROM peaks
         ),
-        __giql_b_binned AS (
-            SELECT *, UNNEST(range(
-                CAST("start" / B AS BIGINT),
-                CAST(("end" - 1) / B + 1 AS BIGINT)
-            )) AS __giql_bin FROM genes
-        )
+        __giql_b_binned AS (...)
         SELECT DISTINCT a.*, b.*
         FROM __giql_a_binned AS a
         JOIN __giql_b_binned AS b
           ON a."chrom" = b."chrom" AND a.__giql_bin = b.__giql_bin
         WHERE a."start" < b."end" AND a."end" > b."start"
 
-    Literal-range INTERSECTS (e.g., WHERE clause filters) are left untouched.
+    Literal-range INTERSECTS (e.g., ``WHERE interval INTERSECTS 'chr1:...'``)
+    are left untouched.
     """
 
     def __init__(self, tables: Tables, bin_size: int | None = None):
@@ -623,19 +623,28 @@ class IntersectsBinnedJoinTransformer:
         if not joins:
             return query
 
+        # Check explicit JOIN ON conditions
         for join in joins:
-            intersects = self._find_column_intersects(join)
+            on = join.args.get("on")
+            if on:
+                intersects = self._find_column_intersects_in(on)
+                if intersects:
+                    return self._rewrite_join_on(query, join, intersects)
+
+        # Check WHERE clause (implicit cross-join pattern)
+        where = query.args.get("where")
+        if where:
+            intersects = self._find_column_intersects_in(where.this)
             if intersects:
-                return self._rewrite(query, join, intersects)
+                join = self._find_join_for_intersects(query, intersects)
+                if join:
+                    return self._rewrite_where(query, join, intersects)
 
         return query
 
-    def _find_column_intersects(self, join: exp.Join) -> Intersects | None:
-        """Find an Intersects node in the JOIN ON where both sides are column refs."""
-        on = join.args.get("on")
-        if not on:
-            return None
-        for node in on.find_all(Intersects):
+    def _find_column_intersects_in(self, expr: exp.Expression) -> Intersects | None:
+        """Find an Intersects node where both sides are table-qualified columns."""
+        for node in expr.find_all(Intersects):
             if (
                 isinstance(node.this, exp.Column)
                 and node.this.table
@@ -643,6 +652,34 @@ class IntersectsBinnedJoinTransformer:
                 and node.expression.table
             ):
                 return node
+        return None
+
+    def _find_join_for_intersects(
+        self, query: exp.Select, intersects: Intersects
+    ) -> exp.Join | None:
+        """Find the Join node for the table referenced in an Intersects."""
+        from_table = query.args["from_"].this
+        if not isinstance(from_table, exp.Table):
+            return None
+
+        from_alias = from_table.alias or from_table.name
+        left_alias = intersects.this.table
+        right_alias = intersects.expression.table
+
+        # Determine which alias is the join table (not the FROM table)
+        if left_alias == from_alias:
+            target_alias = right_alias
+        elif right_alias == from_alias:
+            target_alias = left_alias
+        else:
+            return None
+
+        for join in query.args.get("joins", []):
+            if isinstance(join.this, exp.Table):
+                alias = join.this.alias or join.this.name
+                if alias == target_alias:
+                    return join
+
         return None
 
     def _get_columns(self, table_name: str) -> tuple[str, str, str]:
@@ -695,20 +732,17 @@ class IntersectsBinnedJoinTransformer:
         select.from_(exp.Table(this=exp.Identifier(this=table_name)), copy=False)
         return select
 
-    def _rewrite(
+    def _install_binned_ctes(
         self,
         query: exp.Select,
         join: exp.Join,
-        intersects: Intersects,
-    ) -> exp.Select:
-        from_table = query.args["from_"].this
-        join_table = join.this
+        from_table: exp.Table,
+        join_table: exp.Table,
+    ) -> tuple[str, str, tuple[str, str, str], tuple[str, str, str]]:
+        """Create binned CTEs and update FROM/JOIN to reference them.
 
-        if not isinstance(from_table, exp.Table) or not isinstance(
-            join_table, exp.Table
-        ):
-            return query
-
+        Returns (from_alias, join_alias, from_cols, join_cols).
+        """
         from_name = from_table.name
         join_name = join_table.name
         from_alias = from_table.alias or from_name
@@ -717,11 +751,9 @@ class IntersectsBinnedJoinTransformer:
         from_cols = self._get_columns(from_name)
         join_cols = self._get_columns(join_name)
 
-        # Use alias-based CTE names to avoid collisions on self-joins
         from_cte_name = f"__giql_{from_alias}_binned"
         join_cte_name = f"__giql_{join_alias}_binned"
 
-        # Build CTEs
         from_cte = exp.CTE(
             this=self._build_binned_select(from_name, from_cols),
             alias=exp.TableAlias(this=exp.Identifier(this=from_cte_name)),
@@ -731,7 +763,6 @@ class IntersectsBinnedJoinTransformer:
             alias=exp.TableAlias(this=exp.Identifier(this=join_cte_name)),
         )
 
-        # Add CTEs
         existing_with = query.args.get("with_")
         if existing_with:
             existing_with.append("expressions", from_cte)
@@ -739,21 +770,33 @@ class IntersectsBinnedJoinTransformer:
         else:
             query.set("with_", exp.With(expressions=[from_cte, join_cte]))
 
-        # Replace FROM table reference with CTE (preserve alias)
-        new_from = exp.Table(
-            this=exp.Identifier(this=from_cte_name),
-            alias=exp.TableAlias(this=exp.Identifier(this=from_alias)),
+        query.args["from_"].set(
+            "this",
+            exp.Table(
+                this=exp.Identifier(this=from_cte_name),
+                alias=exp.TableAlias(this=exp.Identifier(this=from_alias)),
+            ),
         )
-        query.args["from_"].set("this", new_from)
-
-        # Replace JOIN table reference with CTE (preserve alias)
-        new_join_table = exp.Table(
-            this=exp.Identifier(this=join_cte_name),
-            alias=exp.TableAlias(this=exp.Identifier(this=join_alias)),
+        join.set(
+            "this",
+            exp.Table(
+                this=exp.Identifier(this=join_cte_name),
+                alias=exp.TableAlias(this=exp.Identifier(this=join_alias)),
+            ),
         )
-        join.set("this", new_join_table)
 
-        # Replace JOIN ON with equi-join on chrom + bin
+        query.set("distinct", exp.Distinct())
+
+        return from_alias, join_alias, from_cols, join_cols
+
+    def _build_equi_join(
+        self,
+        from_alias: str,
+        join_alias: str,
+        from_cols: tuple[str, str, str],
+        join_cols: tuple[str, str, str],
+    ) -> exp.And:
+        """Build ``chrom = chrom AND __giql_bin = __giql_bin``."""
         chrom_eq = exp.EQ(
             this=exp.column(from_cols[0], table=from_alias, quoted=True),
             expression=exp.column(join_cols[0], table=join_alias, quoted=True),
@@ -762,10 +805,17 @@ class IntersectsBinnedJoinTransformer:
             this=exp.column("__giql_bin", table=from_alias),
             expression=exp.column("__giql_bin", table=join_alias),
         )
-        join.set("on", exp.And(this=chrom_eq, expression=bin_eq))
+        return exp.And(this=chrom_eq, expression=bin_eq)
 
-        # Add overlap filter to WHERE
-        overlap = exp.And(
+    def _build_overlap_filter(
+        self,
+        from_alias: str,
+        join_alias: str,
+        from_cols: tuple[str, str, str],
+        join_cols: tuple[str, str, str],
+    ) -> exp.And:
+        """Build ``from.start < join.end AND from.end > join.start``."""
+        return exp.And(
             this=exp.LT(
                 this=exp.column(from_cols[1], table=from_alias, quoted=True),
                 expression=exp.column(join_cols[2], table=join_alias, quoted=True),
@@ -776,6 +826,32 @@ class IntersectsBinnedJoinTransformer:
             ),
         )
 
+    def _rewrite_join_on(
+        self,
+        query: exp.Select,
+        join: exp.Join,
+        intersects: Intersects,
+    ) -> exp.Select:
+        """Rewrite an explicit ``JOIN ... ON ... INTERSECTS ...``."""
+        from_table = query.args["from_"].this
+        join_table = join.this
+
+        if not isinstance(from_table, exp.Table) or not isinstance(
+            join_table, exp.Table
+        ):
+            return query
+
+        from_alias, join_alias, from_cols, join_cols = self._install_binned_ctes(
+            query, join, from_table, join_table
+        )
+
+        join.set(
+            "on", self._build_equi_join(from_alias, join_alias, from_cols, join_cols)
+        )
+
+        overlap = self._build_overlap_filter(
+            from_alias, join_alias, from_cols, join_cols
+        )
         existing_where = query.args.get("where")
         if existing_where:
             merged = exp.And(this=existing_where.this, expression=overlap)
@@ -783,7 +859,40 @@ class IntersectsBinnedJoinTransformer:
         else:
             query.set("where", exp.Where(this=overlap))
 
-        # Add DISTINCT to deduplicate rows that appear in multiple bins
-        query.set("distinct", exp.Distinct())
+        return query
+
+    def _rewrite_where(
+        self,
+        query: exp.Select,
+        join: exp.Join,
+        intersects: Intersects,
+    ) -> exp.Select:
+        """Rewrite an implicit cross-join ``FROM a, b WHERE ... INTERSECTS ...``."""
+        from_table = query.args["from_"].this
+        join_table = join.this
+
+        if not isinstance(from_table, exp.Table) or not isinstance(
+            join_table, exp.Table
+        ):
+            return query
+
+        from_alias, join_alias, from_cols, join_cols = self._install_binned_ctes(
+            query, join, from_table, join_table
+        )
+
+        equi_join = self._build_equi_join(from_alias, join_alias, from_cols, join_cols)
+        overlap = self._build_overlap_filter(
+            from_alias, join_alias, from_cols, join_cols
+        )
+
+        # Replace the Intersects node in-place with equi-join + overlap
+        replacement = exp.And(
+            this=exp.And(this=equi_join, expression=overlap),
+            expression=exp.Paren(this=exp.Literal.number(1)),
+        )
+        # Use Paren(1) as a truthy sentinel then clean it up — simpler
+        # to just build the full replacement directly:
+        replacement = exp.And(this=equi_join, expression=overlap)
+        intersects.replace(replacement)
 
         return query
