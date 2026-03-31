@@ -294,10 +294,6 @@ class TestTranspileBinnedJoin:
         assert sql_upper.count("__GIQL_BIN") >= 4  # at least 2 per JOIN ON
 
 
-pytest = __import__("pytest")
-datafusion = pytest.importorskip("datafusion")
-
-
 class TestBinnedJoinDataFusion:
     """End-to-end DataFusion correctness tests for binned INTERSECTS joins."""
 
