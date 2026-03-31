@@ -190,12 +190,12 @@ class TestTranspileBinnedJoin:
         assert sql_default == sql_none
         assert "10000" in sql_default
 
-    def test_implicit_cross_join_uses_naive_predicate(self):
+    def test_implicit_cross_join_uses_binned_optimization(self):
         """
         GIVEN a GIQL query with implicit cross-join (FROM a, b WHERE INTERSECTS)
         WHEN transpiling
-        THEN should use the naive overlap predicate, not binned CTEs, because
-             the CTE approach leaks __giql_bin into SELECT * results
+        THEN should use the binned equi-join optimization without leaking
+             __giql_bin into SELECT * output columns
         """
         sql = transpile(
             """
@@ -206,20 +206,23 @@ class TestTranspileBinnedJoin:
             tables=["peaks", "genes"],
         )
 
-        # No binned CTEs — falls through to generator's naive predicate
-        assert "__giql_bin" not in sql
-        assert "UNNEST" not in sql.upper()
+        # Binned CTEs are present
+        assert "WITH" in sql.upper()
+        assert "__giql_bin" in sql
+        assert "UNNEST" in sql.upper()
 
-        # Naive overlap predicate present
+        # Original table references preserved — no CTE leak into SELECT *
+        assert "peaks" in sql
         assert '"chrom"' in sql
         assert '"start"' in sql
         assert '"end"' in sql
 
-    def test_self_join_distinct_ctes(self):
+    def test_self_join_single_shared_cte(self):
         """
         GIVEN a self-join query where the same table appears with two aliases
         WHEN transpiling a binned join
-        THEN should produce two distinct CTEs both referencing the same underlying table
+        THEN should produce one shared key-only CTE for the underlying table,
+             joined twice through distinct connector aliases
         """
         sql = transpile(
             """
@@ -232,12 +235,11 @@ class TestTranspileBinnedJoin:
 
         sql_upper = sql.upper()
 
-        # Two distinct CTEs
-        assert "__giql_a_binned" in sql
-        assert "__giql_b_binned" in sql
+        # One shared CTE keyed on the table name
+        assert "__giql_peaks_bins" in sql
 
-        # Both reference the same underlying table
-        assert "FROM peaks" in sql or "FROM PEAKS" in sql_upper
+        # Original table preserved in FROM
+        assert "peaks" in sql
 
         # Should still have DISTINCT
         assert "DISTINCT" in sql_upper
@@ -268,8 +270,8 @@ class TestTranspileBinnedJoin:
         """
         GIVEN a three-way join with two INTERSECTS conditions
         WHEN transpiling
-        THEN should create binned CTEs for all three tables, reusing the
-             FROM table CTE, and place equi-join + overlap in each JOIN ON
+        THEN should create one key-only CTE per underlying table and rewrite
+             each INTERSECTS join as a three-join bridge through those CTEs
         """
         sql = transpile(
             """
@@ -281,17 +283,14 @@ class TestTranspileBinnedJoin:
             tables=["peaks", "genes", "exons"],
         )
 
-        # Three distinct CTEs
-        assert "__giql_a_binned" in sql
-        assert "__giql_b_binned" in sql
-        assert "__giql_c_binned" in sql
+        # One CTE per underlying table
+        assert "__giql_peaks_bins" in sql
+        assert "__giql_genes_bins" in sql
+        assert "__giql_exons_bins" in sql
 
-        # FROM table CTE created only once
-        assert sql.count("FROM peaks") == 1 or sql.upper().count("FROM PEAKS") == 1
-
-        # Both JOINs have equi-join + overlap in ON
+        # __giql_bin appears in CTE definitions and ON conditions
         sql_upper = sql.upper()
-        assert sql_upper.count("__GIQL_BIN") >= 4  # at least 2 per JOIN ON
+        assert sql_upper.count("__GIQL_BIN") >= 4  # at least 2 per INTERSECTS join
 
 
 class TestBinnedJoinDataFusion:
@@ -531,3 +530,35 @@ class TestBinnedJoinDataFusion:
 
         assert len(binned_df) == len(naive_df)
         assert binned_df.values.tolist() == naive_df.values.tolist()
+
+    def test_implicit_cross_join_correct_rows_no_bin_leak(self):
+        """
+        GIVEN two tables with overlapping intervals queried via implicit cross-join syntax
+        WHEN executing a binned INTERSECTS join via DataFusion
+        THEN results should be correct and SELECT a.* should not include __giql_bin
+        """
+        ctx = self._make_ctx(
+            peaks_data=[("chr1", 100, 500), ("chr1", 1000, 2000)],
+            genes_data=[("chr1", 300, 600), ("chr1", 5000, 6000)],
+        )
+
+        sql = transpile(
+            """
+            SELECT DISTINCT a.*
+            FROM peaks a, genes b
+            WHERE a.interval INTERSECTS b.interval
+            """,
+            tables=[
+                Table("peaks", chrom_col="chrom", start_col="start", end_col="end"),
+                Table("genes", chrom_col="chrom", start_col="start", end_col="end"),
+            ],
+        )
+
+        df = ctx.sql(sql).to_pandas()
+
+        # Only the first peak (100-500) overlaps the first gene (300-600)
+        assert len(df) == 1
+        assert df.iloc[0]["start"] == 100
+
+        # SELECT a.* must return exactly the original table columns — no __giql_bin
+        assert list(df.columns) == ["chrom", "start", "end"]
