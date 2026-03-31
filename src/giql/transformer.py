@@ -1,7 +1,8 @@
 """Query transformers for GIQL operations.
 
 This module contains transformers that rewrite queries containing GIQL-specific
-operations (like CLUSTER and MERGE) into equivalent SQL with CTEs.
+operations (like CLUSTER, MERGE, and binned INTERSECTS joins) into equivalent
+SQL with CTEs.
 """
 
 from sqlglot import exp
@@ -12,7 +13,10 @@ from giql.constants import DEFAULT_START_COL
 from giql.constants import DEFAULT_STRAND_COL
 from giql.expressions import GIQLCluster
 from giql.expressions import GIQLMerge
+from giql.expressions import Intersects
 from giql.table import Tables
+
+DEFAULT_BIN_SIZE = 10_000
 
 
 class ClusterTransformer:
@@ -573,3 +577,213 @@ class MergeTransformer:
         )
 
         return final_query
+
+
+class IntersectsBinnedJoinTransformer:
+    """Transforms column-to-column INTERSECTS joins into binned equi-joins.
+
+    Rewrites:
+
+        SELECT a.*, b.*
+        FROM peaks a
+        JOIN genes b ON a.interval INTERSECTS b.region
+
+    Into:
+
+        WITH __giql_a_binned AS (
+            SELECT *, UNNEST(range(
+                CAST("start" / B AS BIGINT),
+                CAST(("end" - 1) / B + 1 AS BIGINT)
+            )) AS __giql_bin FROM peaks
+        ),
+        __giql_b_binned AS (
+            SELECT *, UNNEST(range(
+                CAST("start" / B AS BIGINT),
+                CAST(("end" - 1) / B + 1 AS BIGINT)
+            )) AS __giql_bin FROM genes
+        )
+        SELECT DISTINCT a.*, b.*
+        FROM __giql_a_binned AS a
+        JOIN __giql_b_binned AS b
+          ON a."chrom" = b."chrom" AND a.__giql_bin = b.__giql_bin
+        WHERE a."start" < b."end" AND a."end" > b."start"
+
+    Literal-range INTERSECTS (e.g., WHERE clause filters) are left untouched.
+    """
+
+    def __init__(self, tables: Tables, bin_size: int | None = None):
+        self.tables = tables
+        self.bin_size = bin_size if bin_size is not None else DEFAULT_BIN_SIZE
+
+    def transform(self, query: exp.Expression) -> exp.Expression:
+        if not isinstance(query, exp.Select):
+            return query
+
+        joins = query.args.get("joins")
+        if not joins:
+            return query
+
+        for join in joins:
+            intersects = self._find_column_intersects(join)
+            if intersects:
+                return self._rewrite(query, join, intersects)
+
+        return query
+
+    def _find_column_intersects(self, join: exp.Join) -> Intersects | None:
+        """Find an Intersects node in the JOIN ON where both sides are column refs."""
+        on = join.args.get("on")
+        if not on:
+            return None
+        for node in on.find_all(Intersects):
+            if (
+                isinstance(node.this, exp.Column)
+                and node.this.table
+                and isinstance(node.expression, exp.Column)
+                and node.expression.table
+            ):
+                return node
+        return None
+
+    def _get_columns(self, table_name: str) -> tuple[str, str, str]:
+        """Return (chrom, start, end) column names for a table."""
+        table = self.tables.get(table_name)
+        if table:
+            return (table.chrom_col, table.start_col, table.end_col)
+        return (DEFAULT_CHROM_COL, DEFAULT_START_COL, DEFAULT_END_COL)
+
+    def _build_binned_select(
+        self, table_name: str, cols: tuple[str, str, str]
+    ) -> exp.Select:
+        """Build ``SELECT *, UNNEST(range(...)) AS __giql_bin FROM <table>``."""
+        _chrom, start, end = cols
+        B = self.bin_size
+
+        low = exp.Cast(
+            this=exp.Div(
+                this=exp.column(start, quoted=True),
+                expression=exp.Literal.number(B),
+            ),
+            to=exp.DataType(this=exp.DataType.Type.BIGINT),
+        )
+        high = exp.Cast(
+            this=exp.Add(
+                this=exp.Div(
+                    this=exp.Paren(
+                        this=exp.Sub(
+                            this=exp.column(end, quoted=True),
+                            expression=exp.Literal.number(1),
+                        ),
+                    ),
+                    expression=exp.Literal.number(B),
+                ),
+                expression=exp.Literal.number(1),
+            ),
+            to=exp.DataType(this=exp.DataType.Type.BIGINT),
+        )
+
+        range_fn = exp.Anonymous(this="range", expressions=[low, high])
+        unnest_fn = exp.Anonymous(this="UNNEST", expressions=[range_fn])
+        bin_alias = exp.Alias(
+            this=unnest_fn,
+            alias=exp.Identifier(this="__giql_bin"),
+        )
+
+        select = exp.Select()
+        select.select(exp.Star(), copy=False)
+        select.select(bin_alias, append=True, copy=False)
+        select.from_(exp.Table(this=exp.Identifier(this=table_name)), copy=False)
+        return select
+
+    def _rewrite(
+        self,
+        query: exp.Select,
+        join: exp.Join,
+        intersects: Intersects,
+    ) -> exp.Select:
+        from_table = query.args["from_"].this
+        join_table = join.this
+
+        if not isinstance(from_table, exp.Table) or not isinstance(
+            join_table, exp.Table
+        ):
+            return query
+
+        from_name = from_table.name
+        join_name = join_table.name
+        from_alias = from_table.alias or from_name
+        join_alias = join_table.alias or join_name
+
+        from_cols = self._get_columns(from_name)
+        join_cols = self._get_columns(join_name)
+
+        # Use alias-based CTE names to avoid collisions on self-joins
+        from_cte_name = f"__giql_{from_alias}_binned"
+        join_cte_name = f"__giql_{join_alias}_binned"
+
+        # Build CTEs
+        from_cte = exp.CTE(
+            this=self._build_binned_select(from_name, from_cols),
+            alias=exp.TableAlias(this=exp.Identifier(this=from_cte_name)),
+        )
+        join_cte = exp.CTE(
+            this=self._build_binned_select(join_name, join_cols),
+            alias=exp.TableAlias(this=exp.Identifier(this=join_cte_name)),
+        )
+
+        # Add CTEs
+        existing_with = query.args.get("with_")
+        if existing_with:
+            existing_with.append("expressions", from_cte)
+            existing_with.append("expressions", join_cte)
+        else:
+            query.set("with_", exp.With(expressions=[from_cte, join_cte]))
+
+        # Replace FROM table reference with CTE (preserve alias)
+        new_from = exp.Table(
+            this=exp.Identifier(this=from_cte_name),
+            alias=exp.TableAlias(this=exp.Identifier(this=from_alias)),
+        )
+        query.args["from_"].set("this", new_from)
+
+        # Replace JOIN table reference with CTE (preserve alias)
+        new_join_table = exp.Table(
+            this=exp.Identifier(this=join_cte_name),
+            alias=exp.TableAlias(this=exp.Identifier(this=join_alias)),
+        )
+        join.set("this", new_join_table)
+
+        # Replace JOIN ON with equi-join on chrom + bin
+        chrom_eq = exp.EQ(
+            this=exp.column(from_cols[0], table=from_alias, quoted=True),
+            expression=exp.column(join_cols[0], table=join_alias, quoted=True),
+        )
+        bin_eq = exp.EQ(
+            this=exp.column("__giql_bin", table=from_alias),
+            expression=exp.column("__giql_bin", table=join_alias),
+        )
+        join.set("on", exp.And(this=chrom_eq, expression=bin_eq))
+
+        # Add overlap filter to WHERE
+        overlap = exp.And(
+            this=exp.LT(
+                this=exp.column(from_cols[1], table=from_alias, quoted=True),
+                expression=exp.column(join_cols[2], table=join_alias, quoted=True),
+            ),
+            expression=exp.GT(
+                this=exp.column(from_cols[2], table=from_alias, quoted=True),
+                expression=exp.column(join_cols[1], table=join_alias, quoted=True),
+            ),
+        )
+
+        existing_where = query.args.get("where")
+        if existing_where:
+            merged = exp.And(this=existing_where.this, expression=overlap)
+            existing_where.set("this", merged)
+        else:
+            query.set("where", exp.Where(this=overlap))
+
+        # Add DISTINCT to deduplicate rows that appear in multiple bins
+        query.set("distinct", exp.Distinct())
+
+        return query
