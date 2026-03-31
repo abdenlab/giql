@@ -292,6 +292,52 @@ class TestTranspileBinnedJoin:
         sql_upper = sql.upper()
         assert sql_upper.count("__GIQL_BIN") >= 4  # at least 2 per INTERSECTS join
 
+    def test_explicit_columns_uses_full_cte_not_bridge(self):
+        """
+        GIVEN a join query with only explicit columns in SELECT (no wildcards)
+        WHEN transpiling
+        THEN should use the 1-join full-CTE approach, not bridge CTEs
+        """
+        sql = transpile(
+            """
+            SELECT a.chrom, a.start, b.start AS b_start
+            FROM peaks a
+            JOIN genes b ON a.interval INTERSECTS b.interval
+            """,
+            tables=["peaks", "genes"],
+        )
+
+        # Full-CTE names (alias-based, one join per INTERSECTS)
+        assert "__giql_a_binned" in sql
+        assert "__giql_b_binned" in sql
+
+        # Bridge CTEs must NOT be present
+        assert "__giql_peaks_bins" not in sql
+        assert "__giql_c0" not in sql
+
+    def test_wildcard_select_uses_bridge_not_full_cte(self):
+        """
+        GIVEN a join query with a wildcard expression in SELECT (a.*)
+        WHEN transpiling
+        THEN should use the bridge CTE approach, not full-CTEs
+        """
+        sql = transpile(
+            """
+            SELECT a.*, b.*
+            FROM peaks a
+            JOIN genes b ON a.interval INTERSECTS b.interval
+            """,
+            tables=["peaks", "genes"],
+        )
+
+        # Bridge CTE names (table-based)
+        assert "__giql_peaks_bins" in sql
+        assert "__giql_genes_bins" in sql
+
+        # Full CTEs must NOT be present
+        assert "__giql_a_binned" not in sql
+        assert "__giql_b_binned" not in sql
+
 
 class TestBinnedJoinDataFusion:
     """End-to-end DataFusion correctness tests for binned INTERSECTS joins."""

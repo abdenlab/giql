@@ -582,41 +582,46 @@ class MergeTransformer:
 class IntersectsBinnedJoinTransformer:
     """Transforms column-to-column INTERSECTS into binned equi-joins.
 
-    Handles both explicit JOIN ON and implicit cross-join (WHERE) patterns:
+    Handles both explicit JOIN ON and implicit cross-join (WHERE) patterns.
+    Two rewrite strategies are selected based on the SELECT list:
 
-        -- Explicit JOIN
-        SELECT a.*, b.*
-        FROM peaks a JOIN genes b ON a.interval INTERSECTS b.region
+    **No wildcards** (``SELECT a.chrom, b.start, ...``) — ``__giql_bin``
+    cannot appear in the output regardless of CTE content, so the simpler
+    1-join full-CTE approach is used:
 
-        -- Implicit cross-join
-        SELECT DISTINCT a.*
-        FROM peaks a, genes b WHERE a.interval INTERSECTS b.interval
+        WITH __giql_a_binned AS (
+            SELECT *, UNNEST(range(
+                CAST("start" / B AS BIGINT),
+                CAST(("end" - 1) / B + 1 AS BIGINT)
+            )) AS __giql_bin FROM peaks
+        ),
+        __giql_b_binned AS (...)
+        SELECT DISTINCT a.chrom, b.start, ...
+        FROM __giql_a_binned AS a
+        JOIN __giql_b_binned AS b
+          ON a."chrom" = b."chrom" AND a.__giql_bin = b.__giql_bin
+          AND a."start" < b."end" AND a."end" > b."start"
 
-    Both are rewritten using key-only bridge CTEs so that ``__giql_bin``
-    never appears in the output column set (no SELECT * leak):
+    **Wildcards present** (``SELECT a.*, b.*``) — ``__giql_bin`` would leak
+    into ``a.*`` expansion if ``a`` aliases a full-select CTE. A key-only
+    bridge CTE pattern is used instead, keeping original table references:
 
         WITH __giql_peaks_bins AS (
             SELECT "chrom", "start", "end",
-                   UNNEST(range(
-                       CAST("start" / B AS BIGINT),
-                       CAST(("end" - 1) / B + 1 AS BIGINT)
-                   )) AS __giql_bin
-            FROM peaks
+                   UNNEST(range(...)) AS __giql_bin FROM peaks
         ),
         __giql_genes_bins AS (...)
         SELECT DISTINCT a.*, b.*
         FROM peaks a
         JOIN __giql_peaks_bins __giql_c0
-          ON a."chrom" = __giql_c0."chrom"
-          AND a."start" = __giql_c0."start"
-          AND a."end"   = __giql_c0."end"
+          ON a."chrom" = __giql_c0."chrom" AND a."start" = __giql_c0."start"
+          AND a."end" = __giql_c0."end"
         JOIN __giql_genes_bins __giql_c1
           ON __giql_c0."chrom" = __giql_c1."chrom"
           AND __giql_c0.__giql_bin = __giql_c1.__giql_bin
         JOIN genes b
-          ON b."chrom" = __giql_c1."chrom"
-          AND b."start" = __giql_c1."start"
-          AND b."end"   = __giql_c1."end"
+          ON b."chrom" = __giql_c1."chrom" AND b."start" = __giql_c1."start"
+          AND b."end" = __giql_c1."end"
           AND a."start" < b."end" AND a."end" > b."start"
 
     Literal-range INTERSECTS (e.g., ``WHERE interval INTERSECTS 'chr1:...'``)
@@ -633,9 +638,229 @@ class IntersectsBinnedJoinTransformer:
         if not isinstance(query, exp.Select):
             return query
 
-        joins = query.args.get("joins") or []
+        # When no wildcards appear in the SELECT list, __giql_bin cannot
+        # reach the output — use the simpler 1-join full-CTE approach.
+        # When wildcards are present, fall back to bridge CTEs so that
+        # __giql_bin is never exposed through a.* expansion.
+        if self._select_has_wildcards(query):
+            return self._transform_bridge(query)
+        return self._transform_full_cte(query)
 
-        # key_binned: table_name -> CTE name (deduped per underlying table)
+    def _select_has_wildcards(self, query: exp.Select) -> bool:
+        """Return True if any SELECT item is a wildcard (* or table.*)."""
+        for expr in query.expressions:
+            if isinstance(expr, exp.Star):
+                return True
+            if isinstance(expr, exp.Column) and isinstance(expr.this, exp.Star):
+                return True
+        return False
+
+    # ------------------------------------------------------------------
+    # Full-CTE path (no wildcards — fast, 1 equi-join per INTERSECTS)
+    # ------------------------------------------------------------------
+
+    def _transform_full_cte(self, query: exp.Select) -> exp.Select:
+        joins = query.args.get("joins") or []
+        # binned: alias -> (chrom_col, start_col, end_col)
+        binned: dict[str, tuple[str, str, str]] = {}
+        rewrote_any = False
+
+        for join in joins:
+            on = join.args.get("on")
+            if on:
+                intersects = self._find_column_intersects_in(on)
+                if intersects:
+                    self._rewrite_join_on_full_cte(query, join, intersects, binned)
+                    rewrote_any = True
+
+        # Implicit cross-join: FROM a, b WHERE a.interval INTERSECTS b.interval
+        where = query.args.get("where")
+        if where:
+            intersects = self._find_column_intersects_in(where.this)
+            if intersects:
+                cross_join = self._find_cross_join_for_intersects(
+                    query, intersects, joins
+                )
+                if cross_join is not None:
+                    self._rewrite_cross_join_full_cte(
+                        query, cross_join, intersects, binned
+                    )
+                    rewrote_any = True
+
+        if rewrote_any:
+            query.set("distinct", exp.Distinct())
+
+        return query
+
+    def _rewrite_join_on_full_cte(
+        self,
+        query: exp.Select,
+        join: exp.Join,
+        intersects: Intersects,
+        binned: dict[str, tuple[str, str, str]],
+    ) -> None:
+        from_table = query.args["from_"].this
+        join_table = join.this
+        if not isinstance(from_table, exp.Table) or not isinstance(
+            join_table, exp.Table
+        ):
+            return
+
+        from_alias, from_cols = self._ensure_table_binned_full(
+            query, from_table, query.args["from_"], binned
+        )
+        join_alias, join_cols = self._ensure_table_binned_full(
+            query, join_table, join, binned
+        )
+
+        equi_join = exp.And(
+            this=exp.EQ(
+                this=exp.column(from_cols[0], table=from_alias, quoted=True),
+                expression=exp.column(join_cols[0], table=join_alias, quoted=True),
+            ),
+            expression=exp.EQ(
+                this=exp.column("__giql_bin", table=from_alias),
+                expression=exp.column("__giql_bin", table=join_alias),
+            ),
+        )
+        # Place both equi-join and overlap in ON so LEFT/RIGHT/FULL semantics hold.
+        join.set(
+            "on",
+            exp.And(
+                this=equi_join,
+                expression=self._build_overlap(
+                    from_alias, join_alias, from_cols, join_cols
+                ),
+            ),
+        )
+
+    def _rewrite_cross_join_full_cte(
+        self,
+        query: exp.Select,
+        cross_join: exp.Join,
+        intersects: Intersects,
+        binned: dict[str, tuple[str, str, str]],
+    ) -> None:
+        from_table = query.args["from_"].this
+        join_table = cross_join.this
+        if not isinstance(from_table, exp.Table) or not isinstance(
+            join_table, exp.Table
+        ):
+            return
+
+        from_alias, from_cols = self._ensure_table_binned_full(
+            query, from_table, query.args["from_"], binned
+        )
+        join_alias, join_cols = self._ensure_table_binned_full(
+            query, join_table, cross_join, binned
+        )
+
+        equi_join = exp.And(
+            this=exp.EQ(
+                this=exp.column(from_cols[0], table=from_alias, quoted=True),
+                expression=exp.column(join_cols[0], table=join_alias, quoted=True),
+            ),
+            expression=exp.EQ(
+                this=exp.column("__giql_bin", table=from_alias),
+                expression=exp.column("__giql_bin", table=join_alias),
+            ),
+        )
+        cross_join.set(
+            "on",
+            exp.And(
+                this=equi_join,
+                expression=self._build_overlap(
+                    from_alias, join_alias, from_cols, join_cols
+                ),
+            ),
+        )
+        self._remove_intersects_from_where(query, intersects)
+
+    def _ensure_table_binned_full(
+        self,
+        query: exp.Select,
+        table: exp.Table,
+        parent: exp.Expression,
+        binned: dict[str, tuple[str, str, str]],
+    ) -> tuple[str, tuple[str, str, str]]:
+        """Create a full SELECT * CTE for *table* if needed; replace ref in *parent*."""
+        alias = table.alias or table.name
+        if alias in binned:
+            return alias, binned[alias]
+
+        table_name = table.name
+        cols = self._get_columns(table_name)
+        cte_name = f"__giql_{alias}_binned"
+
+        cte = exp.CTE(
+            this=self._build_full_binned_select(table_name, cols),
+            alias=exp.TableAlias(this=exp.Identifier(this=cte_name)),
+        )
+        existing_with = query.args.get("with_")
+        if existing_with:
+            existing_with.append("expressions", cte)
+        else:
+            query.set("with_", exp.With(expressions=[cte]))
+
+        parent.set(
+            "this",
+            exp.Table(
+                this=exp.Identifier(this=cte_name),
+                alias=exp.TableAlias(this=exp.Identifier(this=alias)),
+            ),
+        )
+        binned[alias] = cols
+        return alias, cols
+
+    def _build_full_binned_select(
+        self, table_name: str, cols: tuple[str, str, str]
+    ) -> exp.Select:
+        """Build ``SELECT *, UNNEST(range(...)) AS __giql_bin FROM <table>``."""
+        _chrom, start, end = cols
+        B = self.bin_size
+
+        low = exp.Cast(
+            this=exp.Div(
+                this=exp.column(start, quoted=True),
+                expression=exp.Literal.number(B),
+            ),
+            to=exp.DataType(this=exp.DataType.Type.BIGINT),
+        )
+        high = exp.Cast(
+            this=exp.Add(
+                this=exp.Div(
+                    this=exp.Paren(
+                        this=exp.Sub(
+                            this=exp.column(end, quoted=True),
+                            expression=exp.Literal.number(1),
+                        ),
+                    ),
+                    expression=exp.Literal.number(B),
+                ),
+                expression=exp.Literal.number(1),
+            ),
+            to=exp.DataType(this=exp.DataType.Type.BIGINT),
+        )
+
+        range_fn = exp.Anonymous(this="range", expressions=[low, high])
+        unnest_fn = exp.Anonymous(this="UNNEST", expressions=[range_fn])
+        bin_alias = exp.Alias(
+            this=unnest_fn,
+            alias=exp.Identifier(this="__giql_bin"),
+        )
+
+        select = exp.Select()
+        select.select(exp.Star(), copy=False)
+        select.select(bin_alias, append=True, copy=False)
+        select.from_(exp.Table(this=exp.Identifier(this=table_name)), copy=False)
+        return select
+
+    # ------------------------------------------------------------------
+    # Bridge path (wildcards present — safe, key-only CTEs + join-back)
+    # ------------------------------------------------------------------
+
+    def _transform_bridge(self, query: exp.Select) -> exp.Select:
+        joins = query.args.get("joins") or []
         key_binned: dict[str, str] = {}
         connector_idx = [0]
         new_joins: list[exp.Join] = []
@@ -659,7 +884,7 @@ class IntersectsBinnedJoinTransformer:
                     continue
             new_joins.append(join)
 
-        # Handle implicit cross-join: FROM a, b WHERE a.interval INTERSECTS b.interval
+        # Implicit cross-join: FROM a, b WHERE a.interval INTERSECTS b.interval
         where = query.args.get("where")
         if where:
             intersects = self._find_column_intersects_in(where.this)
@@ -747,12 +972,35 @@ class IntersectsBinnedJoinTransformer:
         else:
             intersects.replace(exp.true())
 
+    # ------------------------------------------------------------------
+    # Shared helpers
+    # ------------------------------------------------------------------
+
     def _get_columns(self, table_name: str) -> tuple[str, str, str]:
         """Return (chrom, start, end) column names for a table."""
         table = self.tables.get(table_name)
         if table:
             return (table.chrom_col, table.start_col, table.end_col)
         return (DEFAULT_CHROM_COL, DEFAULT_START_COL, DEFAULT_END_COL)
+
+    def _build_overlap(
+        self,
+        from_alias: str,
+        join_alias: str,
+        from_cols: tuple[str, str, str],
+        join_cols: tuple[str, str, str],
+    ) -> exp.And:
+        """Build ``from.start < join.end AND from.end > join.start``."""
+        return exp.And(
+            this=exp.LT(
+                this=exp.column(from_cols[1], table=from_alias, quoted=True),
+                expression=exp.column(join_cols[2], table=join_alias, quoted=True),
+            ),
+            expression=exp.GT(
+                this=exp.column(from_cols[2], table=from_alias, quoted=True),
+                expression=exp.column(join_cols[1], table=join_alias, quoted=True),
+            ),
+        )
 
     def _find_table_name_for_alias(self, query: exp.Select, alias: str) -> str:
         """Resolve an alias to its underlying table name."""
@@ -938,23 +1186,17 @@ class IntersectsBinnedJoinTransformer:
                 expression=exp.column(join_cols[2], table=c1, quoted=True),
             ),
         )
-        overlap = exp.And(
-            this=exp.LT(
-                this=exp.column(other_cols[1], table=other_alias, quoted=True),
-                expression=exp.column(join_cols[2], table=join_alias, quoted=True),
-            ),
-            expression=exp.GT(
-                this=exp.column(other_cols[2], table=other_alias, quoted=True),
-                expression=exp.column(join_cols[1], table=join_alias, quoted=True),
-            ),
-        )
-
         join3_kwargs: dict = {
             "this": exp.Table(
                 this=exp.Identifier(this=join_table_name),
                 alias=exp.TableAlias(this=exp.Identifier(this=join_alias)),
             ),
-            "on": exp.And(this=key_match, expression=overlap),
+            "on": exp.And(
+                this=key_match,
+                expression=self._build_overlap(
+                    other_alias, join_alias, other_cols, join_cols
+                ),
+            ),
         }
         if preserve_kind:
             kind = join.args.get("kind")
