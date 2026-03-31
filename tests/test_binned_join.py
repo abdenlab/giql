@@ -190,11 +190,12 @@ class TestTranspileBinnedJoin:
         assert sql_default == sql_none
         assert "10000" in sql_default
 
-    def test_implicit_cross_join_rewrite(self):
+    def test_implicit_cross_join_uses_naive_predicate(self):
         """
         GIVEN a GIQL query with implicit cross-join (FROM a, b WHERE INTERSECTS)
         WHEN transpiling
-        THEN should produce binned CTEs and replace the INTERSECTS in WHERE
+        THEN should use the naive overlap predicate, not binned CTEs, because
+             the CTE approach leaks __giql_bin into SELECT * results
         """
         sql = transpile(
             """
@@ -205,17 +206,12 @@ class TestTranspileBinnedJoin:
             tables=["peaks", "genes"],
         )
 
-        sql_upper = sql.upper()
+        # No binned CTEs — falls through to generator's naive predicate
+        assert "__giql_bin" not in sql
+        assert "UNNEST" not in sql.upper()
 
-        # Binned CTEs present
-        assert "WITH" in sql_upper
-        assert "UNNEST" in sql_upper
-        assert "__giql_bin" in sql
-
-        # Equi-join conditions in WHERE (not in ON for comma joins)
-        assert "WHERE" in sql_upper
-
-        # Overlap filter present
+        # Naive overlap predicate present
+        assert '"chrom"' in sql
         assert '"start"' in sql
         assert '"end"' in sql
 
@@ -296,6 +292,10 @@ class TestTranspileBinnedJoin:
         # Both JOINs have equi-join + overlap in ON
         sql_upper = sql.upper()
         assert sql_upper.count("__GIQL_BIN") >= 4  # at least 2 per JOIN ON
+
+
+pytest = __import__("pytest")
+datafusion = pytest.importorskip("datafusion")
 
 
 class TestBinnedJoinDataFusion:
