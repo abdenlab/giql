@@ -30,19 +30,32 @@ def intersect(
     intervals_a: list[tuple],
     intervals_b: list[tuple],
     strand_mode: str | None = None,
+    *,
+    loj: bool = False,
 ) -> list[tuple]:
-    """Find overlapping intervals using bedtools intersect."""
+    """Find overlapping intervals using bedtools intersect.
+
+    When *loj* is True, use left outer join mode (-loj): every A
+    interval appears in the output, paired with overlapping B
+    intervals or with null-placeholder fields when there is no match.
+    """
     try:
         bt_a = create_bedtool(intervals_a)
         bt_b = create_bedtool(intervals_b)
 
-        kwargs = {"u": True}
+        if loj:
+            kwargs = {"loj": True}
+        else:
+            kwargs = {"u": True}
         if strand_mode == "same":
             kwargs["s"] = True
         elif strand_mode == "opposite":
             kwargs["S"] = True
 
         result = bt_a.intersect(bt_b, **kwargs)
+
+        if loj:
+            return bedtool_to_tuples(result, bed_format="loj")
         return bedtool_to_tuples(result)
 
     except Exception as e:
@@ -102,7 +115,11 @@ def bedtool_to_tuples(
 
     Args:
         bedtool: pybedtools.BedTool object
-        bed_format: Expected format ('bed3', 'bed6', or 'closest')
+        bed_format: Expected format ('bed3', 'bed6', 'loj', or 'closest')
+
+    LOJ format assumes BED6(A)+BED6(B) (12 fields):
+        Fields 0-5: A interval
+        Fields 6-11: B interval (all '.' / -1 when unmatched)
 
     Closest format assumes BED6+BED6+distance (13 fields):
         Fields 0-5: A interval (chrom, start, end, name, score, strand)
@@ -134,6 +151,32 @@ def bedtool_to_tuples(
                     fields[3] if fields[3] != "." else None,
                     int(fields[4]) if fields[4] != "." else None,
                     fields[5] if fields[5] != "." else None,
+                )
+            )
+
+        elif bed_format == "loj":
+            if len(fields) < 12:
+                raise ValueError(f"Unexpected number of fields for loj: {len(fields)}")
+
+            def _loj_field(val, as_int=False):
+                if val == "." or val == "-1":
+                    return None
+                return int(val) if as_int else val
+
+            rows.append(
+                (
+                    fields[0],
+                    int(fields[1]),
+                    int(fields[2]),
+                    fields[3] if fields[3] != "." else None,
+                    int(fields[4]) if fields[4] != "." else None,
+                    fields[5] if fields[5] != "." else None,
+                    _loj_field(fields[6]),
+                    _loj_field(fields[7], as_int=True),
+                    _loj_field(fields[8], as_int=True),
+                    _loj_field(fields[9]),
+                    _loj_field(fields[10], as_int=True),
+                    _loj_field(fields[11]),
                 )
             )
 

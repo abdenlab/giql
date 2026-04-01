@@ -1322,3 +1322,288 @@ class TestBinnedJoinDistinctSemantics:
 
         df = ctx.sql(binned_sql).to_pandas()
         assert len(df) == 1
+
+
+class TestBinnedJoinBinBoundaryRounding:
+    """Regression tests for bin-index calculation rounding errors.
+
+    The original formula CAST(start / B AS BIGINT) uses float division
+    followed by a cast.  When the division lands on x.5 the cast rounds
+    to nearest-even instead of flooring, producing the wrong bin index
+    and causing missed matches.
+    """
+
+    @staticmethod
+    def _make_ctx(table_a_data, table_b_data):
+        import pyarrow as pa
+        from datafusion import SessionContext
+
+        schema = pa.schema(
+            [
+                ("chrom", pa.utf8()),
+                ("start", pa.int64()),
+                ("end", pa.int64()),
+                ("name", pa.utf8()),
+            ]
+        )
+        ctx = SessionContext()
+        ctx.register_record_batches(
+            "intervals_a",
+            [pa.table(table_a_data, schema=schema).to_batches()],
+        )
+        ctx.register_record_batches(
+            "intervals_b",
+            [pa.table(table_b_data, schema=schema).to_batches()],
+        )
+        return ctx
+
+    def test_half_bin_boundary_overlap_not_missed(self):
+        """
+        GIVEN interval A spanning many bins and interval B whose start
+              falls exactly on a .5 division boundary (e.g., 621950/100)
+        WHEN INTERSECTS is evaluated with bin_size=100 on DuckDB
+        THEN the overlap must be found, not missed due to rounding
+        """
+        import duckdb
+
+        conn = duckdb.connect(":memory:")
+        conn.execute(
+            "CREATE TABLE intervals_a "
+            '(chrom VARCHAR, "start" INTEGER, "end" INTEGER, '
+            "name VARCHAR)"
+        )
+        conn.execute(
+            "CREATE TABLE intervals_b "
+            '(chrom VARCHAR, "start" INTEGER, "end" INTEGER, '
+            "name VARCHAR)"
+        )
+        conn.execute("INSERT INTO intervals_a VALUES ('chr1', 421951, 621951, 'a0')")
+        conn.execute("INSERT INTO intervals_b VALUES ('chr1', 621950, 621951, 'b0')")
+
+        sql = transpile(
+            """
+            SELECT DISTINCT a.name, b.name AS b_name
+            FROM intervals_a a
+            JOIN intervals_b b ON a.interval INTERSECTS b.interval
+            """,
+            tables=["intervals_a", "intervals_b"],
+            bin_size=100,
+        )
+        result = conn.execute(sql).fetchall()
+        conn.close()
+        assert len(result) == 1, (
+            f"Expected 1 match, got {len(result)} — "
+            f"bin boundary rounding likely dropped the overlap"
+        )
+
+    def test_exact_bin_boundary_start(self):
+        """
+        GIVEN interval B starting at an exact multiple of bin_size
+        WHEN INTERSECTS is evaluated on DuckDB
+        THEN the correct bin index is assigned (no off-by-one from rounding)
+        """
+        import duckdb
+
+        conn = duckdb.connect(":memory:")
+        conn.execute(
+            "CREATE TABLE intervals_a "
+            '(chrom VARCHAR, "start" INTEGER, "end" INTEGER, '
+            "name VARCHAR)"
+        )
+        conn.execute(
+            "CREATE TABLE intervals_b "
+            '(chrom VARCHAR, "start" INTEGER, "end" INTEGER, '
+            "name VARCHAR)"
+        )
+        conn.execute("INSERT INTO intervals_a VALUES ('chr1', 999, 1001, 'a0')")
+        conn.execute("INSERT INTO intervals_b VALUES ('chr1', 1000, 1001, 'b0')")
+
+        sql = transpile(
+            """
+            SELECT DISTINCT a.name, b.name AS b_name
+            FROM intervals_a a
+            JOIN intervals_b b ON a.interval INTERSECTS b.interval
+            """,
+            tables=["intervals_a", "intervals_b"],
+            bin_size=1000,
+        )
+        result = conn.execute(sql).fetchall()
+        conn.close()
+        assert len(result) == 1, f"Expected 1 match at bin boundary, got {len(result)}"
+
+
+class TestBinnedJoinOuterJoinMultiBin:
+    """Regression tests for outer join with multi-bin intervals.
+
+    When an interval spans multiple bins, the outer join produces one
+    row per bin.  Bins that don't match the other side create spurious
+    NULL rows.  DISTINCT can't collapse a NULL row with a matched row
+    because they differ in the non-NULL columns.
+    """
+
+    @staticmethod
+    def _make_ctx(table_a_data, table_b_data):
+        import pyarrow as pa
+        from datafusion import SessionContext
+
+        schema = pa.schema(
+            [
+                ("chrom", pa.utf8()),
+                ("start", pa.int64()),
+                ("end", pa.int64()),
+                ("name", pa.utf8()),
+            ]
+        )
+        ctx = SessionContext()
+        ctx.register_record_batches(
+            "intervals_a",
+            [pa.table(table_a_data, schema=schema).to_batches()],
+        )
+        ctx.register_record_batches(
+            "intervals_b",
+            [pa.table(table_b_data, schema=schema).to_batches()],
+        )
+        return ctx
+
+    def test_left_join_no_spurious_null_row(self):
+        """
+        GIVEN interval A spanning bins 0 and 1 and interval B only in bin 1
+        WHEN LEFT JOIN INTERSECTS is evaluated
+        THEN only 1 matched row is returned, not a matched row plus a
+             spurious NULL row from the unmatched bin-0 copy
+        """
+        ctx = self._make_ctx(
+            {
+                "chrom": ["chr1"],
+                "start": [9000],
+                "end": [11000],
+                "name": ["a0"],
+            },
+            {
+                "chrom": ["chr1"],
+                "start": [10500],
+                "end": [10600],
+                "name": ["b0"],
+            },
+        )
+
+        sql = transpile(
+            """
+            SELECT a.name, b.name AS b_name
+            FROM intervals_a a
+            LEFT JOIN intervals_b b ON a.interval INTERSECTS b.interval
+            """,
+            tables=["intervals_a", "intervals_b"],
+        )
+        result = ctx.sql(sql).to_pandas()
+        assert len(result) == 1, (
+            f"Expected 1 matched row, got {len(result)} — "
+            f"spurious NULL row from unmatched bin"
+        )
+        assert result.iloc[0]["b_name"] == "b0"
+
+    def test_left_join_unmatched_still_returns_null(self):
+        """
+        GIVEN interval A with no overlap in B
+        WHEN LEFT JOIN INTERSECTS is evaluated
+        THEN one row with NULL B columns is returned
+        """
+        ctx = self._make_ctx(
+            {
+                "chrom": ["chr1"],
+                "start": [9000],
+                "end": [11000],
+                "name": ["a0"],
+            },
+            {
+                "chrom": ["chr2"],
+                "start": [9500],
+                "end": [10500],
+                "name": ["b0"],
+            },
+        )
+
+        sql = transpile(
+            """
+            SELECT a.name, b.name AS b_name
+            FROM intervals_a a
+            LEFT JOIN intervals_b b ON a.interval INTERSECTS b.interval
+            """,
+            tables=["intervals_a", "intervals_b"],
+        )
+        result = ctx.sql(sql).to_pandas()
+        assert len(result) == 1, f"Expected 1 unmatched row, got {len(result)}"
+        assert _is_null(result.iloc[0]["b_name"])
+
+    def test_right_join_no_spurious_null_row(self):
+        """
+        GIVEN interval B spanning bins 0 and 1 and interval A only in bin 0
+        WHEN RIGHT JOIN INTERSECTS is evaluated
+        THEN only 1 matched row is returned, not a matched row plus a
+             spurious NULL row from the unmatched bin-1 copy of B
+        """
+        ctx = self._make_ctx(
+            {
+                "chrom": ["chr1"],
+                "start": [9500],
+                "end": [9600],
+                "name": ["a0"],
+            },
+            {
+                "chrom": ["chr1"],
+                "start": [9000],
+                "end": [11000],
+                "name": ["b0"],
+            },
+        )
+
+        sql = transpile(
+            """
+            SELECT a.name, b.name AS b_name
+            FROM intervals_a a
+            RIGHT JOIN intervals_b b ON a.interval INTERSECTS b.interval
+            """,
+            tables=["intervals_a", "intervals_b"],
+        )
+        result = ctx.sql(sql).to_pandas()
+        assert len(result) == 1, (
+            f"Expected 1 matched row, got {len(result)} — "
+            f"spurious NULL row from unmatched bin"
+        )
+        assert result.iloc[0]["name"] == "a0"
+
+    def test_full_outer_join_no_spurious_null_row(self):
+        """
+        GIVEN interval A spanning bins 0 and 1, interval B only in bin 1
+        WHEN FULL OUTER JOIN INTERSECTS is evaluated
+        THEN only 1 matched row is returned, not a matched row plus a
+             spurious NULL row
+        """
+        ctx = self._make_ctx(
+            {
+                "chrom": ["chr1"],
+                "start": [9000],
+                "end": [11000],
+                "name": ["a0"],
+            },
+            {
+                "chrom": ["chr1"],
+                "start": [10500],
+                "end": [10600],
+                "name": ["b0"],
+            },
+        )
+
+        sql = transpile(
+            """
+            SELECT a.name, b.name AS b_name
+            FROM intervals_a a
+            FULL OUTER JOIN intervals_b b ON a.interval INTERSECTS b.interval
+            """,
+            tables=["intervals_a", "intervals_b"],
+        )
+        result = ctx.sql(sql).to_pandas()
+        assert len(result) == 1, (
+            f"Expected 1 matched row, got {len(result)} — "
+            f"spurious NULL row from unmatched bin"
+        )
