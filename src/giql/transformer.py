@@ -656,10 +656,14 @@ class IntersectsBinnedJoinTransformer:
         if not isinstance(query, exp.Select):
             return query
 
-        # The bridge path can't faithfully represent FULL OUTER JOIN
-        # because the three-join chain's bin fan-out creates spurious
-        # unmatched rows.  Fall back to full-CTE for those queries.
-        if self._select_has_wildcards(query) and not self._has_full_outer_join(query):
+        # Outer joins need the pairs-CTE approach: compute matching key
+        # pairs via an INNER binned join (correctly deduplicated), then
+        # outer-join the original tables through the pairs CTE.  This
+        # avoids the bin fan-out that creates spurious NULL rows when an
+        # interval spans multiple bins but only matches in some of them.
+        if self._has_outer_join_intersects(query):
+            return self._transform_with_pairs(query)
+        if self._select_has_wildcards(query):
             return self._transform_bridge(query)
         return self._transform_full_cte(query)
 
@@ -672,12 +676,252 @@ class IntersectsBinnedJoinTransformer:
                 return True
         return False
 
-    def _has_full_outer_join(self, query: exp.Select) -> bool:
-        """Return True if any JOIN in the query is a FULL OUTER JOIN."""
+    def _has_outer_join_intersects(self, query: exp.Select) -> bool:
+        """Return True if any outer JOIN has an INTERSECTS predicate."""
         for join in query.args.get("joins") or []:
-            if join.args.get("side") == "FULL":
-                return True
+            if join.args.get("side") and join.args.get("on"):
+                if self._find_column_intersects_in(join.args["on"]):
+                    return True
         return False
+
+    def _transform_with_pairs(self, query: exp.Select) -> exp.Select:
+        """Transform using a pairs CTE for correct outer join semantics.
+
+        Computes matching (left_key, right_key) pairs via an INNER
+        binned join with DISTINCT, then outer-joins the original tables
+        through this pairs CTE.  This avoids bin fan-out on the
+        preserved side of the outer join.
+        """
+        joins = query.args.get("joins") or []
+        key_binned: dict[str, str] = {}
+        pairs_idx = 0
+        new_joins: list[exp.Join] = []
+        rewrote_any = False
+
+        for join in joins:
+            on = join.args.get("on")
+            if on:
+                intersects = self._find_column_intersects_in(on)
+                if intersects:
+                    extra = self._extract_non_intersects(on, intersects)
+                    replacement = self._build_pairs_replacement_joins(
+                        query, join, intersects, extra, key_binned, pairs_idx
+                    )
+                    new_joins.extend(replacement)
+                    pairs_idx += 1
+                    rewrote_any = True
+                    continue
+            new_joins.append(join)
+
+        where = query.args.get("where")
+        if where:
+            intersects = self._find_column_intersects_in(where.this)
+            if intersects:
+                cross_join = self._find_cross_join_for_intersects(
+                    query, intersects, new_joins
+                )
+                if cross_join is not None:
+                    new_joins.remove(cross_join)
+                    replacement = self._build_pairs_replacement_joins(
+                        query,
+                        cross_join,
+                        intersects,
+                        None,
+                        key_binned,
+                        pairs_idx,
+                    )
+                    new_joins.extend(replacement)
+                    self._remove_intersects_from_where(query, intersects)
+                    pairs_idx += 1
+                    rewrote_any = True
+
+        if rewrote_any:
+            query.set("joins", new_joins)
+            query.set("distinct", exp.Distinct())
+
+        return query
+
+    def _build_pairs_cte(
+        self,
+        name: str,
+        l_cte: str,
+        r_cte: str,
+        l_cols: tuple[str, str, str],
+        r_cols: tuple[str, str, str],
+    ) -> exp.CTE:
+        """Build a DISTINCT inner-join pairs CTE.
+
+        Returns a CTE named *name* that selects the six key columns
+        (__giql_l_chrom, __giql_l_start, __giql_l_end, __giql_r_chrom,
+        __giql_r_start, __giql_r_end) from an INNER join of the two bin
+        CTEs on chrom, __giql_bin, and the overlap predicate.
+        """
+        l_alias = "__giql_l"
+        r_alias = "__giql_r"
+
+        select = exp.Select()
+        select.set("distinct", exp.Distinct())
+
+        first = True
+        for tbl_alias, cols, prefix in [
+            (l_alias, l_cols, "__giql_l"),
+            (r_alias, r_cols, "__giql_r"),
+        ]:
+            for col, suffix in zip(cols, ["_chrom", "_start", "_end"]):
+                col_expr = exp.Alias(
+                    this=exp.column(col, table=tbl_alias, quoted=True),
+                    alias=exp.Identifier(this=f"{prefix}{suffix}"),
+                )
+                select.select(col_expr, append=not first, copy=False)
+                first = False
+
+        select.from_(
+            exp.Table(
+                this=exp.Identifier(this=l_cte),
+                alias=exp.TableAlias(this=exp.Identifier(this=l_alias)),
+            ),
+            copy=False,
+        )
+
+        join_on = exp.And(
+            this=exp.And(
+                this=exp.EQ(
+                    this=exp.column(l_cols[0], table=l_alias, quoted=True),
+                    expression=exp.column(r_cols[0], table=r_alias, quoted=True),
+                ),
+                expression=exp.EQ(
+                    this=exp.column("__giql_bin", table=l_alias),
+                    expression=exp.column("__giql_bin", table=r_alias),
+                ),
+            ),
+            expression=self._build_overlap(l_alias, r_alias, l_cols, r_cols),
+        )
+
+        select.join(
+            exp.Table(
+                this=exp.Identifier(this=r_cte),
+                alias=exp.TableAlias(this=exp.Identifier(this=r_alias)),
+            ),
+            on=join_on,
+            copy=False,
+        )
+
+        return exp.CTE(
+            this=select,
+            alias=exp.TableAlias(this=exp.Identifier(this=name)),
+        )
+
+    def _build_pairs_replacement_joins(
+        self,
+        query: exp.Select,
+        join: exp.Join,
+        intersects: Intersects,
+        extra: exp.Expression | None,
+        key_binned: dict[str, str],
+        pairs_idx: int,
+    ) -> list[exp.Join]:
+        """Build a pairs CTE and two replacement joins for one INTERSECTS.
+
+        Returns two joins:
+        - join1: from_alias [SIDE] JOIN __giql_pairs ON from.key = pairs.from_key
+        - join2: [SIDE] JOIN join_table ON join.key = pairs.join_key [AND extra]
+        """
+        from_table = query.args["from_"].this
+        join_table = join.this
+        if not isinstance(from_table, exp.Table) or not isinstance(
+            join_table, exp.Table
+        ):
+            return [join]
+
+        from_alias = from_table.alias or from_table.name
+        join_alias = join_table.alias or join_table.name
+        from_table_name = from_table.name
+        join_table_name = join_table.name
+
+        left_alias = intersects.this.table
+        from_cols = self._get_columns(from_table_name)
+        join_cols = self._get_columns(join_table_name)
+
+        # Determine which INTERSECTS side maps to FROM vs JOIN table
+        if left_alias == from_alias:
+            l_table_name, r_table_name = from_table_name, join_table_name
+            l_cols, r_cols = from_cols, join_cols
+            from_prefix, join_prefix = "__giql_l", "__giql_r"
+        else:
+            l_table_name, r_table_name = join_table_name, from_table_name
+            l_cols, r_cols = join_cols, from_cols
+            from_prefix, join_prefix = "__giql_r", "__giql_l"
+
+        # Ensure key-only bin CTEs exist
+        l_cte = self._ensure_key_binned(query, l_table_name, key_binned)
+        r_cte = self._ensure_key_binned(query, r_table_name, key_binned)
+
+        # Build and attach the pairs CTE
+        pairs_name = f"__giql_pairs_{pairs_idx}"
+        pairs_cte = self._build_pairs_cte(pairs_name, l_cte, r_cte, l_cols, r_cols)
+        existing_with = query.args.get("with_")
+        if existing_with:
+            existing_with.append("expressions", pairs_cte)
+        else:
+            query.set("with_", exp.With(expressions=[pairs_cte]))
+
+        side = join.args.get("side")
+        p_alias = f"__giql_p{pairs_idx}"
+
+        # join1: [SIDE] JOIN pairs ON from.key = pairs.from_key
+        join1_on = self._build_key_match(from_alias, from_cols, p_alias, from_prefix)
+        join1_kwargs: dict = {
+            "this": exp.Table(
+                this=exp.Identifier(this=pairs_name),
+                alias=exp.TableAlias(this=exp.Identifier(this=p_alias)),
+            ),
+            "on": join1_on,
+        }
+        if side:
+            join1_kwargs["side"] = side
+        join1 = exp.Join(**join1_kwargs)
+
+        # join2: [SIDE] JOIN join_table ON join.key = pairs.join_key
+        join2_on = self._build_key_match(join_alias, join_cols, p_alias, join_prefix)
+        if extra:
+            join2_on = exp.And(this=join2_on, expression=extra)
+        join2_kwargs: dict = {
+            "this": exp.Table(
+                this=exp.Identifier(this=join_table_name),
+                alias=exp.TableAlias(this=exp.Identifier(this=join_alias)),
+            ),
+            "on": join2_on,
+        }
+        if side:
+            join2_kwargs["side"] = side
+        join2 = exp.Join(**join2_kwargs)
+
+        return [join1, join2]
+
+    def _build_key_match(
+        self,
+        table_alias: str,
+        cols: tuple[str, str, str],
+        pairs_alias: str,
+        prefix: str,
+    ) -> exp.And:
+        """Build ``table.chrom = pairs.prefix_chrom AND ...`` for all three keys."""
+        return exp.And(
+            this=exp.And(
+                this=exp.EQ(
+                    this=exp.column(cols[0], table=table_alias, quoted=True),
+                    expression=exp.column(f"{prefix}_chrom", table=pairs_alias),
+                ),
+                expression=exp.EQ(
+                    this=exp.column(cols[1], table=table_alias, quoted=True),
+                    expression=exp.column(f"{prefix}_start", table=pairs_alias),
+                ),
+            ),
+            expression=exp.EQ(
+                this=exp.column(cols[2], table=table_alias, quoted=True),
+                expression=exp.column(f"{prefix}_end", table=pairs_alias),
+            ),
+        )
 
     def _transform_full_cte(self, query: exp.Select) -> exp.Select:
         joins = query.args.get("joins") or []
@@ -831,35 +1075,32 @@ class IntersectsBinnedJoinTransformer:
         binned[alias] = cols
         return alias, cols
 
-    def _build_bin_range(self, start: str, end: str) -> tuple[exp.Cast, exp.Cast]:
+    def _build_bin_range(
+        self, start: str, end: str
+    ) -> tuple[exp.Expression, exp.Expression]:
         """Build the (low, high) bin-index expressions for UNNEST(range(...)).
 
-        Returns CAST(start / bin_size AS BIGINT) and
-        CAST((end - 1) / bin_size + 1 AS BIGINT).
+        Returns ``start // bin_size`` and ``(end - 1) // bin_size + 1``.
+        Uses integer floor division to avoid rounding errors from
+        float division + CAST.
         """
         bs = self.bin_size
 
-        low = exp.Cast(
-            this=exp.Div(
-                this=exp.column(start, quoted=True),
+        low = exp.IntDiv(
+            this=exp.column(start, quoted=True),
+            expression=exp.Literal.number(bs),
+        )
+        high = exp.Add(
+            this=exp.IntDiv(
+                this=exp.Paren(
+                    this=exp.Sub(
+                        this=exp.column(end, quoted=True),
+                        expression=exp.Literal.number(1),
+                    ),
+                ),
                 expression=exp.Literal.number(bs),
             ),
-            to=exp.DataType(this=exp.DataType.Type.BIGINT),
-        )
-        high = exp.Cast(
-            this=exp.Add(
-                this=exp.Div(
-                    this=exp.Paren(
-                        this=exp.Sub(
-                            this=exp.column(end, quoted=True),
-                            expression=exp.Literal.number(1),
-                        ),
-                    ),
-                    expression=exp.Literal.number(bs),
-                ),
-                expression=exp.Literal.number(1),
-            ),
-            to=exp.DataType(this=exp.DataType.Type.BIGINT),
+            expression=exp.Literal.number(1),
         )
         return low, high
 
