@@ -133,7 +133,6 @@ def transpile(
 
     # Apply transformations
     try:
-        # Binned join rewrite for column-to-column INTERSECTS joins
         ast = intersects_transformer.transform(ast)
         # MERGE transformation (which may internally use CLUSTER)
         ast = merge_transformer.transform(ast)
