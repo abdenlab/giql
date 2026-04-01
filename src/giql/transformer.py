@@ -655,10 +655,6 @@ class IntersectsBinnedJoinTransformer:
                 return True
         return False
 
-    # ------------------------------------------------------------------
-    # Full-CTE path (no wildcards — fast, 1 equi-join per INTERSECTS)
-    # ------------------------------------------------------------------
-
     def _transform_full_cte(self, query: exp.Select) -> exp.Select:
         joins = query.args.get("joins") or []
         # binned: alias -> (chrom_col, start_col, end_col)
@@ -855,10 +851,6 @@ class IntersectsBinnedJoinTransformer:
         select.from_(exp.Table(this=exp.Identifier(this=table_name)), copy=False)
         return select
 
-    # ------------------------------------------------------------------
-    # Bridge path (wildcards present — safe, key-only CTEs + join-back)
-    # ------------------------------------------------------------------
-
     def _transform_bridge(self, query: exp.Select) -> exp.Select:
         joins = query.args.get("joins") or []
         key_binned: dict[str, str] = {}
@@ -971,10 +963,6 @@ class IntersectsBinnedJoinTransformer:
                 intersects.replace(exp.true())
         else:
             intersects.replace(exp.true())
-
-    # ------------------------------------------------------------------
-    # Shared helpers
-    # ------------------------------------------------------------------
 
     def _get_columns(self, table_name: str) -> tuple[str, str, str]:
         """Return (chrom, start, end) column names for a table."""
