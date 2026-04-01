@@ -9,3 +9,6 @@ DEFAULT_START_COL = "start"
 DEFAULT_END_COL = "end"
 DEFAULT_STRAND_COL = "strand"
 DEFAULT_GENOMIC_COL = "interval"
+
+# Default bin size for INTERSECTS binned equi-join optimization
+DEFAULT_BIN_SIZE = 10_000

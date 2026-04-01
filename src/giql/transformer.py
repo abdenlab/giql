@@ -5,8 +5,11 @@ operations (like CLUSTER, MERGE, and binned INTERSECTS joins) into equivalent
 SQL with CTEs.
 """
 
+import itertools
+
 from sqlglot import exp
 
+from giql.constants import DEFAULT_BIN_SIZE
 from giql.constants import DEFAULT_CHROM_COL
 from giql.constants import DEFAULT_END_COL
 from giql.constants import DEFAULT_START_COL
@@ -15,8 +18,6 @@ from giql.expressions import GIQLCluster
 from giql.expressions import GIQLMerge
 from giql.expressions import Intersects
 from giql.table import Tables
-
-DEFAULT_BIN_SIZE = 10_000
 
 
 class ClusterTransformer:
@@ -626,13 +627,30 @@ class IntersectsBinnedJoinTransformer:
 
     Literal-range INTERSECTS (e.g., ``WHERE interval INTERSECTS 'chr1:...'``)
     are left untouched.
+
+    SELECT DISTINCT is added to deduplicate rows produced by multi-bin
+    matches.  This means rows that are identical across every selected
+    column will be collapsed — include a distinguishing column (e.g., an
+    id or score) to preserve duplicates that differ only in unselected
+    columns.  The bridge path's key-match joins on ``(chrom, start,
+    end)`` and may fan out if multiple source rows share those values;
+    DISTINCT corrects for this.
     """
 
     def __init__(self, tables: Tables, bin_size: int | None = None):
+        """Initialize transformer.
+
+        :param tables:
+            Table configurations for column mapping
+        :param bin_size:
+            Bin width for the equi-join rewrite. Defaults to
+            DEFAULT_BIN_SIZE if not specified.
+        """
         self.tables = tables
-        self.bin_size = bin_size if bin_size is not None else DEFAULT_BIN_SIZE
-        if self.bin_size <= 0:
-            raise ValueError(f"bin_size must be a positive integer, got {self.bin_size}")
+        resolved = bin_size if bin_size is not None else DEFAULT_BIN_SIZE
+        if not isinstance(resolved, int) or resolved <= 0:
+            raise ValueError(f"bin_size must be a positive integer, got {resolved!r}")
+        self.bin_size = resolved
 
     def transform(self, query: exp.Expression) -> exp.Expression:
         if not isinstance(query, exp.Select):
@@ -663,7 +681,6 @@ class IntersectsBinnedJoinTransformer:
 
     def _transform_full_cte(self, query: exp.Select) -> exp.Select:
         joins = query.args.get("joins") or []
-        # binned: alias -> (chrom_col, start_col, end_col)
         binned: dict[str, tuple[str, str, str]] = {}
         rewrote_any = False
 
@@ -814,17 +831,18 @@ class IntersectsBinnedJoinTransformer:
         binned[alias] = cols
         return alias, cols
 
-    def _build_full_binned_select(
-        self, table_name: str, cols: tuple[str, str, str]
-    ) -> exp.Select:
-        """Build ``SELECT *, UNNEST(range(...)) AS __giql_bin FROM <table>``."""
-        _chrom, start, end = cols
-        B = self.bin_size
+    def _build_bin_range(self, start: str, end: str) -> tuple[exp.Cast, exp.Cast]:
+        """Build the (low, high) bin-index expressions for UNNEST(range(...)).
+
+        Returns CAST(start / bin_size AS BIGINT) and
+        CAST((end - 1) / bin_size + 1 AS BIGINT).
+        """
+        bs = self.bin_size
 
         low = exp.Cast(
             this=exp.Div(
                 this=exp.column(start, quoted=True),
-                expression=exp.Literal.number(B),
+                expression=exp.Literal.number(bs),
             ),
             to=exp.DataType(this=exp.DataType.Type.BIGINT),
         )
@@ -837,12 +855,20 @@ class IntersectsBinnedJoinTransformer:
                             expression=exp.Literal.number(1),
                         ),
                     ),
-                    expression=exp.Literal.number(B),
+                    expression=exp.Literal.number(bs),
                 ),
                 expression=exp.Literal.number(1),
             ),
             to=exp.DataType(this=exp.DataType.Type.BIGINT),
         )
+        return low, high
+
+    def _build_full_binned_select(
+        self, table_name: str, cols: tuple[str, str, str]
+    ) -> exp.Select:
+        """Build ``SELECT *, UNNEST(range(...)) AS __giql_bin FROM <table>``."""
+        _chrom, start, end = cols
+        low, high = self._build_bin_range(start, end)
 
         range_fn = exp.Anonymous(this="range", expressions=[low, high])
         unnest_fn = exp.Anonymous(this="UNNEST", expressions=[range_fn])
@@ -860,7 +886,7 @@ class IntersectsBinnedJoinTransformer:
     def _transform_bridge(self, query: exp.Select) -> exp.Select:
         joins = query.args.get("joins") or []
         key_binned: dict[str, str] = {}
-        connector_idx = [0]
+        connector_counter = itertools.count()
         new_joins: list[exp.Join] = []
         rewrote_any = False
 
@@ -874,7 +900,7 @@ class IntersectsBinnedJoinTransformer:
                         join,
                         intersects,
                         key_binned,
-                        connector_idx,
+                        connector_counter,
                         preserve_kind=True,
                     )
                     new_joins.extend(extra)
@@ -882,7 +908,6 @@ class IntersectsBinnedJoinTransformer:
                     continue
             new_joins.append(join)
 
-        # Implicit cross-join: FROM a, b WHERE a.interval INTERSECTS b.interval
         where = query.args.get("where")
         if where:
             intersects = self._find_column_intersects_in(where.this)
@@ -897,7 +922,7 @@ class IntersectsBinnedJoinTransformer:
                         cross_join,
                         intersects,
                         key_binned,
-                        connector_idx,
+                        connector_counter,
                         preserve_kind=False,
                     )
                     new_joins.extend(extra)
@@ -911,7 +936,12 @@ class IntersectsBinnedJoinTransformer:
         return query
 
     def _find_column_intersects_in(self, expr: exp.Expression) -> Intersects | None:
-        """Find an Intersects node where both sides are table-qualified columns."""
+        """Return the first column-to-column Intersects node in *expr*, or None.
+
+        Only the first match is returned.  A single JOIN with multiple
+        INTERSECTS conditions in its ON clause is not supported; only the
+        first will be rewritten.
+        """
         for node in expr.find_all(Intersects):
             if (
                 isinstance(node.this, exp.Column)
@@ -957,18 +987,11 @@ class IntersectsBinnedJoinTransformer:
         where = query.args.get("where")
         if not where:
             return
-        where_expr = where.this
-        if where_expr is intersects:
+        remainder = self._extract_non_intersects(where.this, intersects)
+        if remainder is None:
             query.set("where", None)
-        elif isinstance(where_expr, exp.And):
-            if where_expr.this is intersects:
-                query.set("where", exp.Where(this=where_expr.expression))
-            elif where_expr.expression is intersects:
-                query.set("where", exp.Where(this=where_expr.this))
-            else:
-                intersects.replace(exp.true())
         else:
-            intersects.replace(exp.true())
+            query.set("where", exp.Where(this=remainder))
 
     def _extract_non_intersects(
         self, expr: exp.Expression | None, intersects: Intersects
@@ -1034,30 +1057,7 @@ class IntersectsBinnedJoinTransformer:
     ) -> exp.Select:
         """Build ``SELECT chrom, start, end, UNNEST(range(...)) AS __giql_bin FROM table``."""
         chrom, start, end = cols
-        B = self.bin_size
-
-        low = exp.Cast(
-            this=exp.Div(
-                this=exp.column(start, quoted=True),
-                expression=exp.Literal.number(B),
-            ),
-            to=exp.DataType(this=exp.DataType.Type.BIGINT),
-        )
-        high = exp.Cast(
-            this=exp.Add(
-                this=exp.Div(
-                    this=exp.Paren(
-                        this=exp.Sub(
-                            this=exp.column(end, quoted=True),
-                            expression=exp.Literal.number(1),
-                        ),
-                    ),
-                    expression=exp.Literal.number(B),
-                ),
-                expression=exp.Literal.number(1),
-            ),
-            to=exp.DataType(this=exp.DataType.Type.BIGINT),
-        )
+        low, high = self._build_bin_range(start, end)
 
         range_fn = exp.Anonymous(this="range", expressions=[low, high])
         unnest_fn = exp.Anonymous(this="UNNEST", expressions=[range_fn])
@@ -1106,16 +1106,18 @@ class IntersectsBinnedJoinTransformer:
         join: exp.Join,
         intersects: Intersects,
         key_binned: dict[str, str],
-        connector_idx: list[int],
+        connector_counter: itertools.count,
         *,
         preserve_kind: bool,
     ) -> list[exp.Join]:
         """Build three replacement JOINs for one INTERSECTS using the join-back pattern.
 
-        join1: JOIN key_cte_for_other  connector_a  ON other_alias key-matches connector_a
-        join2: JOIN key_cte_for_join   connector_b  ON connector_a equi-joins  connector_b
-        join3: JOIN original_join_table join_alias  ON join_alias key-matches  connector_b
-                                                    AND overlap predicate
+        join1 is always INNER because it key-matches a table against its
+        own bin CTE — every row has a corresponding bin entry by
+        construction, so the join side has no effect.
+
+        join2 and join3 inherit the original join's side (LEFT, RIGHT)
+        when *preserve_kind* is True.
         """
         join_table = join.this
         if not isinstance(join_table, exp.Table):
@@ -1139,9 +1141,8 @@ class IntersectsBinnedJoinTransformer:
         other_cte = self._ensure_key_binned(query, other_table_name, key_binned)
         join_cte = self._ensure_key_binned(query, join_table_name, key_binned)
 
-        c0 = f"__giql_c{connector_idx[0]}"
-        c1 = f"__giql_c{connector_idx[0] + 1}"
-        connector_idx[0] += 2
+        c0 = f"__giql_c{next(connector_counter)}"
+        c1 = f"__giql_c{next(connector_counter)}"
 
         join_side = None
         if preserve_kind:
