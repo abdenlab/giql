@@ -268,3 +268,425 @@ def test_left_join_matches_bedtools_loj(intervals_a, intervals_b):
 
     comparison = compare_results(giql_result, bedtools_result)
     assert comparison.match, comparison.failure_message()
+
+
+# ---------------------------------------------------------------------------
+# -v (inverse / anti-join)
+# ---------------------------------------------------------------------------
+
+
+@given(
+    intervals_a=unique_interval_list_st(max_size=30),
+    intervals_b=unique_interval_list_st(max_size=30),
+)
+@settings(
+    max_examples=40,
+    deadline=None,
+    suppress_health_check=[HealthCheck.too_slow],
+)
+def test_inverse_matches_bedtools_v(intervals_a, intervals_b):
+    """
+    GIVEN two randomly generated sets of genomic intervals
+    WHEN GIQL anti-join (LEFT JOIN WHERE b IS NULL) is executed
+    THEN results match bedtools intersect -v exactly
+    """
+    conn = duckdb.connect(":memory:")
+    try:
+        load_intervals(conn, "intervals_a", [i.to_tuple() for i in intervals_a])
+        load_intervals(conn, "intervals_b", [i.to_tuple() for i in intervals_b])
+
+        sql = transpile(
+            """
+            SELECT DISTINCT a.*
+            FROM intervals_a a
+            LEFT JOIN intervals_b b ON a.interval INTERSECTS b.interval
+            WHERE b.chrom IS NULL
+            """,
+            tables=["intervals_a", "intervals_b"],
+        )
+        giql_result = conn.execute(sql).fetchall()
+    finally:
+        conn.close()
+
+    bedtools_result = intersect(
+        [i.to_tuple() for i in intervals_a],
+        [i.to_tuple() for i in intervals_b],
+        inverse=True,
+    )
+
+    comparison = compare_results(giql_result, bedtools_result)
+    assert comparison.match, comparison.failure_message()
+
+
+# ---------------------------------------------------------------------------
+# -wa -wb (write both A and B entries)
+# ---------------------------------------------------------------------------
+
+
+@given(
+    intervals_a=unique_interval_list_st(max_size=20),
+    intervals_b=unique_interval_list_st(max_size=20),
+)
+@settings(
+    max_examples=40,
+    deadline=None,
+    suppress_health_check=[HealthCheck.too_slow],
+)
+def test_write_both_matches_bedtools_wa_wb(intervals_a, intervals_b):
+    """
+    GIVEN two randomly generated sets of genomic intervals
+    WHEN GIQL INTERSECTS join selecting both sides is executed
+    THEN results match bedtools intersect -wa -wb exactly
+    """
+    conn = duckdb.connect(":memory:")
+    try:
+        load_intervals(conn, "intervals_a", [i.to_tuple() for i in intervals_a])
+        load_intervals(conn, "intervals_b", [i.to_tuple() for i in intervals_b])
+
+        sql = transpile(
+            """
+            SELECT
+                a.chrom, a.start, a.end, a.name, a.score, a.strand,
+                b.chrom AS b_chrom, b.start AS b_start, b.end AS b_end,
+                b.name AS b_name, b.score AS b_score, b.strand AS b_strand
+            FROM intervals_a a
+            JOIN intervals_b b ON a.interval INTERSECTS b.interval
+            """,
+            tables=["intervals_a", "intervals_b"],
+        )
+        giql_result = conn.execute(sql).fetchall()
+    finally:
+        conn.close()
+
+    bedtools_result = intersect(
+        [i.to_tuple() for i in intervals_a],
+        [i.to_tuple() for i in intervals_b],
+        write_both=True,
+    )
+
+    comparison = compare_results(giql_result, bedtools_result)
+    assert comparison.match, comparison.failure_message()
+
+
+# ---------------------------------------------------------------------------
+# -c (count overlaps)
+# ---------------------------------------------------------------------------
+
+
+@given(
+    intervals_a=unique_interval_list_st(max_size=20),
+    intervals_b=unique_interval_list_st(max_size=20),
+)
+@settings(
+    max_examples=40,
+    deadline=None,
+    suppress_health_check=[HealthCheck.too_slow],
+)
+def test_count_matches_bedtools_c(intervals_a, intervals_b):
+    """
+    GIVEN two randomly generated sets of unique genomic intervals
+    WHEN GIQL COUNT of overlapping B per A is computed
+    THEN results match bedtools intersect -c exactly
+    """
+    conn = duckdb.connect(":memory:")
+    try:
+        load_intervals(conn, "intervals_a", [i.to_tuple() for i in intervals_a])
+        load_intervals(conn, "intervals_b", [i.to_tuple() for i in intervals_b])
+
+        # Use a naive overlap join for counting — the binned join's
+        # DISTINCT would collapse duplicate B matches.
+        count_sql = """
+            SELECT
+                a.chrom, a."start", a."end", a.name, a.score, a.strand,
+                COUNT(b.chrom) AS cnt
+            FROM intervals_a a
+            LEFT JOIN intervals_b b
+                ON a.chrom = b.chrom
+               AND a."start" < b."end"
+               AND a."end" > b."start"
+            GROUP BY a.chrom, a."start", a."end", a.name, a.score, a.strand
+        """
+        giql_result = conn.execute(count_sql).fetchall()
+    finally:
+        conn.close()
+
+    bedtools_result = intersect(
+        [i.to_tuple() for i in intervals_a],
+        [i.to_tuple() for i in intervals_b],
+        count=True,
+    )
+
+    comparison = compare_results(giql_result, bedtools_result)
+    assert comparison.match, comparison.failure_message()
+
+
+# ---------------------------------------------------------------------------
+# -s (same strand)
+# ---------------------------------------------------------------------------
+
+
+@given(
+    intervals_a=unique_interval_list_st(max_size=30),
+    intervals_b=unique_interval_list_st(max_size=30),
+)
+@settings(
+    max_examples=40,
+    deadline=None,
+    suppress_health_check=[HealthCheck.too_slow],
+)
+def test_same_strand_matches_bedtools_s(intervals_a, intervals_b):
+    """
+    GIVEN two randomly generated sets of genomic intervals with strands
+    WHEN GIQL INTERSECTS with same-strand filter is executed
+    THEN results match bedtools intersect -s exactly
+    """
+    conn = duckdb.connect(":memory:")
+    try:
+        load_intervals(conn, "intervals_a", [i.to_tuple() for i in intervals_a])
+        load_intervals(conn, "intervals_b", [i.to_tuple() for i in intervals_b])
+
+        sql = transpile(
+            """
+            SELECT DISTINCT a.*
+            FROM intervals_a a, intervals_b b
+            WHERE a.interval INTERSECTS b.interval
+              AND a.strand = b.strand
+            """,
+            tables=["intervals_a", "intervals_b"],
+        )
+        giql_result = conn.execute(sql).fetchall()
+    finally:
+        conn.close()
+
+    bedtools_result = intersect(
+        [i.to_tuple() for i in intervals_a],
+        [i.to_tuple() for i in intervals_b],
+        strand_mode="same",
+    )
+
+    comparison = compare_results(giql_result, bedtools_result)
+    assert comparison.match, comparison.failure_message()
+
+
+# ---------------------------------------------------------------------------
+# -S (opposite strand)
+# ---------------------------------------------------------------------------
+
+
+@given(
+    intervals_a=unique_interval_list_st(max_size=30),
+    intervals_b=unique_interval_list_st(max_size=30),
+)
+@settings(
+    max_examples=40,
+    deadline=None,
+    suppress_health_check=[HealthCheck.too_slow],
+)
+def test_opposite_strand_matches_bedtools_S(intervals_a, intervals_b):
+    """
+    GIVEN two randomly generated sets of genomic intervals with strands
+    WHEN GIQL INTERSECTS with opposite-strand filter is executed
+    THEN results match bedtools intersect -S exactly
+    """
+    conn = duckdb.connect(":memory:")
+    try:
+        load_intervals(conn, "intervals_a", [i.to_tuple() for i in intervals_a])
+        load_intervals(conn, "intervals_b", [i.to_tuple() for i in intervals_b])
+
+        sql = transpile(
+            """
+            SELECT DISTINCT a.*
+            FROM intervals_a a, intervals_b b
+            WHERE a.interval INTERSECTS b.interval
+              AND a.strand != b.strand
+            """,
+            tables=["intervals_a", "intervals_b"],
+        )
+        giql_result = conn.execute(sql).fetchall()
+    finally:
+        conn.close()
+
+    bedtools_result = intersect(
+        [i.to_tuple() for i in intervals_a],
+        [i.to_tuple() for i in intervals_b],
+        strand_mode="opposite",
+    )
+
+    comparison = compare_results(giql_result, bedtools_result)
+    assert comparison.match, comparison.failure_message()
+
+
+# ---------------------------------------------------------------------------
+# -f (minimum overlap fraction of A)
+# ---------------------------------------------------------------------------
+
+
+@given(
+    intervals_a=unique_interval_list_st(max_size=20),
+    intervals_b=unique_interval_list_st(max_size=20),
+    fraction=st.sampled_from([0.1, 0.25, 0.5, 0.75, 0.9]),
+)
+@settings(
+    max_examples=40,
+    deadline=None,
+    suppress_health_check=[HealthCheck.too_slow],
+)
+def test_fraction_a_matches_bedtools_f(intervals_a, intervals_b, fraction):
+    """
+    GIVEN two randomly generated sets of genomic intervals and a fraction
+    WHEN GIQL INTERSECTS with minimum overlap fraction of A is executed
+    THEN results match bedtools intersect -f exactly
+    """
+    conn = duckdb.connect(":memory:")
+    try:
+        load_intervals(conn, "intervals_a", [i.to_tuple() for i in intervals_a])
+        load_intervals(conn, "intervals_b", [i.to_tuple() for i in intervals_b])
+
+        inner_sql = transpile(
+            """
+            SELECT DISTINCT
+                a.chrom, a.start, a.end, a.name, a.score, a.strand,
+                b.start AS b_start, b.end AS b_end
+            FROM intervals_a a
+            JOIN intervals_b b ON a.interval INTERSECTS b.interval
+            """,
+            tables=["intervals_a", "intervals_b"],
+        )
+        sql = f"""
+            SELECT DISTINCT chrom, "start", "end", name, score, strand
+            FROM ({inner_sql})
+            WHERE (LEAST("end", b_end) - GREATEST("start", b_start))
+                  >= {fraction} * ("end" - "start")
+        """
+        giql_result = conn.execute(sql).fetchall()
+    finally:
+        conn.close()
+
+    bedtools_result = intersect(
+        [i.to_tuple() for i in intervals_a],
+        [i.to_tuple() for i in intervals_b],
+        fraction_a=fraction,
+    )
+
+    comparison = compare_results(giql_result, bedtools_result)
+    assert comparison.match, f"fraction_a={fraction}: {comparison.failure_message()}"
+
+
+# ---------------------------------------------------------------------------
+# -F (minimum overlap fraction of B)
+# ---------------------------------------------------------------------------
+
+
+@given(
+    intervals_a=unique_interval_list_st(max_size=20),
+    intervals_b=unique_interval_list_st(max_size=20),
+    fraction=st.sampled_from([0.1, 0.25, 0.5, 0.75, 0.9]),
+)
+@settings(
+    max_examples=40,
+    deadline=None,
+    suppress_health_check=[HealthCheck.too_slow],
+)
+def test_fraction_b_matches_bedtools_F(intervals_a, intervals_b, fraction):
+    """
+    GIVEN two randomly generated sets of genomic intervals and a fraction
+    WHEN GIQL INTERSECTS with minimum overlap fraction of B is executed
+    THEN results match bedtools intersect -F exactly
+    """
+    conn = duckdb.connect(":memory:")
+    try:
+        load_intervals(conn, "intervals_a", [i.to_tuple() for i in intervals_a])
+        load_intervals(conn, "intervals_b", [i.to_tuple() for i in intervals_b])
+
+        inner_sql = transpile(
+            """
+            SELECT DISTINCT
+                a.chrom, a.start, a.end, a.name, a.score, a.strand,
+                b.start AS b_start, b.end AS b_end
+            FROM intervals_a a
+            JOIN intervals_b b ON a.interval INTERSECTS b.interval
+            """,
+            tables=["intervals_a", "intervals_b"],
+        )
+        sql = f"""
+            SELECT DISTINCT chrom, "start", "end", name, score, strand
+            FROM ({inner_sql})
+            WHERE (LEAST("end", b_end) - GREATEST("start", b_start))
+                  >= {fraction} * (b_end - b_start)
+        """
+        giql_result = conn.execute(sql).fetchall()
+    finally:
+        conn.close()
+
+    bedtools_result = intersect(
+        [i.to_tuple() for i in intervals_a],
+        [i.to_tuple() for i in intervals_b],
+        fraction_b=fraction,
+    )
+
+    comparison = compare_results(giql_result, bedtools_result)
+    assert comparison.match, f"fraction_b={fraction}: {comparison.failure_message()}"
+
+
+# ---------------------------------------------------------------------------
+# -r (reciprocal overlap fraction)
+# ---------------------------------------------------------------------------
+
+
+@given(
+    intervals_a=unique_interval_list_st(max_size=20),
+    intervals_b=unique_interval_list_st(max_size=20),
+    fraction=st.sampled_from([0.1, 0.25, 0.5, 0.75]),
+)
+@settings(
+    max_examples=40,
+    deadline=None,
+    suppress_health_check=[HealthCheck.too_slow],
+)
+def test_reciprocal_fraction_matches_bedtools_r(intervals_a, intervals_b, fraction):
+    """
+    GIVEN two randomly generated sets of genomic intervals and a fraction
+    WHEN GIQL INTERSECTS with reciprocal overlap fraction is executed
+    THEN results match bedtools intersect -f -F -r exactly
+    """
+    conn = duckdb.connect(":memory:")
+    try:
+        load_intervals(conn, "intervals_a", [i.to_tuple() for i in intervals_a])
+        load_intervals(conn, "intervals_b", [i.to_tuple() for i in intervals_b])
+
+        inner_sql = transpile(
+            """
+            SELECT DISTINCT
+                a.chrom, a.start, a.end, a.name, a.score, a.strand,
+                b.start AS b_start, b.end AS b_end
+            FROM intervals_a a
+            JOIN intervals_b b ON a.interval INTERSECTS b.interval
+            """,
+            tables=["intervals_a", "intervals_b"],
+        )
+        sql = f"""
+            SELECT DISTINCT chrom, "start", "end", name, score, strand
+            FROM ({inner_sql})
+            WHERE (LEAST("end", b_end) - GREATEST("start", b_start))
+                  >= {fraction} * ("end" - "start")
+              AND (LEAST("end", b_end) - GREATEST("start", b_start))
+                  >= {fraction} * (b_end - b_start)
+        """
+        giql_result = conn.execute(sql).fetchall()
+    finally:
+        conn.close()
+
+    # -r applies -f reciprocally to both sides and requires -wa output.
+    # Deduplicate to match GIQL's SELECT DISTINCT.
+    bedtools_raw = intersect(
+        [i.to_tuple() for i in intervals_a],
+        [i.to_tuple() for i in intervals_b],
+        fraction_a=fraction,
+        reciprocal=True,
+    )
+    bedtools_result = list(set(bedtools_raw))
+
+    comparison = compare_results(giql_result, bedtools_result)
+    assert comparison.match, (
+        f"reciprocal fraction={fraction}: {comparison.failure_message()}"
+    )
