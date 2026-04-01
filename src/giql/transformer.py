@@ -638,11 +638,10 @@ class IntersectsBinnedJoinTransformer:
         if not isinstance(query, exp.Select):
             return query
 
-        # When no wildcards appear in the SELECT list, __giql_bin cannot
-        # reach the output — use the simpler 1-join full-CTE approach.
-        # When wildcards are present, fall back to bridge CTEs so that
-        # __giql_bin is never exposed through a.* expansion.
-        if self._select_has_wildcards(query):
+        # The bridge path can't faithfully represent FULL OUTER JOIN
+        # because the three-join chain's bin fan-out creates spurious
+        # unmatched rows.  Fall back to full-CTE for those queries.
+        if self._select_has_wildcards(query) and not self._has_full_outer_join(query):
             return self._transform_bridge(query)
         return self._transform_full_cte(query)
 
@@ -652,6 +651,13 @@ class IntersectsBinnedJoinTransformer:
             if isinstance(expr, exp.Star):
                 return True
             if isinstance(expr, exp.Column) and isinstance(expr.this, exp.Star):
+                return True
+        return False
+
+    def _has_full_outer_join(self, query: exp.Select) -> bool:
+        """Return True if any JOIN in the query is a FULL OUTER JOIN."""
+        for join in query.args.get("joins") or []:
+            if join.args.get("side") == "FULL":
                 return True
         return False
 
@@ -709,6 +715,8 @@ class IntersectsBinnedJoinTransformer:
             query, join_table, join, binned
         )
 
+        extra = self._extract_non_intersects(join.args.get("on"), intersects)
+
         equi_join = exp.And(
             this=exp.EQ(
                 this=exp.column(from_cols[0], table=from_alias, quoted=True),
@@ -720,15 +728,13 @@ class IntersectsBinnedJoinTransformer:
             ),
         )
         # Place both equi-join and overlap in ON so LEFT/RIGHT/FULL semantics hold.
-        join.set(
-            "on",
-            exp.And(
-                this=equi_join,
-                expression=self._build_overlap(
-                    from_alias, join_alias, from_cols, join_cols
-                ),
-            ),
+        new_on = exp.And(
+            this=equi_join,
+            expression=self._build_overlap(from_alias, join_alias, from_cols, join_cols),
         )
+        if extra:
+            new_on = exp.And(this=new_on, expression=extra)
+        join.set("on", new_on)
 
     def _rewrite_cross_join_full_cte(
         self,
@@ -964,6 +970,26 @@ class IntersectsBinnedJoinTransformer:
         else:
             intersects.replace(exp.true())
 
+    def _extract_non_intersects(
+        self, expr: exp.Expression | None, intersects: Intersects
+    ) -> exp.Expression | None:
+        """Return the parts of an AND tree that are not the INTERSECTS node."""
+        if expr is None or expr is intersects:
+            return None
+        if isinstance(expr, exp.And):
+            if expr.this is intersects:
+                return expr.expression
+            if expr.expression is intersects:
+                return expr.this
+            left = self._extract_non_intersects(expr.this, intersects)
+            right = self._extract_non_intersects(expr.expression, intersects)
+            if left is None:
+                return right
+            if right is None:
+                return left
+            return exp.And(this=left, expression=right)
+        return expr
+
     def _get_columns(self, table_name: str) -> tuple[str, str, str]:
         """Return (chrom, start, end) column names for a table."""
         table = self.tables.get(table_name)
@@ -1104,6 +1130,8 @@ class IntersectsBinnedJoinTransformer:
         if other_alias == join_alias:
             return [join]  # can't determine structure
 
+        extra = self._extract_non_intersects(join.args.get("on"), intersects)
+
         other_table_name = self._find_table_name_for_alias(query, other_alias)
         other_cols = self._get_columns(other_table_name)
         join_cols = self._get_columns(join_table_name)
@@ -1114,6 +1142,10 @@ class IntersectsBinnedJoinTransformer:
         c0 = f"__giql_c{connector_idx[0]}"
         c1 = f"__giql_c{connector_idx[0] + 1}"
         connector_idx[0] += 2
+
+        join_side = None
+        if preserve_kind:
+            join_side = join.args.get("side")
 
         # join1: key-match from other_alias to its bin CTE
         join1 = exp.Join(
@@ -1140,12 +1172,12 @@ class IntersectsBinnedJoinTransformer:
         )
 
         # join2: bin equi-join (chrom + __giql_bin match)
-        join2 = exp.Join(
-            this=exp.Table(
+        join2_kwargs: dict = {
+            "this": exp.Table(
                 this=exp.Identifier(this=join_cte),
                 alias=exp.TableAlias(this=exp.Identifier(this=c1)),
             ),
-            on=exp.And(
+            "on": exp.And(
                 this=exp.EQ(
                     this=exp.column(other_cols[0], table=c0, quoted=True),
                     expression=exp.column(join_cols[0], table=c1, quoted=True),
@@ -1155,7 +1187,10 @@ class IntersectsBinnedJoinTransformer:
                     expression=exp.column("__giql_bin", table=c1),
                 ),
             ),
-        )
+        }
+        if join_side:
+            join2_kwargs["side"] = join_side
+        join2 = exp.Join(**join2_kwargs)
 
         # join3: key-match from join CTE back to actual join table + overlap
         key_match = exp.And(
@@ -1174,22 +1209,23 @@ class IntersectsBinnedJoinTransformer:
                 expression=exp.column(join_cols[2], table=c1, quoted=True),
             ),
         )
+        join3_on = exp.And(
+            this=key_match,
+            expression=self._build_overlap(
+                other_alias, join_alias, other_cols, join_cols
+            ),
+        )
+        if extra:
+            join3_on = exp.And(this=join3_on, expression=extra)
         join3_kwargs: dict = {
             "this": exp.Table(
                 this=exp.Identifier(this=join_table_name),
                 alias=exp.TableAlias(this=exp.Identifier(this=join_alias)),
             ),
-            "on": exp.And(
-                this=key_match,
-                expression=self._build_overlap(
-                    other_alias, join_alias, other_cols, join_cols
-                ),
-            ),
+            "on": join3_on,
         }
-        if preserve_kind:
-            kind = join.args.get("kind")
-            if kind:
-                join3_kwargs["kind"] = kind
+        if join_side:
+            join3_kwargs["side"] = join_side
 
         join3 = exp.Join(**join3_kwargs)
 
