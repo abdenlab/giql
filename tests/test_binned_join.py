@@ -1,7 +1,21 @@
 """Tests for the INTERSECTS binned equi-join transpilation."""
 
+import math
+
+import pytest
+
 from giql import Table
 from giql import transpile
+
+
+def _is_null(value) -> bool:
+    """Check if a value is null/NaN (DataFusion returns NaN for nullable int64)."""
+    if value is None:
+        return True
+    try:
+        return math.isnan(value)
+    except (TypeError, ValueError):
+        return False
 
 
 class TestTranspileBinnedJoin:
@@ -250,8 +264,6 @@ class TestTranspileBinnedJoin:
         WHEN calling transpile
         THEN should raise ValueError
         """
-        import pytest
-
         with pytest.raises(ValueError, match="positive"):
             transpile(
                 "SELECT * FROM a JOIN b ON a.interval INTERSECTS b.interval",
@@ -608,3 +620,705 @@ class TestBinnedJoinDataFusion:
 
         # SELECT a.* must return exactly the original table columns — no __giql_bin
         assert list(df.columns) == ["chrom", "start", "end"]
+
+
+class TestBinnedJoinOuterJoinSemantics:
+    """Regression tests: outer join kinds must be preserved after rewrite.
+
+    Bug: the bridge path only applied the join kind (LEFT, RIGHT, FULL) to
+    join3, while join1 and join2 were always INNER — silently converting
+    outer joins into inner joins.
+    """
+
+    @staticmethod
+    def _make_ctx(peaks_data, genes_data):
+        """Create a DataFusion context with peaks and genes tables."""
+        import pyarrow as pa
+        from datafusion import SessionContext
+
+        schema = pa.schema(
+            [
+                ("chrom", pa.utf8()),
+                ("start", pa.int64()),
+                ("end", pa.int64()),
+            ]
+        )
+        ctx = SessionContext()
+        ctx.register_record_batches(
+            "peaks",
+            [
+                pa.table(
+                    {
+                        "chrom": [r[0] for r in peaks_data],
+                        "start": [r[1] for r in peaks_data],
+                        "end": [r[2] for r in peaks_data],
+                    },
+                    schema=schema,
+                ).to_batches()
+            ],
+        )
+        ctx.register_record_batches(
+            "genes",
+            [
+                pa.table(
+                    {
+                        "chrom": [r[0] for r in genes_data],
+                        "start": [r[1] for r in genes_data],
+                        "end": [r[2] for r in genes_data],
+                    },
+                    schema=schema,
+                ).to_batches()
+            ],
+        )
+        return ctx
+
+    def test_left_join_preserves_unmatched_left_rows_full_cte(self):
+        """
+        GIVEN peaks with one matching and one non-matching interval
+        WHEN a LEFT JOIN with INTERSECTS is transpiled (no wildcards, full-CTE path)
+        THEN the SQL must contain LEFT keyword and execution must return all
+             left rows including unmatched ones with NULLs on the right
+        """
+        sql = transpile(
+            """
+            SELECT a.chrom, a.start, a."end", b.start AS b_start
+            FROM peaks a
+            LEFT JOIN genes b ON a.interval INTERSECTS b.interval
+            """,
+            tables=[
+                Table("peaks", chrom_col="chrom", start_col="start", end_col="end"),
+                Table("genes", chrom_col="chrom", start_col="start", end_col="end"),
+            ],
+        )
+
+        assert "LEFT" in sql.upper()
+
+        ctx = self._make_ctx(
+            peaks_data=[("chr1", 100, 500), ("chr1", 1000, 2000)],
+            genes_data=[("chr1", 300, 600)],
+        )
+        df = ctx.sql(sql).to_pandas().sort_values("start").reset_index(drop=True)
+
+        assert len(df) == 2
+        assert df.iloc[0]["start"] == 100
+        assert df.iloc[0]["b_start"] == 300
+        assert df.iloc[1]["start"] == 1000
+        assert _is_null(df.iloc[1]["b_start"])
+
+    def test_left_join_preserves_unmatched_left_rows_bridge(self):
+        """
+        GIVEN peaks with one matching and one non-matching interval
+        WHEN a LEFT JOIN with INTERSECTS is transpiled (wildcards, bridge path)
+        THEN the SQL must contain LEFT keyword and execution must return all
+             left rows including unmatched ones with NULLs on the right
+        """
+        sql = transpile(
+            """
+            SELECT a.*, b.start AS b_start
+            FROM peaks a
+            LEFT JOIN genes b ON a.interval INTERSECTS b.interval
+            """,
+            tables=[
+                Table("peaks", chrom_col="chrom", start_col="start", end_col="end"),
+                Table("genes", chrom_col="chrom", start_col="start", end_col="end"),
+            ],
+        )
+
+        assert "LEFT" in sql.upper()
+
+        ctx = self._make_ctx(
+            peaks_data=[("chr1", 100, 500), ("chr1", 1000, 2000)],
+            genes_data=[("chr1", 300, 600)],
+        )
+        df = ctx.sql(sql).to_pandas().sort_values("start").reset_index(drop=True)
+
+        assert len(df) == 2
+        assert df.iloc[0]["start"] == 100
+        assert df.iloc[0]["b_start"] == 300
+        assert df.iloc[1]["start"] == 1000
+        assert _is_null(df.iloc[1]["b_start"])
+
+    def test_right_join_preserves_unmatched_right_rows_full_cte(self):
+        """
+        GIVEN genes with one matching and one non-matching interval
+        WHEN a RIGHT JOIN with INTERSECTS is transpiled (no wildcards, full-CTE path)
+        THEN the SQL must contain RIGHT keyword and execution must return all
+             right rows including unmatched ones with NULLs on the left
+        """
+        sql = transpile(
+            """
+            SELECT a.start AS a_start, b.chrom, b.start, b."end"
+            FROM peaks a
+            RIGHT JOIN genes b ON a.interval INTERSECTS b.interval
+            """,
+            tables=[
+                Table("peaks", chrom_col="chrom", start_col="start", end_col="end"),
+                Table("genes", chrom_col="chrom", start_col="start", end_col="end"),
+            ],
+        )
+
+        assert "RIGHT" in sql.upper()
+
+        ctx = self._make_ctx(
+            peaks_data=[("chr1", 100, 500)],
+            genes_data=[("chr1", 300, 600), ("chr1", 5000, 6000)],
+        )
+        df = ctx.sql(sql).to_pandas().sort_values("start").reset_index(drop=True)
+
+        assert len(df) == 2
+        matched = df[df["a_start"].notna()]
+        unmatched = df[df["a_start"].isna()]
+        assert len(matched) == 1
+        assert matched.iloc[0]["start"] == 300
+        assert len(unmatched) == 1
+        assert unmatched.iloc[0]["start"] == 5000
+
+    def test_right_join_preserves_unmatched_right_rows_bridge(self):
+        """
+        GIVEN genes with one matching and one non-matching interval
+        WHEN a RIGHT JOIN with INTERSECTS is transpiled (wildcards, bridge path)
+        THEN the SQL must contain RIGHT keyword and execution must return all
+             right rows including unmatched ones with NULLs on the left
+        """
+        sql = transpile(
+            """
+            SELECT a.start AS a_start, b.*
+            FROM peaks a
+            RIGHT JOIN genes b ON a.interval INTERSECTS b.interval
+            """,
+            tables=[
+                Table("peaks", chrom_col="chrom", start_col="start", end_col="end"),
+                Table("genes", chrom_col="chrom", start_col="start", end_col="end"),
+            ],
+        )
+
+        assert "RIGHT" in sql.upper()
+
+        ctx = self._make_ctx(
+            peaks_data=[("chr1", 100, 500)],
+            genes_data=[("chr1", 300, 600), ("chr1", 5000, 6000)],
+        )
+        df = ctx.sql(sql).to_pandas().sort_values("start").reset_index(drop=True)
+
+        assert len(df) == 2
+        matched = df[df["a_start"].notna()]
+        unmatched = df[df["a_start"].isna()]
+        assert len(matched) == 1
+        assert matched.iloc[0]["start"] == 300
+        assert len(unmatched) == 1
+        assert unmatched.iloc[0]["start"] == 5000
+
+    def test_full_outer_join_preserves_both_unmatched_full_cte(self):
+        """
+        GIVEN peaks and genes each with one matching and one non-matching interval
+        WHEN a FULL OUTER JOIN with INTERSECTS is transpiled (no wildcards, full-CTE)
+        THEN the SQL must contain FULL keyword and execution must return three
+             rows: one matched pair plus one unmatched from each side
+        """
+        sql = transpile(
+            """
+            SELECT a.start AS a_start, a."end" AS a_end,
+                   b.start AS b_start, b."end" AS b_end
+            FROM peaks a
+            FULL OUTER JOIN genes b ON a.interval INTERSECTS b.interval
+            """,
+            tables=[
+                Table("peaks", chrom_col="chrom", start_col="start", end_col="end"),
+                Table("genes", chrom_col="chrom", start_col="start", end_col="end"),
+            ],
+        )
+
+        assert "FULL" in sql.upper()
+
+        ctx = self._make_ctx(
+            peaks_data=[("chr1", 100, 500), ("chr1", 8000, 9000)],
+            genes_data=[("chr1", 300, 600), ("chr1", 5000, 6000)],
+        )
+        df = ctx.sql(sql).to_pandas()
+
+        assert len(df) == 3
+        matched = df[df["a_start"].notna() & df["b_start"].notna()]
+        left_only = df[df["a_start"].notna() & df["b_start"].isna()]
+        right_only = df[df["a_start"].isna() & df["b_start"].notna()]
+        assert len(matched) == 1
+        assert len(left_only) == 1
+        assert len(right_only) == 1
+
+    def test_full_outer_join_preserves_both_unmatched_bridge(self):
+        """
+        GIVEN peaks and genes each with one matching and one non-matching interval
+        WHEN a FULL OUTER JOIN with INTERSECTS is transpiled (wildcards, bridge path)
+        THEN the SQL must contain FULL keyword and execution must return three
+             rows: one matched pair plus one unmatched from each side
+        """
+        sql = transpile(
+            """
+            SELECT a.*, b.start AS b_start, b."end" AS b_end
+            FROM peaks a
+            FULL OUTER JOIN genes b ON a.interval INTERSECTS b.interval
+            """,
+            tables=[
+                Table("peaks", chrom_col="chrom", start_col="start", end_col="end"),
+                Table("genes", chrom_col="chrom", start_col="start", end_col="end"),
+            ],
+        )
+
+        assert "FULL" in sql.upper()
+
+        ctx = self._make_ctx(
+            peaks_data=[("chr1", 100, 500), ("chr1", 8000, 9000)],
+            genes_data=[("chr1", 300, 600), ("chr1", 5000, 6000)],
+        )
+        df = ctx.sql(sql).to_pandas()
+
+        assert len(df) == 3
+        matched = df[df["start"].notna() & df["b_start"].notna()]
+        left_only = df[df["start"].notna() & df["b_start"].isna()]
+        right_only = df[df["start"].isna() & df["b_start"].notna()]
+        assert len(matched) == 1
+        assert len(left_only) == 1
+        assert len(right_only) == 1
+
+    def test_left_join_all_unmatched_returns_all_left_rows(self):
+        """
+        GIVEN peaks where no intervals overlap any gene
+        WHEN a LEFT JOIN with INTERSECTS is transpiled
+        THEN all left rows must still appear with NULLs on the right
+        """
+        sql = transpile(
+            """
+            SELECT a.chrom, a.start, a."end", b.start AS b_start
+            FROM peaks a
+            LEFT JOIN genes b ON a.interval INTERSECTS b.interval
+            """,
+            tables=[
+                Table("peaks", chrom_col="chrom", start_col="start", end_col="end"),
+                Table("genes", chrom_col="chrom", start_col="start", end_col="end"),
+            ],
+        )
+
+        ctx = self._make_ctx(
+            peaks_data=[("chr1", 100, 200), ("chr1", 300, 400)],
+            genes_data=[("chr1", 500, 600)],
+        )
+        df = ctx.sql(sql).to_pandas()
+
+        assert len(df) == 2
+        assert df["b_start"].isna().all()
+
+
+class TestBinnedJoinAdditionalOnConditions:
+    """Regression tests: non-INTERSECTS conditions in ON must be preserved.
+
+    Bug: the rewrite replaces the entire ON clause with the binned equi-join
+    and overlap predicate, silently dropping any additional user conditions
+    like ``AND a.score > b.score``.
+    """
+
+    @staticmethod
+    def _make_ctx_with_score():
+        """Create a DataFusion context with peaks and genes tables that include a score column."""
+        import pyarrow as pa
+        from datafusion import SessionContext
+
+        schema = pa.schema(
+            [
+                ("chrom", pa.utf8()),
+                ("start", pa.int64()),
+                ("end", pa.int64()),
+                ("score", pa.int64()),
+            ]
+        )
+        ctx = SessionContext()
+        ctx.register_record_batches(
+            "peaks",
+            [
+                pa.table(
+                    {
+                        "chrom": ["chr1", "chr1"],
+                        "start": [100, 100],
+                        "end": [500, 500],
+                        "score": [10, 50],
+                    },
+                    schema=schema,
+                ).to_batches()
+            ],
+        )
+        ctx.register_record_batches(
+            "genes",
+            [
+                pa.table(
+                    {
+                        "chrom": ["chr1", "chr1"],
+                        "start": [200, 200],
+                        "end": [600, 600],
+                        "score": [30, 30],
+                    },
+                    schema=schema,
+                ).to_batches()
+            ],
+        )
+        return ctx
+
+    def test_additional_on_condition_preserved_full_cte(self):
+        """
+        GIVEN two overlapping intervals where only one pair satisfies score filter
+        WHEN INTERSECTS is combined with a.score > b.score in ON (no wildcards)
+        THEN the additional condition must survive the rewrite and filter results
+        """
+        sql = transpile(
+            """
+            SELECT a.chrom, a.start, a."end", a.score AS a_score, b.score AS b_score
+            FROM peaks a
+            JOIN genes b ON a.interval INTERSECTS b.interval AND a.score > b.score
+            """,
+            tables=[
+                Table("peaks", chrom_col="chrom", start_col="start", end_col="end"),
+                Table("genes", chrom_col="chrom", start_col="start", end_col="end"),
+            ],
+        )
+
+        assert "score" in sql.lower()
+
+        ctx = self._make_ctx_with_score()
+        df = ctx.sql(sql).to_pandas()
+
+        assert len(df) == 1
+        assert df.iloc[0]["a_score"] == 50
+
+    def test_additional_on_condition_preserved_bridge(self):
+        """
+        GIVEN two overlapping intervals where only one pair satisfies score filter
+        WHEN INTERSECTS is combined with a.score > b.score in ON (wildcards)
+        THEN the additional condition must survive the rewrite and filter results
+        """
+        sql = transpile(
+            """
+            SELECT a.*, b.score AS b_score
+            FROM peaks a
+            JOIN genes b ON a.interval INTERSECTS b.interval AND a.score > b.score
+            """,
+            tables=[
+                Table("peaks", chrom_col="chrom", start_col="start", end_col="end"),
+                Table("genes", chrom_col="chrom", start_col="start", end_col="end"),
+            ],
+        )
+
+        assert "score" in sql.lower()
+
+        ctx = self._make_ctx_with_score()
+        df = ctx.sql(sql).to_pandas()
+
+        assert len(df) == 1
+        assert df.iloc[0]["score"] == 50
+
+    def test_additional_on_condition_with_left_join(self):
+        """
+        GIVEN overlapping intervals with an extra ON condition that filters all matches
+        WHEN LEFT JOIN with INTERSECTS AND a.score > b.score is used
+        THEN unmatched left rows appear with NULL right columns
+        """
+        sql = transpile(
+            """
+            SELECT a.chrom, a.start, a.score AS a_score, b.score AS b_score
+            FROM peaks a
+            LEFT JOIN genes b
+                ON a.interval INTERSECTS b.interval AND a.score > b.score
+            """,
+            tables=[
+                Table("peaks", chrom_col="chrom", start_col="start", end_col="end"),
+                Table("genes", chrom_col="chrom", start_col="start", end_col="end"),
+            ],
+        )
+
+        ctx = self._make_ctx_with_score()
+        df = ctx.sql(sql).to_pandas().sort_values("a_score").reset_index(drop=True)
+
+        assert len(df) == 2
+        row_low = df[df["a_score"] == 10].iloc[0]
+        row_high = df[df["a_score"] == 50].iloc[0]
+        assert _is_null(row_low["b_score"])
+        assert row_high["b_score"] == 30
+
+    def test_multiple_additional_conditions_preserved(self):
+        """
+        GIVEN overlapping intervals with two extra ON conditions
+        WHEN INTERSECTS is combined with a.score > 20 AND b.score < 40 in ON
+        THEN both conditions must survive the rewrite
+        """
+        sql = transpile(
+            """
+            SELECT a.chrom, a.start, a.score AS a_score, b.score AS b_score
+            FROM peaks a
+            JOIN genes b
+                ON a.interval INTERSECTS b.interval
+                AND a.score > 20
+                AND b.score < 40
+            """,
+            tables=[
+                Table("peaks", chrom_col="chrom", start_col="start", end_col="end"),
+                Table("genes", chrom_col="chrom", start_col="start", end_col="end"),
+            ],
+        )
+
+        sql_lower = sql.lower()
+        assert "score" in sql_lower
+        assert "20" in sql
+        assert "40" in sql
+
+    def test_additional_on_condition_implicit_cross_join(self):
+        """
+        GIVEN overlapping intervals queried via implicit cross-join with extra WHERE
+        WHEN INTERSECTS is in WHERE alongside a.score > b.score
+        THEN the score condition must be preserved in the output SQL
+        """
+        sql = transpile(
+            """
+            SELECT a.chrom, a.start, a.score AS a_score, b.score AS b_score
+            FROM peaks a, genes b
+            WHERE a.interval INTERSECTS b.interval AND a.score > b.score
+            """,
+            tables=[
+                Table("peaks", chrom_col="chrom", start_col="start", end_col="end"),
+                Table("genes", chrom_col="chrom", start_col="start", end_col="end"),
+            ],
+        )
+
+        assert "score" in sql.lower()
+
+        ctx = self._make_ctx_with_score()
+        df = ctx.sql(sql).to_pandas()
+
+        assert len(df) == 1
+        assert df.iloc[0]["a_score"] == 50
+
+
+class TestBinnedJoinDistinctSemantics:
+    """Regression tests: unconditional DISTINCT can collapse legitimate duplicates.
+
+    Bug: the transformer always adds DISTINCT to deduplicate bin fan-out,
+    but this also collapses rows that are genuinely duplicated in the source
+    data, changing SQL bag semantics.
+    """
+
+    @staticmethod
+    def _make_ctx_with_duplicates():
+        """Create a DataFusion context where peaks has duplicate rows."""
+        import pyarrow as pa
+        from datafusion import SessionContext
+
+        schema = pa.schema(
+            [
+                ("chrom", pa.utf8()),
+                ("start", pa.int64()),
+                ("end", pa.int64()),
+            ]
+        )
+        ctx = SessionContext()
+        ctx.register_record_batches(
+            "peaks",
+            [
+                pa.table(
+                    {
+                        "chrom": ["chr1", "chr1"],
+                        "start": [100, 100],
+                        "end": [500, 500],
+                    },
+                    schema=schema,
+                ).to_batches()
+            ],
+        )
+        ctx.register_record_batches(
+            "genes",
+            [
+                pa.table(
+                    {
+                        "chrom": ["chr1"],
+                        "start": [200],
+                        "end": [600],
+                    },
+                    schema=schema,
+                ).to_batches()
+            ],
+        )
+        return ctx
+
+    @pytest.mark.xfail(
+        reason="Unconditional DISTINCT collapses legitimate duplicate rows",
+        strict=True,
+    )
+    def test_duplicate_rows_preserved_full_cte(self):
+        """
+        GIVEN peaks with two identical rows that both overlap one gene
+        WHEN an inner join with INTERSECTS is transpiled (no wildcards, full-CTE)
+        THEN both rows should be returned, matching naive cross-join behavior
+        """
+        ctx = self._make_ctx_with_duplicates()
+
+        naive_sql = """
+            SELECT a.chrom, a.start, a."end", b.start AS b_start
+            FROM peaks a, genes b
+            WHERE a.chrom = b.chrom AND a.start < b."end" AND a."end" > b.start
+        """
+        naive_df = ctx.sql(naive_sql).to_pandas()
+        assert len(naive_df) == 2
+
+        binned_sql = transpile(
+            """
+            SELECT a.chrom, a.start, a."end", b.start AS b_start
+            FROM peaks a
+            JOIN genes b ON a.interval INTERSECTS b.interval
+            """,
+            tables=[
+                Table("peaks", chrom_col="chrom", start_col="start", end_col="end"),
+                Table("genes", chrom_col="chrom", start_col="start", end_col="end"),
+            ],
+        )
+
+        binned_df = ctx.sql(binned_sql).to_pandas()
+        assert len(binned_df) == len(naive_df)
+
+    @pytest.mark.xfail(
+        reason="Unconditional DISTINCT collapses legitimate duplicate rows",
+        strict=True,
+    )
+    def test_duplicate_rows_preserved_bridge(self):
+        """
+        GIVEN peaks with two identical rows that both overlap one gene
+        WHEN an inner join with INTERSECTS is transpiled (wildcards, bridge path)
+        THEN both rows should be returned, matching naive cross-join behavior
+        """
+        ctx = self._make_ctx_with_duplicates()
+
+        naive_sql = """
+            SELECT a.chrom, a.start, a."end", b.start AS b_start
+            FROM peaks a, genes b
+            WHERE a.chrom = b.chrom AND a.start < b."end" AND a."end" > b.start
+        """
+        naive_df = ctx.sql(naive_sql).to_pandas()
+        assert len(naive_df) == 2
+
+        binned_sql = transpile(
+            """
+            SELECT a.*, b.start AS b_start
+            FROM peaks a
+            JOIN genes b ON a.interval INTERSECTS b.interval
+            """,
+            tables=[
+                Table("peaks", chrom_col="chrom", start_col="start", end_col="end"),
+                Table("genes", chrom_col="chrom", start_col="start", end_col="end"),
+            ],
+        )
+
+        binned_df = ctx.sql(binned_sql).to_pandas()
+        assert len(binned_df) == len(naive_df)
+
+    def test_non_duplicate_rows_unaffected(self):
+        """
+        GIVEN peaks with two distinct rows that both overlap one gene
+        WHEN an inner join with INTERSECTS is transpiled
+        THEN DISTINCT does not collapse them because they differ
+        """
+        import pyarrow as pa
+        from datafusion import SessionContext
+
+        schema = pa.schema(
+            [
+                ("chrom", pa.utf8()),
+                ("start", pa.int64()),
+                ("end", pa.int64()),
+            ]
+        )
+        ctx = SessionContext()
+        ctx.register_record_batches(
+            "peaks",
+            [
+                pa.table(
+                    {
+                        "chrom": ["chr1", "chr1"],
+                        "start": [100, 150],
+                        "end": [500, 550],
+                    },
+                    schema=schema,
+                ).to_batches()
+            ],
+        )
+        ctx.register_record_batches(
+            "genes",
+            [
+                pa.table(
+                    {
+                        "chrom": ["chr1"],
+                        "start": [200],
+                        "end": [600],
+                    },
+                    schema=schema,
+                ).to_batches()
+            ],
+        )
+
+        binned_sql = transpile(
+            """
+            SELECT a.chrom, a.start, a."end", b.start AS b_start
+            FROM peaks a
+            JOIN genes b ON a.interval INTERSECTS b.interval
+            """,
+            tables=[
+                Table("peaks", chrom_col="chrom", start_col="start", end_col="end"),
+                Table("genes", chrom_col="chrom", start_col="start", end_col="end"),
+            ],
+        )
+
+        df = ctx.sql(binned_sql).to_pandas()
+        assert len(df) == 2
+
+    def test_user_distinct_already_present_still_works(self):
+        """
+        GIVEN a query that already has SELECT DISTINCT
+        WHEN the binned join rewrite also adds DISTINCT
+        THEN the query must still execute correctly (no double-DISTINCT error)
+        """
+        import pyarrow as pa
+        from datafusion import SessionContext
+
+        schema = pa.schema(
+            [
+                ("chrom", pa.utf8()),
+                ("start", pa.int64()),
+                ("end", pa.int64()),
+            ]
+        )
+        ctx = SessionContext()
+        ctx.register_record_batches(
+            "peaks",
+            [
+                pa.table(
+                    {"chrom": ["chr1"], "start": [100], "end": [500]},
+                    schema=schema,
+                ).to_batches()
+            ],
+        )
+        ctx.register_record_batches(
+            "genes",
+            [
+                pa.table(
+                    {"chrom": ["chr1"], "start": [200], "end": [600]},
+                    schema=schema,
+                ).to_batches()
+            ],
+        )
+
+        binned_sql = transpile(
+            """
+            SELECT DISTINCT a.chrom, a.start, b.start AS b_start
+            FROM peaks a
+            JOIN genes b ON a.interval INTERSECTS b.interval
+            """,
+            tables=[
+                Table("peaks", chrom_col="chrom", start_col="start", end_col="end"),
+                Table("genes", chrom_col="chrom", start_col="start", end_col="end"),
+            ],
+        )
+
+        df = ctx.sql(binned_sql).to_pandas()
+        assert len(df) == 1
