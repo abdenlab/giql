@@ -21,10 +21,6 @@ from .utils.duckdb_loader import load_intervals
 duckdb = __import__("pytest").importorskip("duckdb")
 
 
-# ---------------------------------------------------------------------------
-# Strategies
-# ---------------------------------------------------------------------------
-
 CHROMS = ["chr1", "chr2", "chr3"]
 
 
@@ -60,11 +56,6 @@ def unique_interval_list_st(draw, max_size=60):
 interval_list_st = unique_interval_list_st()
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
 def _run_giql(intervals_a, intervals_b):
     """Run the binned-join INTERSECTS query via DuckDB and return result rows."""
     conn = duckdb.connect(":memory:")
@@ -91,11 +82,6 @@ def _run_bedtools(intervals_a, intervals_b):
         [i.to_tuple() for i in intervals_a],
         [i.to_tuple() for i in intervals_b],
     )
-
-
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
 
 
 @given(intervals_a=interval_list_st, intervals_b=interval_list_st)
@@ -164,7 +150,7 @@ def test_bin_size_does_not_affect_correctness(intervals_a, intervals_b, bin_size
             WHERE a.interval INTERSECTS b.interval
             """,
             tables=["intervals_a", "intervals_b"],
-            bin_size=bin_size,
+            intersects_bin_size=bin_size,
         )
         giql_result = conn.execute(sql).fetchall()
     finally:
@@ -270,11 +256,6 @@ def test_left_join_matches_bedtools_loj(intervals_a, intervals_b):
     assert comparison.match, comparison.failure_message()
 
 
-# ---------------------------------------------------------------------------
-# -v (inverse / anti-join)
-# ---------------------------------------------------------------------------
-
-
 @given(
     intervals_a=unique_interval_list_st(max_size=30),
     intervals_b=unique_interval_list_st(max_size=30),
@@ -316,11 +297,6 @@ def test_inverse_matches_bedtools_v(intervals_a, intervals_b):
 
     comparison = compare_results(giql_result, bedtools_result)
     assert comparison.match, comparison.failure_message()
-
-
-# ---------------------------------------------------------------------------
-# -wa -wb (write both A and B entries)
-# ---------------------------------------------------------------------------
 
 
 @given(
@@ -366,11 +342,6 @@ def test_write_both_matches_bedtools_wa_wb(intervals_a, intervals_b):
 
     comparison = compare_results(giql_result, bedtools_result)
     assert comparison.match, comparison.failure_message()
-
-
-# ---------------------------------------------------------------------------
-# -c (count overlaps)
-# ---------------------------------------------------------------------------
 
 
 @given(
@@ -420,11 +391,6 @@ def test_count_matches_bedtools_c(intervals_a, intervals_b):
     assert comparison.match, comparison.failure_message()
 
 
-# ---------------------------------------------------------------------------
-# -s (same strand)
-# ---------------------------------------------------------------------------
-
-
 @given(
     intervals_a=unique_interval_list_st(max_size=30),
     intervals_b=unique_interval_list_st(max_size=30),
@@ -468,11 +434,6 @@ def test_same_strand_matches_bedtools_s(intervals_a, intervals_b):
     assert comparison.match, comparison.failure_message()
 
 
-# ---------------------------------------------------------------------------
-# -S (opposite strand)
-# ---------------------------------------------------------------------------
-
-
 @given(
     intervals_a=unique_interval_list_st(max_size=30),
     intervals_b=unique_interval_list_st(max_size=30),
@@ -514,11 +475,6 @@ def test_opposite_strand_matches_bedtools_S(intervals_a, intervals_b):
 
     comparison = compare_results(giql_result, bedtools_result)
     assert comparison.match, comparison.failure_message()
-
-
-# ---------------------------------------------------------------------------
-# -f (minimum overlap fraction of A)
-# ---------------------------------------------------------------------------
 
 
 @given(
@@ -572,11 +528,6 @@ def test_fraction_a_matches_bedtools_f(intervals_a, intervals_b, fraction):
     assert comparison.match, f"fraction_a={fraction}: {comparison.failure_message()}"
 
 
-# ---------------------------------------------------------------------------
-# -F (minimum overlap fraction of B)
-# ---------------------------------------------------------------------------
-
-
 @given(
     intervals_a=unique_interval_list_st(max_size=20),
     intervals_b=unique_interval_list_st(max_size=20),
@@ -626,11 +577,6 @@ def test_fraction_b_matches_bedtools_F(intervals_a, intervals_b, fraction):
 
     comparison = compare_results(giql_result, bedtools_result)
     assert comparison.match, f"fraction_b={fraction}: {comparison.failure_message()}"
-
-
-# ---------------------------------------------------------------------------
-# -r (reciprocal overlap fraction)
-# ---------------------------------------------------------------------------
 
 
 @given(

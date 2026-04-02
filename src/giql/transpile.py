@@ -46,7 +46,8 @@ def _build_tables(tables: list[str | Table] | None) -> Tables:
 def transpile(
     giql: str,
     tables: list[str | Table] | None = None,
-    bin_size: int | None = None,
+    *,
+    intersects_bin_size: int | None = None,
 ) -> str:
     """Transpile a GIQL query to SQL.
 
@@ -62,7 +63,7 @@ def transpile(
         Table configurations. Strings use default column mappings
         (chrom, start, end, strand). Table objects provide custom
         column name mappings.
-    bin_size : int | None
+    intersects_bin_size : int | None
         Bin size for INTERSECTS equi-join optimization. When a query
         contains a full-table column-to-column INTERSECTS join, the
         transpiler rewrites it as a binned equi-join for performance.
@@ -108,7 +109,7 @@ def transpile(
             "SELECT a.*, b.* FROM peaks a JOIN genes b "
             "ON a.interval INTERSECTS b.interval",
             tables=["peaks", "genes"],
-            bin_size=100000,
+            intersects_bin_size=100000,
         )
     """
     # Build tables container
@@ -117,7 +118,7 @@ def transpile(
     # Initialize transformers with table configurations
     intersects_transformer = IntersectsBinnedJoinTransformer(
         tables_container,
-        bin_size=bin_size,
+        bin_size=intersects_bin_size,
     )
     merge_transformer = MergeTransformer(tables_container)
     cluster_transformer = ClusterTransformer(tables_container)

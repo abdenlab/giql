@@ -60,7 +60,7 @@ class TestTranspileBinnedJoin:
     def test_custom_bin_size(self):
         """
         GIVEN a GIQL query with column-to-column INTERSECTS join
-        WHEN transpiling with bin_size=100000
+        WHEN transpiling with intersects_bin_size=100000
         THEN should use 100000 in the range expressions
         """
         sql = transpile(
@@ -70,7 +70,7 @@ class TestTranspileBinnedJoin:
             JOIN genes b ON a.interval INTERSECTS b.interval
             """,
             tables=["peaks", "genes"],
-            bin_size=100000,
+            intersects_bin_size=100000,
         )
 
         assert "100000" in sql
@@ -179,7 +179,7 @@ class TestTranspileBinnedJoin:
     def test_bin_size_none_defaults_to_10000(self):
         """
         GIVEN a GIQL join query
-        WHEN transpiling with bin_size=None (explicit)
+        WHEN transpiling with intersects_bin_size=None (explicit)
         THEN should produce the same output as default (10000)
         """
         sql_default = transpile(
@@ -198,7 +198,7 @@ class TestTranspileBinnedJoin:
             JOIN genes b ON a.interval INTERSECTS b.interval
             """,
             tables=["peaks", "genes"],
-            bin_size=None,
+            intersects_bin_size=None,
         )
 
         assert sql_default == sql_none
@@ -260,7 +260,7 @@ class TestTranspileBinnedJoin:
 
     def test_invalid_bin_size_raises(self):
         """
-        GIVEN bin_size=0 or a negative value
+        GIVEN intersects_bin_size=0 or a negative value
         WHEN calling transpile
         THEN should raise ValueError
         """
@@ -268,14 +268,14 @@ class TestTranspileBinnedJoin:
             transpile(
                 "SELECT * FROM a JOIN b ON a.interval INTERSECTS b.interval",
                 tables=["a", "b"],
-                bin_size=0,
+                intersects_bin_size=0,
             )
 
         with pytest.raises(ValueError, match="positive"):
             transpile(
                 "SELECT * FROM a JOIN b ON a.interval INTERSECTS b.interval",
                 tables=["a", "b"],
-                bin_size=-1,
+                intersects_bin_size=-1,
             )
 
     def test_multi_join_all_intersects_rewritten(self):
@@ -522,7 +522,7 @@ class TestBinnedJoinDataFusion:
                 Table("peaks", chrom_col="chrom", start_col="start", end_col="end"),
                 Table("genes", chrom_col="chrom", start_col="start", end_col="end"),
             ],
-            bin_size=10000,
+            intersects_bin_size=10000,
         )
 
         df = ctx.sql(sql).to_pandas()
@@ -1361,7 +1361,7 @@ class TestBinnedJoinBinBoundaryRounding:
         """
         GIVEN interval A spanning many bins and interval B whose start
               falls exactly on a .5 division boundary (e.g., 621950/100)
-        WHEN INTERSECTS is evaluated with bin_size=100 on DuckDB
+        WHEN INTERSECTS is evaluated with intersects_bin_size=100 on DuckDB
         THEN the overlap must be found, not missed due to rounding
         """
         import duckdb
@@ -1387,7 +1387,7 @@ class TestBinnedJoinBinBoundaryRounding:
             JOIN intervals_b b ON a.interval INTERSECTS b.interval
             """,
             tables=["intervals_a", "intervals_b"],
-            bin_size=100,
+            intersects_bin_size=100,
         )
         result = conn.execute(sql).fetchall()
         conn.close()
@@ -1425,7 +1425,7 @@ class TestBinnedJoinBinBoundaryRounding:
             JOIN intervals_b b ON a.interval INTERSECTS b.interval
             """,
             tables=["intervals_a", "intervals_b"],
-            bin_size=1000,
+            intersects_bin_size=1000,
         )
         result = conn.execute(sql).fetchall()
         conn.close()
