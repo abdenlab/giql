@@ -656,16 +656,15 @@ class IntersectsBinnedJoinTransformer:
         if not isinstance(query, exp.Select):
             return query
 
-        # Outer joins need the pairs-CTE approach: compute matching key
-        # pairs via an INNER binned join (correctly deduplicated), then
-        # outer-join the original tables through the pairs CTE.  This
-        # avoids the bin fan-out that creates spurious NULL rows when an
-        # interval spans multiple bins but only matches in some of them.
-        if self._has_outer_join_intersects(query):
-            return self._transform_with_pairs(query)
-        if self._select_has_wildcards(query):
-            return self._transform_bridge(query)
-        return self._transform_full_cte(query)
+        # The pairs-CTE approach computes matching (left_key, right_key)
+        # pairs via an INNER binned join with DISTINCT on key columns,
+        # then joins the original tables through the pairs CTE.  This
+        # avoids adding SELECT DISTINCT to the output query, which would
+        # collapse legitimately different source rows that happen to
+        # have identical selected columns.  It also handles outer joins
+        # correctly by preventing bin fan-out from creating spurious
+        # NULL rows.
+        return self._transform_with_pairs(query)
 
     def _select_has_wildcards(self, query: exp.Select) -> bool:
         """Return True if any SELECT item is a wildcard (* or table.*)."""
@@ -685,12 +684,14 @@ class IntersectsBinnedJoinTransformer:
         return False
 
     def _transform_with_pairs(self, query: exp.Select) -> exp.Select:
-        """Transform using a pairs CTE for correct outer join semantics.
+        """Transform INTERSECTS joins using the pairs-CTE approach.
 
         Computes matching (left_key, right_key) pairs via an INNER
-        binned join with DISTINCT, then outer-joins the original tables
-        through this pairs CTE.  This avoids bin fan-out on the
-        preserved side of the outer join.
+        binned join with DISTINCT on key columns, then joins the
+        original tables through the pairs CTE.  Unlike the full-CTE
+        and bridge paths, this does NOT add SELECT DISTINCT to the
+        output — deduplication happens inside the pairs CTE on
+        (chrom, start, end) keys, preserving all source rows.
         """
         joins = query.args.get("joins") or []
         key_binned: dict[str, str] = {}
@@ -737,7 +738,6 @@ class IntersectsBinnedJoinTransformer:
 
         if rewrote_any:
             query.set("joins", new_joins)
-            query.set("distinct", exp.Distinct())
 
         return query
 

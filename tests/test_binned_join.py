@@ -304,11 +304,11 @@ class TestTranspileBinnedJoin:
         sql_upper = sql.upper()
         assert sql_upper.count("__GIQL_BIN") >= 4  # at least 2 per INTERSECTS join
 
-    def test_explicit_columns_uses_full_cte_not_bridge(self):
+    def test_explicit_columns_uses_pairs_cte(self):
         """
-        GIVEN a join query with only explicit columns in SELECT (no wildcards)
+        GIVEN a join query with only explicit columns in SELECT
         WHEN transpiling
-        THEN should use the 1-join full-CTE approach, not bridge CTEs
+        THEN should use pairs-CTE approach with key-only bin CTEs
         """
         sql = transpile(
             """
@@ -319,19 +319,15 @@ class TestTranspileBinnedJoin:
             tables=["peaks", "genes"],
         )
 
-        # Full-CTE names (alias-based, one join per INTERSECTS)
-        assert "__giql_a_binned" in sql
-        assert "__giql_b_binned" in sql
+        assert "__giql_peaks_bins" in sql
+        assert "__giql_genes_bins" in sql
+        assert "__giql_pairs_0" in sql
 
-        # Bridge CTEs must NOT be present
-        assert "__giql_peaks_bins" not in sql
-        assert "__giql_c0" not in sql
-
-    def test_wildcard_select_uses_bridge_not_full_cte(self):
+    def test_wildcard_select_uses_pairs_cte(self):
         """
-        GIVEN a join query with a wildcard expression in SELECT (a.*)
+        GIVEN a join query with wildcard expressions in SELECT
         WHEN transpiling
-        THEN should use the bridge CTE approach, not full-CTEs
+        THEN should use pairs-CTE approach, no __giql_bin in output
         """
         sql = transpile(
             """
@@ -342,13 +338,9 @@ class TestTranspileBinnedJoin:
             tables=["peaks", "genes"],
         )
 
-        # Bridge CTE names (table-based)
         assert "__giql_peaks_bins" in sql
         assert "__giql_genes_bins" in sql
-
-        # Full CTEs must NOT be present
-        assert "__giql_a_binned" not in sql
-        assert "__giql_b_binned" not in sql
+        assert "__giql_pairs_0" in sql
 
 
 class TestBinnedJoinDataFusion:
@@ -952,7 +944,7 @@ class TestBinnedJoinAdditionalOnConditions:
                         "chrom": ["chr1", "chr1"],
                         "start": [200, 200],
                         "end": [600, 600],
-                        "score": [30, 30],
+                        "score": [30, 60],
                     },
                     schema=schema,
                 ).to_batches()
@@ -1094,11 +1086,11 @@ class TestBinnedJoinAdditionalOnConditions:
 
 
 class TestBinnedJoinDistinctSemantics:
-    """Regression tests: unconditional DISTINCT can collapse legitimate duplicates.
+    """Tests that the pairs-CTE approach preserves standard SQL bag semantics.
 
-    Bug: the transformer always adds DISTINCT to deduplicate bin fan-out,
-    but this also collapses rows that are genuinely duplicated in the source
-    data, changing SQL bag semantics.
+    The pairs CTE deduplicates on key columns internally, so the output
+    query does not need SELECT DISTINCT.  This preserves legitimately
+    duplicated source rows.
     """
 
     @staticmethod
@@ -1143,14 +1135,10 @@ class TestBinnedJoinDistinctSemantics:
         )
         return ctx
 
-    @pytest.mark.xfail(
-        reason="Unconditional DISTINCT collapses legitimate duplicate rows",
-        strict=True,
-    )
     def test_duplicate_rows_preserved_full_cte(self):
         """
         GIVEN peaks with two identical rows that both overlap one gene
-        WHEN an inner join with INTERSECTS is transpiled (no wildcards, full-CTE)
+        WHEN an inner join with INTERSECTS is transpiled (no wildcards)
         THEN both rows should be returned, matching naive cross-join behavior
         """
         ctx = self._make_ctx_with_duplicates()
@@ -1178,14 +1166,10 @@ class TestBinnedJoinDistinctSemantics:
         binned_df = ctx.sql(binned_sql).to_pandas()
         assert len(binned_df) == len(naive_df)
 
-    @pytest.mark.xfail(
-        reason="Unconditional DISTINCT collapses legitimate duplicate rows",
-        strict=True,
-    )
     def test_duplicate_rows_preserved_bridge(self):
         """
         GIVEN peaks with two identical rows that both overlap one gene
-        WHEN an inner join with INTERSECTS is transpiled (wildcards, bridge path)
+        WHEN an inner join with INTERSECTS is transpiled (wildcards)
         THEN both rows should be returned, matching naive cross-join behavior
         """
         ctx = self._make_ctx_with_duplicates()
@@ -1322,6 +1306,76 @@ class TestBinnedJoinDistinctSemantics:
 
         df = ctx.sql(binned_sql).to_pandas()
         assert len(df) == 1
+
+    def test_count_requires_distinguishing_columns(self):
+        """
+        GIVEN one interval A overlapping three intervals B
+        WHEN the SELECT includes columns that distinguish each B match
+        THEN DISTINCT preserves all three matches and COUNT is correct
+        """
+        import duckdb
+
+        conn = duckdb.connect(":memory:")
+        conn.execute(
+            "CREATE TABLE regions "
+            '(chrom VARCHAR, "start" INTEGER, "end" INTEGER, '
+            "name VARCHAR)"
+        )
+        conn.execute(
+            "CREATE TABLE features "
+            '(chrom VARCHAR, "start" INTEGER, "end" INTEGER, '
+            "name VARCHAR)"
+        )
+        # One large region
+        conn.execute("INSERT INTO regions VALUES ('chr1', 100, 500, 'r1')")
+        # Three features overlapping it
+        conn.execute(
+            "INSERT INTO features VALUES "
+            "('chr1', 150, 200, 'f1'), "
+            "('chr1', 250, 300, 'f2'), "
+            "('chr1', 350, 400, 'f3')"
+        )
+
+        # With distinguishing columns: count should be 3
+        inner_sql = transpile(
+            """
+            SELECT r.chrom, r.start, r.end, r.name,
+                   f.start AS f_start, f.end AS f_end
+            FROM regions r
+            JOIN features f ON r.interval INTERSECTS f.interval
+            """,
+            tables=["regions", "features"],
+        )
+        count_sql = f"""
+            SELECT name, COUNT(*) AS cnt
+            FROM ({inner_sql})
+            GROUP BY chrom, "start", "end", name
+        """
+        result = conn.execute(count_sql).fetchall()
+        assert result[0][1] == 3, (
+            f"Expected count=3 with distinguishing columns, got {result[0][1]}"
+        )
+
+        # Without distinguishing columns: count is still correct
+        # because the pairs-CTE approach does not add SELECT DISTINCT
+        inner_sql_no_dist = transpile(
+            """
+            SELECT r.chrom, r.start, r.end, r.name, f.chrom AS f_chrom
+            FROM regions r
+            JOIN features f ON r.interval INTERSECTS f.interval
+            """,
+            tables=["regions", "features"],
+        )
+        count_sql_no_dist = f"""
+            SELECT name, COUNT(*) AS cnt
+            FROM ({inner_sql_no_dist})
+            GROUP BY chrom, "start", "end", name
+        """
+        result = conn.execute(count_sql_no_dist).fetchall()
+        assert result[0][1] == 3, (
+            f"Expected count=3 even without distinguishing columns, got {result[0][1]}"
+        )
+        conn.close()
 
 
 class TestBinnedJoinBinBoundaryRounding:
