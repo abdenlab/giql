@@ -28,10 +28,11 @@ An issue number MUST be provided as the sole argument (e.g., `/pr 103`). The iss
 1. Resolve target repository
 2. Identify the issue and branch
 3. Review the branch diff
-4. Draft the PR description
-5. Show draft for approval
-6. Push and create the draft PR
-7. Return the PR URL
+4. Gather knowledge graph context
+5. Draft the PR description
+6. Show draft for approval
+7. Push and create the draft PR
+8. Return the PR URL
 
 ### 1. Resolve target repository
 
@@ -85,7 +86,24 @@ git diff <merge-base>..HEAD --stat
 
 Analyze all committed source and test changes. Understand what was implemented, what was refactored, what tests were added or modified.
 
-### 4. Draft the PR description
+### 4. Gather knowledge graph context
+
+Check whether a knowledge graph is available:
+
+```bash
+test -f .understand-anything/knowledge-graph.json && echo "exists" || echo "missing"
+```
+
+- **If the graph exists** — query it for architectural context relevant to the branch changes:
+  1. Read the `"project"` section (first ~25 lines) for project metadata.
+  2. For each changed file path from the diff reviewed in step 3, search the graph by `"filePath"` field to find its node. Also search `"name"` and `"summary"` fields for the module names of changed files.
+  3. For each matched node ID, search the `"edges"` section to find connected nodes (imports, calls, depends_on) — this gives the 1-hop neighborhood and reveals cross-module impact.
+  4. Search `"layers"` to identify which architectural layers the matched nodes belong to.
+  5. Carry the matched nodes, edges, and layer context forward as supplementary context for drafting the PR description. The layer and dependency information helps write a more accurate summary and proposed-changes section. Do NOT present this raw context to the user.
+
+- **If the graph does not exist** — skip this step silently and continue. The skill MUST NOT prompt the user to generate a graph.
+
+### 5. Draft the PR description
 
 The PR title MUST match the associated issue title exactly with ` — Closes #<number>` appended to the end.
 
@@ -107,11 +125,11 @@ The PR description MUST contain a **Summary** and **Proposed changes** section. 
 
 The first word of every plain-language table entry MUST be capitalized. Table entries MUST NOT end with punctuation (no trailing periods, commas, etc.). Code spans in entries (e.g., `` `foo.bar()` is called ``) are exempt from the capitalization rule.
 
-### 5. Show draft for approval
+### 6. Show draft for approval
 
 The full PR (title, body, branch name) MUST be presented to the user. The PR MUST NOT be created until the user explicitly approves.
 
-### 6. Push and create the draft PR
+### 7. Push and create the draft PR
 
 Push the branch if not already pushed:
 
@@ -155,7 +173,7 @@ EOF
 
 The `--repo <target>` flag MUST be included when the target repo differs from the current repo.
 
-### 7. Return the PR URL
+### 8. Return the PR URL
 
 The PR URL MUST be printed so the user can access it directly.
 
