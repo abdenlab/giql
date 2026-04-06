@@ -99,23 +99,12 @@ Find all variants, with gene information where available:
    FROM variants v
    LEFT JOIN genes g ON v.interval INTERSECTS g.interval
 
-Deduplication Behavior
-~~~~~~~~~~~~~~~~~~~~~~
+Binned Join Internals
+~~~~~~~~~~~~~~~~~~~~~
 
-Column-to-column ``INTERSECTS`` joins use a binned equi-join strategy internally: each interval is assigned to one or more fixed-width bins, and the join is performed on ``(chrom, bin)`` pairs. Because an interval that spans a bin boundary belongs to more than one bin, a single source row can match the same result row more than once. GIQL adds ``SELECT DISTINCT`` automatically to remove these duplicate rows.
+Column-to-column ``INTERSECTS`` joins use a binned equi-join strategy internally: each interval is assigned to one or more fixed-width bins, and the join is performed on ``(chrom, bin)`` pairs. Because an interval that spans a bin boundary belongs to more than one bin, the raw binned join can produce duplicate matches for the same pair of source rows.
 
-This deduplication is usually transparent, but it has one observable side effect: ``DISTINCT`` operates on the entire set of selected columns, so rows that are genuinely identical across every selected column will also be collapsed into one. This matters when a table contains duplicate source records with no distinguishing column.
-
-To prevent unintended deduplication, include any column that makes rows distinguishable — such as a primary key, name, or score — in the ``SELECT`` list:
-
-.. code-block:: sql
-
-   -- score distinguishes otherwise-identical rows
-   SELECT v.chrom, v.start, v.end, v.score, g.name
-   FROM variants v
-   INNER JOIN genes g ON v.interval INTERSECTS g.interval
-
-If all columns are identical across two source rows (including any unique identifier), those rows represent the same logical record and collapsing them is correct behavior.
+GIQL eliminates these duplicates inside a **pairs CTE** that computes the set of distinct ``(left_key, right_key)`` pairs from the binned inner join, then joins the original tables back through this CTE. Because ``DISTINCT`` is applied only to the key pairs — not to the output query — all source rows are preserved, including genuinely duplicate records. Overlap counts, aggregations, and standard SQL bag semantics all work correctly without requiring any workaround.
 
 Related Operators
 ~~~~~~~~~~~~~~~~~
