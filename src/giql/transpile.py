@@ -11,6 +11,7 @@ from giql.generators import BaseGIQLGenerator
 from giql.table import Table
 from giql.table import Tables
 from giql.transformer import ClusterTransformer
+from giql.transformer import IntersectsBinnedJoinTransformer
 from giql.transformer import MergeTransformer
 
 
@@ -45,6 +46,8 @@ def _build_tables(tables: list[str | Table] | None) -> Tables:
 def transpile(
     giql: str,
     tables: list[str | Table] | None = None,
+    *,
+    intersects_bin_size: int | None = None,
 ) -> str:
     """Transpile a GIQL query to SQL.
 
@@ -60,6 +63,11 @@ def transpile(
         Table configurations. Strings use default column mappings
         (chrom, start, end, strand). Table objects provide custom
         column name mappings.
+    intersects_bin_size : int | None
+        Bin size for INTERSECTS equi-join optimization. When a query
+        contains a full-table column-to-column INTERSECTS join, the
+        transpiler rewrites it as a binned equi-join for performance.
+        Defaults to 10,000 if not specified.
 
     Returns
     -------
@@ -77,7 +85,7 @@ def transpile(
 
         sql = transpile(
             "SELECT * FROM peaks WHERE interval INTERSECTS 'chr1:1000-2000'",
-            tables=["peaks"]
+            tables=["peaks"],
         )
 
     Custom table configuration::
@@ -92,13 +100,26 @@ def transpile(
                     start_col="start",
                     end_col="end",
                 )
-            ]
+            ],
+        )
+
+    Binned equi-join with custom bin size::
+
+        sql = transpile(
+            "SELECT a.*, b.* FROM peaks a JOIN genes b "
+            "ON a.interval INTERSECTS b.interval",
+            tables=["peaks", "genes"],
+            intersects_bin_size=100000,
         )
     """
     # Build tables container
     tables_container = _build_tables(tables)
 
     # Initialize transformers with table configurations
+    intersects_transformer = IntersectsBinnedJoinTransformer(
+        tables_container,
+        bin_size=intersects_bin_size,
+    )
     merge_transformer = MergeTransformer(tables_container)
     cluster_transformer = ClusterTransformer(tables_container)
 
@@ -111,8 +132,9 @@ def transpile(
     except Exception as e:
         raise ValueError(f"Parse error: {e}\nQuery: {giql}") from e
 
-    # Apply transformations (MERGE first, then CLUSTER)
+    # Apply transformations
     try:
+        ast = intersects_transformer.transform(ast)
         # MERGE transformation (which may internally use CLUSTER)
         ast = merge_transformer.transform(ast)
         # CLUSTER transformation for any standalone CLUSTER expressions

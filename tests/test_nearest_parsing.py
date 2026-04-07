@@ -15,11 +15,11 @@ class TestNearestParsing:
 
     def test_parse_nearest_basic_syntax(self):
         """
-        GIVEN a GIQL query with NEAREST(genes, k=3)
+        GIVEN a GIQL query with NEAREST(genes, k := 3)
         WHEN parsing the query
         THEN should create GIQLNearest AST node with correct arguments
         """
-        sql = "SELECT * FROM peaks CROSS JOIN LATERAL NEAREST(genes, k=3)"
+        sql = "SELECT * FROM peaks CROSS JOIN LATERAL NEAREST(genes, k := 3)"
 
         ast = parse_one(sql, dialect=GIQLDialect)
 
@@ -50,11 +50,11 @@ class TestNearestParsing:
 
     def test_parse_nearest_with_literal_reference(self):
         """
-        GIVEN a GIQL query with NEAREST(genes, reference='chr1:1000-2000', k=3)
+        GIVEN a GIQL query with NEAREST(genes, reference := 'chr1:1000-2000', k := 3)
         WHEN parsing the query
         THEN should create GIQLNearest node with literal reference parameter
         """
-        sql = "SELECT * FROM NEAREST(genes, reference='chr1:1000-2000', k=3)"
+        sql = "SELECT * FROM NEAREST(genes, reference := 'chr1:1000-2000', k := 3)"
 
         ast = parse_one(sql, dialect=GIQLDialect)
 
@@ -80,11 +80,11 @@ class TestNearestParsing:
 
     def test_parse_nearest_with_max_distance(self):
         """
-        GIVEN a GIQL query with NEAREST(genes, k=5, max_distance=100000)
+        GIVEN a GIQL query with NEAREST(genes, k := 5, max_distance := 100000)
         WHEN parsing the query
         THEN should parse max_distance parameter correctly
         """
-        sql = "SELECT * FROM peaks CROSS JOIN LATERAL NEAREST(genes, k=5, max_distance=100000)"
+        sql = "SELECT * FROM peaks CROSS JOIN LATERAL NEAREST(genes, k := 5, max_distance := 100000)"
 
         ast = parse_one(sql, dialect=GIQLDialect)
 
@@ -106,11 +106,11 @@ class TestNearestParsing:
 
     def test_parse_nearest_with_stranded(self):
         """
-        GIVEN a GIQL query with NEAREST(genes, k=3, stranded=true)
+        GIVEN a GIQL query with NEAREST(genes, k := 3, stranded := true)
         WHEN parsing the query
         THEN should parse stranded parameter correctly
         """
-        sql = "SELECT * FROM peaks CROSS JOIN LATERAL NEAREST(genes, k=3, stranded=true)"
+        sql = "SELECT * FROM peaks CROSS JOIN LATERAL NEAREST(genes, k := 3, stranded := true)"
 
         ast = parse_one(sql, dialect=GIQLDialect)
 
@@ -140,10 +140,10 @@ class TestNearestParsing:
         SELECT * FROM peaks
         CROSS JOIN LATERAL NEAREST(
             genes,
-            reference=peaks.interval,
-            k=5,
-            max_distance=50000,
-            stranded=true
+            reference := peaks.interval,
+            k := 5,
+            max_distance := 50000,
+            stranded := true
         )
         """
 
@@ -174,7 +174,7 @@ class TestNearestParsing:
         WHEN parsing 'chr1:1000-2000:+' format
         THEN should parse the strand-annotated range correctly
         """
-        sql = "SELECT * FROM NEAREST(genes, reference='chr1:1000-2000:+', k=3)"
+        sql = "SELECT * FROM NEAREST(genes, reference := 'chr1:1000-2000:+', k := 3)"
 
         ast = parse_one(sql, dialect=GIQLDialect)
 
@@ -196,3 +196,51 @@ class TestNearestParsing:
         # Verify k parameter
         k_param = nearest_expr.args.get("k")
         assert k_param is not None, "Missing k parameter"
+
+    def test_from_arg_list_with_eq_as_positional(self):
+        """
+        GIVEN a GIQL query with NEAREST(genes, k=3) using = syntax
+        WHEN parsing the query
+        THEN should not treat k as a named parameter
+        """
+        # Act
+        ast = parse_one(
+            "SELECT * FROM peaks CROSS JOIN LATERAL NEAREST(genes, k=3)",
+            dialect=GIQLDialect,
+        )
+
+        # Assert
+        joins = ast.args.get("joins")
+        join = joins[0]
+        lateral_expr = join.this
+        nearest_expr = (
+            lateral_expr.this if hasattr(lateral_expr, "this") else lateral_expr
+        )
+        assert isinstance(nearest_expr, GIQLNearest)
+        assert nearest_expr.args.get("k") is None, (
+            "= should not be treated as named parameter assignment"
+        )
+
+    def test_from_arg_list_with_kwarg_syntax(self):
+        """
+        GIVEN a GIQL query with NEAREST(genes, k => 3) using => syntax
+        WHEN parsing the query
+        THEN should parse k as a named parameter
+        """
+        # Act
+        ast = parse_one(
+            "SELECT * FROM peaks CROSS JOIN LATERAL NEAREST(genes, k => 3)",
+            dialect=GIQLDialect,
+        )
+
+        # Assert
+        joins = ast.args.get("joins")
+        join = joins[0]
+        lateral_expr = join.this
+        nearest_expr = (
+            lateral_expr.this if hasattr(lateral_expr, "this") else lateral_expr
+        )
+        assert isinstance(nearest_expr, GIQLNearest)
+        assert nearest_expr.args.get("k") is not None, (
+            "Missing k parameter with => syntax"
+        )

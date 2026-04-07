@@ -137,7 +137,7 @@ Each GIQL operator expands to specific SQL patterns.
          SELECT peaks.name, nearest.name, nearest.distance
          FROM peaks
          CROSS JOIN LATERAL NEAREST(
-             genes, reference=peaks.interval, k=5
+             genes, reference := peaks.interval, k := 5
          ) AS nearest
 
    .. tab-item:: SQL

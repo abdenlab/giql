@@ -43,7 +43,7 @@ Quick Reference Table
      - ``SELECT a.*, b.* FROM a LEFT JOIN b ...``
      - :ref:`intersect-loj`
    * - ``closest -a A -b B -k N``
-     - ``CROSS JOIN LATERAL NEAREST(b, reference=a.interval, k=N)``
+     - ``CROSS JOIN LATERAL NEAREST(b, reference := a.interval, k := N)``
      - :ref:`closest-k`
    * - ``closest -a A -b B -d``
      - ``SELECT ..., DISTANCE(a.interval, b.interval) ...``
@@ -376,7 +376,7 @@ bedtools closest
        nearest.name AS gene,
        nearest.distance
    FROM peaks
-   CROSS JOIN LATERAL NEAREST(genes, reference=peaks.interval, k=3) AS nearest
+   CROSS JOIN LATERAL NEAREST(genes, reference := peaks.interval, k := 3) AS nearest
    ORDER BY peaks.name, nearest.distance
 
 .. _closest-d:
@@ -412,7 +412,7 @@ Or using NEAREST for just the closest:
        nearest.name AS gene,
        nearest.distance
    FROM peaks
-   CROSS JOIN LATERAL NEAREST(genes, reference=peaks.interval, k=1) AS nearest
+   CROSS JOIN LATERAL NEAREST(genes, reference := peaks.interval, k := 1) AS nearest
 
 ``-s``: Same strand only
 ~~~~~~~~~~~~~~~~~~~~~~~~
@@ -434,9 +434,9 @@ Or using NEAREST for just the closest:
    FROM peaks
    CROSS JOIN LATERAL NEAREST(
        genes,
-       reference=peaks.interval,
-       k=3,
-       stranded=true
+       reference := peaks.interval,
+       k := 3,
+       stranded := true
    ) AS nearest
    ORDER BY peaks.name, nearest.distance
 
@@ -500,7 +500,7 @@ Basic clustering
 
    SELECT
        *,
-       CLUSTER(interval, stranded=true) AS cluster_id
+       CLUSTER(interval, stranded := true) AS cluster_id
    FROM features
    ORDER BY chrom, strand, start
 
@@ -556,7 +556,7 @@ Basic merge
 
 .. code-block:: sql
 
-   SELECT MERGE(interval, stranded=true)
+   SELECT MERGE(interval, stranded := true)
    FROM features
 
 .. _merge-count:

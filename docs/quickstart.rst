@@ -184,22 +184,22 @@ Find k-nearest neighbors.
    -- Basic syntax
    CROSS JOIN LATERAL NEAREST(
        target_table,
-       reference=source.interval,
-       k=N
+       reference := source.interval,
+       k := N
    ) AS alias
 
    -- With parameters
    NEAREST(
        target_table,
-       reference=interval,
-       k=5,
-       max_distance=100000,
-       stranded=true,
-       signed=true
+       reference := interval,
+       k := 5,
+       max_distance := 100000,
+       stranded := true,
+       signed := true
    )
 
    -- Standalone
-   SELECT * FROM NEAREST(table, reference='chr1:1000-2000', k=5)
+   SELECT * FROM NEAREST(table, reference := 'chr1:1000-2000', k := 5)
 
 Parameters:
 
@@ -225,10 +225,10 @@ Assign cluster IDs to overlapping intervals.
    CLUSTER(interval, 1000) AS cluster_id
 
    -- Strand-specific
-   CLUSTER(interval, stranded=true) AS cluster_id
+   CLUSTER(interval, stranded := true) AS cluster_id
 
    -- Combined
-   CLUSTER(interval, 1000, stranded=true) AS cluster_id
+   CLUSTER(interval, 1000, stranded := true) AS cluster_id
 
 MERGE
 ~~~~~
@@ -244,7 +244,7 @@ Combine overlapping intervals.
    SELECT MERGE(interval, 1000) FROM table
 
    -- Strand-specific
-   SELECT MERGE(interval, stranded=true) FROM table
+   SELECT MERGE(interval, stranded := true) FROM table
 
    -- With aggregations
    SELECT MERGE(interval), COUNT(*), AVG(score) FROM table
@@ -329,7 +329,7 @@ K-Nearest Neighbors
 
    SELECT source.*, nearest.name, nearest.distance
    FROM source
-   CROSS JOIN LATERAL NEAREST(target, reference=source.interval, k=5) AS nearest
+   CROSS JOIN LATERAL NEAREST(target, reference := source.interval, k := 5) AS nearest
 
 Clustering
 ~~~~~~~~~~

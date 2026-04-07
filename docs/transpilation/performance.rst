@@ -224,9 +224,9 @@ The NEAREST operator can be expensive for large datasets. Optimize with:
    FROM peaks
    CROSS JOIN LATERAL NEAREST(
        genes,
-       reference=peaks.interval,
-       k=5,
-       max_distance=100000   -- Only search within 100kb
+       reference := peaks.interval,
+       k := 5,
+       max_distance := 100000   -- Only search within 100kb
    ) AS nearest
 
 **2. Request only the k you need:**
@@ -234,10 +234,10 @@ The NEAREST operator can be expensive for large datasets. Optimize with:
 .. code-block:: sql
 
    -- Good: Request exactly what you need
-   NEAREST(genes, reference=peaks.interval, k=3)
+   NEAREST(genes, reference := peaks.interval, k := 3)
 
    -- Wasteful: Request more than needed
-   NEAREST(genes, reference=peaks.interval, k=100)
+   NEAREST(genes, reference := peaks.interval, k := 100)
 
 **3. Index the target table:**
 
