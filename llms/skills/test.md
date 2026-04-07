@@ -36,11 +36,12 @@ An issue number MUST be provided as the sole argument (e.g., `/test 103`).
 
 1. Resolve issue, PR, and branch
 2. Analyze code changes
-3. Evaluate existing tests
-4. Generate test plan
-5. Enter plan mode
-6. Implement tests after approval
-7. Prompt the user to move onto the commit step
+3. Gather knowledge graph context
+4. Evaluate existing tests
+5. Generate test plan
+6. Enter plan mode
+7. Implement tests after approval
+8. Prompt the user to move onto the commit step
 
 ### 1. Resolve issue, PR, and branch
 
@@ -80,7 +81,24 @@ git diff <merge-base>..HEAD
 
 Read every changed source file to understand what was implemented. Note which modules have new or modified public APIs.
 
-### 3. Evaluate existing tests
+### 3. Gather knowledge graph context
+
+Check whether a knowledge graph is available:
+
+```bash
+test -f .understand-anything/knowledge-graph.json && echo "exists" || echo "missing"
+```
+
+- **If the graph exists** — query it for architectural context relevant to the changed files:
+  1. Read the `"project"` section (first ~25 lines) for project metadata.
+  2. For each changed file path identified in step 2, search the graph by `"filePath"` field to find its node. Also search `"name"` and `"summary"` fields for the module names of changed files.
+  3. For each matched node ID, search the `"edges"` section to find connected nodes (imports, calls, depends_on, tested_by) — this gives the 1-hop neighborhood and reveals testing relationships.
+  4. Search `"layers"` to identify which architectural layers the matched nodes belong to.
+  5. Carry the matched nodes, edges, and layer context forward as supplementary context for test evaluation and planning. Do NOT present this raw context to the user.
+
+- **If the graph does not exist** — skip this step silently and continue. The skill MUST NOT prompt the user to generate a graph.
+
+### 4. Evaluate existing tests
 
 Read the current test files for all affected modules. For each existing test:
 
@@ -89,7 +107,7 @@ Read the current test files for all affected modules. For each existing test:
 - Identify tests that **no longer apply** due to removed or significantly changed functionality — flag these for removal or rewriting.
 - Note gaps that require **new** test cases.
 
-### 4. Generate test plan
+### 5. Generate test plan
 
 Generate a Given-When-Then test plan internally. This plan is an agent planning artifact — do NOT write spec files to disk. The plan MUST:
 
@@ -98,7 +116,7 @@ Generate a Given-When-Then test plan internally. This plan is an agent planning 
 - Follow the structure in [Table Format](#table-format) below.
 - Follow the project test guide conventions.
 
-### 5. Enter plan mode
+### 6. Enter plan mode
 
 Call `EnterPlanMode` to present the test plan to the user for approval. The plan MUST clearly distinguish between:
 
@@ -107,7 +125,7 @@ Call `EnterPlanMode` to present the test plan to the user for approval. The plan
 - **Existing tests to remove** — no longer apply due to removed or changed functionality
 - **New tests to add** — cover genuinely uncovered behavior
 
-### 6. Implement tests after approval
+### 7. Implement tests after approval
 
 Once the user approves the plan, implement the test files:
 
@@ -115,7 +133,7 @@ Once the user approves the plan, implement the test files:
 - Add new test cases where the plan identifies coverage gaps.
 - Follow the project test guide for file naming, class organization, and test conventions.
 
-### 7. Prompt the user to move onto the commit step
+### 8. Prompt the user to move onto the commit step
 
 The user MUST be prompted with the next pipeline step: "Ready to commit? Run `/commit` to stage and commit the changes." DO NOT proceed on your own.
 

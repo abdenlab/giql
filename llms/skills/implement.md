@@ -33,9 +33,10 @@ An issue number MUST be provided as the sole argument (e.g., `/implement 103`).
 4. Generate branch name and create branch
 5. Assign the issue
 6. Gather context
-7. Enter plan mode
-8. Execute after approval
-9. Prompt the user to move onto the test or commit step
+7. Gather knowledge graph context
+8. Enter plan mode
+9. Execute after approval
+10. Prompt the user to move onto the test or commit step
 
 ### 1. Resolve target repository
 
@@ -127,7 +128,27 @@ Before entering plan mode, read enough of the codebase to plan confidently:
 - Read the project test guide (`@llm/guides/testguide-python.md`) to internalize testing conventions.
 - Read project-level instructions (`CLAUDE.md`) for build tooling, documentation style, and architecture context.
 
-### 7. Enter plan mode
+### 7. Gather knowledge graph context
+
+Check whether a knowledge graph is available:
+
+```bash
+test -f .understand-anything/knowledge-graph.json && echo "exists" || echo "missing"
+```
+
+- **If the graph exists** — query it for architectural context relevant to this implementation:
+  1. Read the `"project"` section (first ~25 lines) for project metadata.
+  2. Extract keywords from the issue title and body (fetched in step 2) and search the graph for matching nodes:
+     - Grep `"name"` and `"summary"` fields for keyword matches.
+     - Grep `"tags"` arrays for topic matches.
+     - Note the `id` values of all matching nodes.
+  3. For each matched node ID, search the `"edges"` section to find connected nodes (imports, calls, depends_on) — this gives the 1-hop neighborhood.
+  4. Search `"layers"` to identify which architectural layers the matched nodes belong to.
+  5. Carry the matched nodes, edges, and layer context forward as supplementary context for planning. Do NOT present this raw context to the user.
+
+- **If the graph does not exist** — skip this step silently and continue. The skill MUST NOT prompt the user to generate a graph.
+
+### 8. Enter plan mode
 
 Call `EnterPlanMode` to begin the planning phase. The execution plan:
 
@@ -136,11 +157,11 @@ Call `EnterPlanMode` to begin the planning phase. The execution plan:
 - MUST follow the testing conventions in the project test guide (`@llm/guides/testguide-python.md`). Test case IDs (e.g., WC-001, VP-001) MUST NOT be assigned — the docstring provides sufficient traceability without the maintenance burden of cross-PR ID schemes.
 - MUST include a verification section with the exact command(s) to run the test suite (see the project test guide for the runner command).
 
-### 8. Execute after approval
+### 9. Execute after approval
 
 Once the user approves the plan, implement each step sequentially.
 
-### 9. Prompt the user to move onto the test or commit step
+### 10. Prompt the user to move onto the test or commit step
 
 The user MUST be prompted with the next pipeline step: "Ready to generate tests? Run `/test <number>` to analyze coverage and write tests. Or ready to commit? Run `/commit` to stage and commit the changes." DO NOT proceed on your own.
 

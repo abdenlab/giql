@@ -22,6 +22,7 @@ llms/
 │   ├── implement.md     ← /implement — implement a planned PR or issue
 │   ├── test.md          ← /test — generate test specifications
 │   ├── commit.md        ← /commit — stage and commit changes atomically
+│   ├── understand-chat.md ← /understand-chat — query the knowledge graph
 │   └── audit.md         ← /audit — post-skill compliance checker
 ├── test-guides/
 │   └── python.md        ← Python testing conventions
@@ -39,6 +40,8 @@ The typical development flow follows this sequence:
 4. **`/test`** — Generate test specifications covering public APIs of new or changed modules.
 5. **`/commit`** — Stage and commit changes in disciplined, atomic commits grouped by logical kind.
 6. **`/pr` (update)** — Update the draft PR description and mark it ready for review.
+
+Each pipeline skill optionally gathers **knowledge graph context** when `.understand-anything/knowledge-graph.json` is present. The graph provides architectural metadata — component relationships, layer assignments, and dependency structures — that enriches issue scoping, implementation planning, test coverage decisions, commit grouping, and PR descriptions. When no graph exists, the step is skipped silently and the skill continues as before. The standalone `/understand-chat` skill provides interactive graph querying outside the pipeline.
 
 **`/audit`** is a cross-cutting quality gate. It can be invoked after any skill (`/audit commit`, `/audit implement`, etc.) to spawn a fresh subagent that independently checks whether the skill's requirements were met.
 
@@ -124,6 +127,7 @@ sequenceDiagram
 | [implement.md](skills/implement.md) | `/implement <number>` | Resolve a PR or issue number to a draft PR, check out the branch, and enter plan mode to design and execute the implementation. |
 | [test.md](skills/test.md) | `/test` | Generate comprehensive Given-When-Then test specifications for source modules, targeting 100% coverage of public APIs. |
 | [commit.md](skills/commit.md) | `/commit` | Analyse the working tree diff, group changes by logical kind, and create disciplined atomic commits with conventional-commit messages. |
+| [understand-chat.md](skills/understand-chat.md) | `/understand-chat <query>` | Query the project knowledge graph to understand codebase architecture, components, and relationships. Standalone utility, not part of the SDLC pipeline. |
 | [audit.md](skills/audit.md) | `/audit <skill>` | Spawn an independent subagent to evaluate whether a skill's MUST/SHALL requirements were met, using binary checklist decomposition. |
 
 ### Test guides

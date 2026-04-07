@@ -28,10 +28,11 @@ This skill is part of the development workflow pipeline: `/issue` → `/implemen
 1. Verify git state
 2. Create a staging branch
 3. Analyze the full diff
-4. Plan the commits
-5. Stage and commit sequentially
-6. Review and present
-7. Prompt the user to move onto the PR step
+4. Gather knowledge graph context
+5. Plan the commits
+6. Stage and commit sequentially
+7. Review and present
+8. Prompt the user to move onto the PR step
 
 ### 1. Verify git state
 
@@ -74,7 +75,24 @@ The diff MUST be read carefully. For each changed file, note:
 
 A commit plan MUST be built before touching anything. The goal is a sequence of commits where each one represents exactly one logical change.
 
-### 4. Plan the commits
+### 4. Gather knowledge graph context
+
+Check whether a knowledge graph is available:
+
+```bash
+test -f .understand-anything/knowledge-graph.json && echo "exists" || echo "missing"
+```
+
+- **If the graph exists** — query it for architectural context relevant to the changed files:
+  1. Read the `"project"` section (first ~25 lines) for project metadata.
+  2. For each changed file path from the diff analyzed in step 3, search the graph by `"filePath"` field to find its node. Also search `"name"` and `"summary"` fields for the module names of changed files.
+  3. For each matched node ID, search the `"edges"` section to find connected nodes (imports, calls, depends_on) — this gives the 1-hop neighborhood and reveals which modules are logically related.
+  4. Search `"layers"` to identify which architectural layers the matched nodes belong to.
+  5. Carry the matched nodes, edges, and layer context forward as supplementary context for commit planning. The layer and dependency information helps write more informative commit messages. Do NOT present this raw context to the user.
+
+- **If the graph does not exist** — skip this step silently and continue. The skill MUST NOT prompt the user to generate a graph.
+
+### 5. Plan the commits
 
 Group files and hunks into commits. The categories to use as a guide:
 
@@ -93,7 +111,7 @@ Mixed changes in a single file are common and MUST be handled with partial stagi
 
 Logical ordering MUST be considered: if commit B depends on commit A, A comes first. Generally: refactoring before feature work, build changes before code that uses them, tests after (or alongside) the code they test.
 
-### 5. Stage and commit sequentially
+### 6. Stage and commit sequentially
 
 For each planned commit, stage exactly the right changes and commit.
 
@@ -139,7 +157,7 @@ git commit -F /tmp/commit_msg.txt
 
 Repeat for each planned commit.
 
-### 6. Review and present
+### 7. Review and present
 
 After all commits:
 
@@ -161,7 +179,7 @@ Or if they prefer to review as a PR first, they can push the staging branch and 
 
 ---
 
-### 7. Prompt the user to move onto the PR step
+### 8. Prompt the user to move onto the PR step
 
 The user MUST be prompted with the next pipeline step: "Ready to create the PR? Run `/pr <number>` to review the changes and open a draft pull request." DO NOT proceed on your own.
 
