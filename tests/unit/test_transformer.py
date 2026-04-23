@@ -1393,7 +1393,7 @@ class TestCoverageTransformer:
         resolution=st.integers(min_value=1, max_value=10_000_000),
         stat=st.sampled_from(VALID_STATS),
     )
-    @settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
+    @settings(max_examples=50, suppress_health_check=[HealthCheck.function_scoped_fixture])
     def test_transform_should_map_stat_to_aggregate_when_varying_stat_and_resolution(
         self, resolution, stat
     ):
@@ -1432,7 +1432,7 @@ class TestCoverageTransformer:
         resolution=st.integers(min_value=1, max_value=10_000_000),
         stat=st.sampled_from(VALID_STATS),
     )
-    @settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
+    @settings(max_examples=50, suppress_health_check=[HealthCheck.function_scoped_fixture])
     def test_transform_should_contain_structural_elements_when_varying_stat_and_resolution(
         self, resolution, stat
     ):

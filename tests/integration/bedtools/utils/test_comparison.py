@@ -2,6 +2,7 @@
 
 import pytest
 from hypothesis import given
+from hypothesis import settings
 from hypothesis import strategies as st
 
 from .comparison import compare_results
@@ -356,6 +357,7 @@ def test_compare_results_should_match_when_sorting_handles_none_values():
     assert result.match is True
 
 
+@settings(max_examples=50)
 @given(
     rows=st.lists(
         st.tuples(

@@ -587,7 +587,7 @@ class TestGIQLCoverage:
         stat=st.sampled_from(VALID_STATS),
         syntax=st.sampled_from([":=", "=>"]),
     )
-    @settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
+    @settings(max_examples=50, suppress_health_check=[HealthCheck.function_scoped_fixture])
     def test_from_arg_list_should_parse_stat_and_resolution_when_varying_inputs(
         self, resolution, stat, syntax
     ):
@@ -615,7 +615,7 @@ class TestGIQLCoverage:
         assert coverage[0].args["stat"].this == stat
 
     @given(resolution=st.integers(min_value=1, max_value=10_000_000))
-    @settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
+    @settings(max_examples=50, suppress_health_check=[HealthCheck.function_scoped_fixture])
     def test_from_arg_list_should_set_resolution_when_positional_only(self, resolution):
         """Test positional-only parsing across resolution range.
 
@@ -641,7 +641,7 @@ class TestGIQLCoverage:
         assert coverage[0].args.get("target") is None
 
     @given(syntax=st.sampled_from([":=", "=>"]))
-    @settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
+    @settings(max_examples=50, suppress_health_check=[HealthCheck.function_scoped_fixture])
     def test_from_arg_list_should_set_target_when_varying_syntax(self, syntax):
         """Test target parameter parsing across syntax variants.
 

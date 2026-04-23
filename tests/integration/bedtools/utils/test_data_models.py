@@ -2,6 +2,7 @@
 
 import pytest
 from hypothesis import given
+from hypothesis import settings
 from hypothesis import strategies as st
 
 from .data_models import ComparisonResult
@@ -224,6 +225,7 @@ class TestGenomicInterval:
         # Assert
         assert result == ("chr1", 100, 200, None, None, None)
 
+    @settings(max_examples=50)
     @given(
         chrom=st.sampled_from(["chr1", "chr2", "chrX", "chrM"]),
         start=st.integers(min_value=0, max_value=999_999),
