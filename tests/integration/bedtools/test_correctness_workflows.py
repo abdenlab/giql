@@ -19,13 +19,18 @@ from .utils.duckdb_loader import load_intervals
 pytestmark = pytest.mark.integration
 
 
-def test_workflow_intersect_then_merge(duckdb_connection):
+def test_pipeline_should_match_bedtools_when_intersect_chained_into_merge(duckdb_connection):
+    """Test that chaining intersect into merge in GIQL matches the bedtools pipeline.
+
+    Given:
+        Two interval sets with overlaps on chr1
+    When:
+        GIQL intersects via CTE and then merges, compared against
+        bedtools intersect piped into bedtools merge
+    Then:
+        It should produce identical merged intervals
     """
-    GIVEN two interval sets with overlaps
-    WHEN GIQL: intersect then merge (via subquery)
-    vs bedtools: intersect | sort | merge
-    THEN final merged intervals match
-    """
+    # Arrange
     intervals_a = [
         GenomicInterval("chr1", 100, 200, "a1", 0, "+"),
         GenomicInterval("chr1", 150, 300, "a2", 0, "+"),
@@ -39,6 +44,7 @@ def test_workflow_intersect_then_merge(duckdb_connection):
     load_intervals(duckdb_connection, "intervals_a", [i.to_tuple() for i in intervals_a])
     load_intervals(duckdb_connection, "intervals_b", [i.to_tuple() for i in intervals_b])
 
+    # Act
     # bedtools pipeline: intersect then merge
     intersect_result = intersect(
         [i.to_tuple() for i in intervals_a],
@@ -61,17 +67,24 @@ def test_workflow_intersect_then_merge(duckdb_connection):
     )
     giql_result = duckdb_connection.execute(sql).fetchall()
 
+    # Assert
     comparison = compare_results(giql_result, bedtools_final)
     assert comparison.match, comparison.failure_message()
 
 
-def test_workflow_nearest_then_filter_distance(duckdb_connection):
+def test_pipeline_should_filter_by_distance_when_nearest_max_distance_applied(duckdb_connection):
+    """Test that NEAREST with max_distance matches bedtools closest filtered by distance.
+
+    Given:
+        Two interval sets where one B interval is within 50bp of an A
+        interval and another is far beyond that threshold
+    When:
+        GIQL runs NEAREST with max_distance := 50, compared against
+        bedtools closest -d post-filtered to distance <= 50
+    Then:
+        It should return only the close neighbor pair and drop the far one
     """
-    GIVEN two interval sets
-    WHEN GIQL: NEAREST with max_distance filter
-    vs bedtools: closest -d then filter by distance
-    THEN filtered nearest results match
-    """
+    # Arrange
     intervals_a = [
         GenomicInterval("chr1", 100, 200, "a1", 0, "+"),
         GenomicInterval("chr1", 500, 600, "a2", 0, "+"),
@@ -84,6 +97,7 @@ def test_workflow_nearest_then_filter_distance(duckdb_connection):
     load_intervals(duckdb_connection, "intervals_a", [i.to_tuple() for i in intervals_a])
     load_intervals(duckdb_connection, "intervals_b", [i.to_tuple() for i in intervals_b])
 
+    # Act
     # bedtools: closest -d, then filter distance <= 50
     bt_result = closest(
         [i.to_tuple() for i in intervals_a],
@@ -107,6 +121,7 @@ def test_workflow_nearest_then_filter_distance(duckdb_connection):
     )
     giql_result = duckdb_connection.execute(sql).fetchall()
 
+    # Assert
     # Both should return only a1->b_near (distance 20 <= 50)
     # a2->b_far (distance 300 > 50) should be excluded
     assert len(giql_result) == len(bedtools_filtered)
@@ -115,13 +130,18 @@ def test_workflow_nearest_then_filter_distance(duckdb_connection):
         assert "a1" in giql_names
 
 
-def test_workflow_merge_then_intersect(duckdb_connection):
+def test_pipeline_should_match_bedtools_when_merge_chained_into_intersect(duckdb_connection):
+    """Test that merging then intersecting in GIQL matches the bedtools pipeline.
+
+    Given:
+        An A interval set with overlapping intervals and a disjoint B set
+    When:
+        GIQL merges A via CTE then intersects with B, compared against
+        bedtools merge of A piped into bedtools intersect against B
+    Then:
+        It should produce matching interval coordinates
     """
-    GIVEN intervals with overlaps and a second interval set
-    WHEN GIQL: merge intervals then intersect with second set
-    vs bedtools: merge | intersect
-    THEN results match
-    """
+    # Arrange
     intervals_a = [
         GenomicInterval("chr1", 100, 200, "a1", 0, "+"),
         GenomicInterval("chr1", 180, 300, "a2", 0, "+"),
@@ -135,6 +155,7 @@ def test_workflow_merge_then_intersect(duckdb_connection):
     load_intervals(duckdb_connection, "intervals_a", [i.to_tuple() for i in intervals_a])
     load_intervals(duckdb_connection, "intervals_b", [i.to_tuple() for i in intervals_b])
 
+    # Act
     # bedtools pipeline: merge a, then intersect with b
     merged_a = merge([i.to_tuple() for i in intervals_a])
     bedtools_final = intersect(merged_a, [i.to_tuple() for i in intervals_b])
@@ -154,19 +175,26 @@ def test_workflow_merge_then_intersect(duckdb_connection):
     )
     giql_result = duckdb_connection.execute(sql).fetchall()
 
+    # Assert
     # MERGE outputs BED3 (chrom, start, end); compare only coordinates
     bedtools_coords = [row[:3] for row in bedtools_final]
     comparison = compare_results(giql_result, bedtools_coords)
     assert comparison.match, comparison.failure_message()
 
 
-def test_workflow_stranded_intersect_merge(duckdb_connection):
+def test_pipeline_should_preserve_strand_when_intersect_then_merge_stranded(duckdb_connection):
+    """Test that strand-aware intersect chained into merge matches the bedtools pipeline.
+
+    Given:
+        Two interval sets carrying strand information, with mixed plus
+        and minus strand overlaps
+    When:
+        GIQL performs a same-strand intersect via CTE then merges,
+        compared against bedtools intersect -s piped into bedtools merge
+    Then:
+        It should produce matching merged intervals honoring strand
     """
-    GIVEN intervals with strand info
-    WHEN GIQL: strand-specific intersect then merge
-    vs bedtools: intersect -s | sort | merge
-    THEN strand-aware pipeline results match
-    """
+    # Arrange
     intervals_a = [
         GenomicInterval("chr1", 100, 200, "a1", 0, "+"),
         GenomicInterval("chr1", 150, 300, "a2", 0, "+"),
@@ -180,6 +208,7 @@ def test_workflow_stranded_intersect_merge(duckdb_connection):
     load_intervals(duckdb_connection, "intervals_a", [i.to_tuple() for i in intervals_a])
     load_intervals(duckdb_connection, "intervals_b", [i.to_tuple() for i in intervals_b])
 
+    # Act
     # bedtools pipeline: intersect -s then merge
     intersect_result = intersect(
         [i.to_tuple() for i in intervals_a],
@@ -204,17 +233,25 @@ def test_workflow_stranded_intersect_merge(duckdb_connection):
     )
     giql_result = duckdb_connection.execute(sql).fetchall()
 
+    # Assert
     comparison = compare_results(giql_result, bedtools_final)
     assert comparison.match, comparison.failure_message()
 
 
-def test_workflow_intersect_filter_chrom_merge(duckdb_connection):
+def test_pipeline_should_match_bedtools_when_intersect_chrom_filter_then_merge(duckdb_connection):
+    """Test that intersect followed by a chr1 filter and a merge matches the bedtools pipeline.
+
+    Given:
+        Two interval sets spanning chr1 and chr2 with overlaps on both
+        chromosomes
+    When:
+        GIQL intersects with a chrom = 'chr1' predicate inside a CTE
+        and then merges, compared against bedtools intersect, then a
+        Python-side chr1 filter, then bedtools merge
+    Then:
+        It should produce matching merged intervals restricted to chr1
     """
-    GIVEN two interval sets on multiple chromosomes
-    WHEN GIQL: intersect, keep only chr1, then merge
-    vs bedtools: intersect | grep chr1 | sort | merge
-    THEN filtered-chromosome workflow matches
-    """
+    # Arrange
     intervals_a = [
         GenomicInterval("chr1", 100, 200, "a1", 0, "+"),
         GenomicInterval("chr1", 150, 300, "a2", 0, "+"),
@@ -228,6 +265,7 @@ def test_workflow_intersect_filter_chrom_merge(duckdb_connection):
     load_intervals(duckdb_connection, "intervals_a", [i.to_tuple() for i in intervals_a])
     load_intervals(duckdb_connection, "intervals_b", [i.to_tuple() for i in intervals_b])
 
+    # Act
     # bedtools pipeline: intersect, filter chr1, merge
     intersect_result = intersect(
         [i.to_tuple() for i in intervals_a],
@@ -252,6 +290,7 @@ def test_workflow_intersect_filter_chrom_merge(duckdb_connection):
     )
     giql_result = duckdb_connection.execute(sql).fetchall()
 
+    # Assert
     comparison = compare_results(giql_result, bedtools_final)
     assert comparison.match, comparison.failure_message()
 
