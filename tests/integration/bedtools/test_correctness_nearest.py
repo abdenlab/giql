@@ -73,20 +73,31 @@ def test_nearest_overlapping_distance_zero(duckdb_connection):
     assert bedtools_result[0][-1] == 0
 
 
-def test_nearest_adjacent_distance_zero(duckdb_connection):
+def test_nearest_should_find_adjacent_neighbor_when_intervals_touch(
+    duckdb_connection,
+):
+    """Test NEAREST matches bedtools for adjacent non-overlapping intervals.
+
+    Given:
+        Two adjacent intervals in half-open coordinates (a1 ending at
+        200, b1 starting at 200 — touching but not overlapping)
+    When:
+        GIQL NEAREST is compared to bedtools closest
+    Then:
+        It should identify b1 as a1's nearest neighbor, and bedtools
+        should report the canonical adjacent-interval distance of 1
+        (bedtools >= 2.31 counts the gap base in half-open coords)
     """
-    GIVEN adjacent intervals (touching, half-open coords)
-    WHEN GIQL NEAREST is compared to bedtools closest
-    THEN adjacent intervals report distance=0
-    """
+    # Arrange
     a = [GenomicInterval("chr1", 100, 200, "a1", 0, "+")]
     b = [GenomicInterval("chr1", 200, 300, "b1", 0, "+")]
+
+    # Act
     giql_result, bedtools_result = _load_and_query_nearest(duckdb_connection, a, b)
 
+    # Assert
     assert len(giql_result) == len(bedtools_result) == 1
-    # bedtools 2.31+ reports 1 for adjacent non-overlapping intervals
-    # in half-open coordinates (distance includes the gap base)
-    assert bedtools_result[0][-1] <= 1
+    assert bedtools_result[0][-1] == 1
     assert giql_result[0][9] == "b1"
 
 
