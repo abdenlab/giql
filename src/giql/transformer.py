@@ -6,6 +6,7 @@ SQL with CTEs.
 """
 
 import itertools
+from typing import Final
 
 from sqlglot import exp
 
@@ -21,7 +22,7 @@ from giql.expressions import Intersects
 from giql.table import Tables
 
 # Mapping from COVERAGE stat parameter to SQL aggregate function
-COVERAGE_STAT_MAP = {
+COVERAGE_STAT_MAP: Final[dict[str, str]] = {
     "count": "COUNT",
     "mean": "AVG",
     "sum": "SUM",
@@ -60,7 +61,7 @@ class ClusterTransformer:
 
         :param query:
             Query to extract table name from
-        :return:
+        :returns:
             Table name if FROM contains a simple table, None otherwise
         """
         from_clause = query.args.get("from_")
@@ -77,7 +78,7 @@ class ClusterTransformer:
 
         :param query:
             Query to extract table and column info from
-        :return:
+        :returns:
             Tuple of (chrom_col, start_col, end_col, strand_col)
         """
         table_name = self._get_table_name(query)
@@ -104,7 +105,7 @@ class ClusterTransformer:
 
         :param query:
             Parsed query AST
-        :return:
+        :returns:
             Transformed query AST
         """
         if not isinstance(query, exp.Select):
@@ -161,7 +162,7 @@ class ClusterTransformer:
 
         :param query:
             Query to search
-        :return:
+        :returns:
             List of CLUSTER expressions
         """
         cluster_exprs = []
@@ -185,7 +186,7 @@ class ClusterTransformer:
             Original query
         :param cluster_expr:
             CLUSTER expression to transform
-        :return:
+        :returns:
             Transformed query with CTEs
         """
         # Extract CLUSTER parameters
@@ -388,7 +389,7 @@ class MergeTransformer:
 
         :param query:
             Parsed query AST
-        :return:
+        :returns:
             Transformed query AST
         """
         if not isinstance(query, exp.Select):
@@ -446,7 +447,7 @@ class MergeTransformer:
 
         :param query:
             Query to search
-        :return:
+        :returns:
             List of MERGE expressions
         """
         merge_exprs = []
@@ -469,7 +470,7 @@ class MergeTransformer:
             Original query
         :param merge_expr:
             MERGE expression to transform
-        :return:
+        :returns:
             Transformed query with clustering and aggregation
         """
         # Extract MERGE parameters (same as CLUSTER)
@@ -1489,7 +1490,7 @@ class IntersectsBinnedJoinTransformer:
 
 
 class CoverageTransformer:
-    """Transforms queries containing COVERAGE into binned coverage queries.
+    """Transform queries containing COVERAGE into binned coverage queries.
 
     COVERAGE tiles the genome into fixed-width bins and aggregates overlapping
     intervals per bin:
@@ -1530,7 +1531,7 @@ class CoverageTransformer:
 
         :param query:
             Parsed query AST
-        :return:
+        :returns:
             Transformed query AST
         """
         if not isinstance(query, exp.Select):
@@ -1566,7 +1567,7 @@ class CoverageTransformer:
 
         :param query:
             Query to extract alias from
-        :return:
+        :returns:
             Table alias if present, None otherwise
         """
         from_clause = query.args.get("from_")
@@ -1592,7 +1593,7 @@ class CoverageTransformer:
 
         :param query:
             Query to search
-        :return:
+        :returns:
             List of COVERAGE expressions
         """
         coverage_exprs = []
@@ -1613,7 +1614,7 @@ class CoverageTransformer:
             Original query
         :param coverage_expr:
             COVERAGE expression to transform
-        :return:
+        :returns:
             Transformed query
         """
         # Extract parameters
@@ -1867,8 +1868,11 @@ class CoverageTransformer:
         )
 
         # LEFT JOIN source ON overlap conditions
-        source_table = exp.to_table(table_name) if table_name else exp.to_table("source")
-        source_table.set("alias", exp.TableAlias(this=exp.Identifier(this=source_ref)))
+        source_table = exp.to_table(table_name)
+        if table_alias:
+            source_table.set(
+                "alias", exp.TableAlias(this=exp.Identifier(this=source_ref))
+            )
 
         join_condition = exp.And(
             this=exp.And(

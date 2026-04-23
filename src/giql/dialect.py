@@ -13,8 +13,8 @@ from sqlglot.tokens import TokenType
 
 from giql.expressions import Contains
 from giql.expressions import GIQLCluster
-from giql.expressions import GIQLDistance
 from giql.expressions import GIQLCoverage
+from giql.expressions import GIQLDistance
 from giql.expressions import GIQLMerge
 from giql.expressions import GIQLNearest
 from giql.expressions import Intersects
