@@ -30,6 +30,16 @@ COVERAGE_STAT_MAP: Final[dict[str, str]] = {
     "max": "MAX",
 }
 
+# Typed SQLGlot node class for each SQL aggregate name so the transformer
+# emits dialect-correct renderings instead of opaque exp.Anonymous nodes.
+_AGG_NODE: Final[dict[str, type[exp.AggFunc]]] = {
+    "COUNT": exp.Count,
+    "AVG": exp.Avg,
+    "SUM": exp.Sum,
+    "MIN": exp.Min,
+    "MAX": exp.Max,
+}
+
 
 class ClusterTransformer:
     """Transforms queries containing CLUSTER into CTE-based queries.
@@ -1783,42 +1793,22 @@ class CoverageTransformer:
         )
         with_clause = exp.With(expressions=[bins_cte])
 
-        # Build the aggregate expression
+        # Build the aggregate expression using typed SQLGlot nodes so each
+        # dialect renders them correctly (exp.Anonymous bypasses dialect hooks).
         if stat == "count":
-            if target_col:
-                agg_expr = exp.Anonymous(
-                    this="COUNT",
-                    expressions=[
-                        exp.column(target_col, table=source_ref, quoted=True),
-                    ],
-                )
-            else:
-                agg_expr = exp.Anonymous(
-                    this="COUNT",
-                    expressions=[
-                        exp.column(chrom_col, table=source_ref, quoted=True),
-                    ],
-                )
+            agg_inner = exp.column(
+                target_col if target_col else chrom_col,
+                table=source_ref,
+                quoted=True,
+            )
+        elif target_col:
+            agg_inner = exp.column(target_col, table=source_ref, quoted=True)
         else:
-            if target_col:
-                agg_expr = exp.Anonymous(
-                    this=sql_agg,
-                    expressions=[
-                        exp.column(target_col, table=source_ref, quoted=True),
-                    ],
-                )
-            else:
-                agg_expr = exp.Anonymous(
-                    this=sql_agg,
-                    expressions=[
-                        exp.Sub(
-                            this=exp.column(end_col, table=source_ref, quoted=True),
-                            expression=exp.column(
-                                start_col, table=source_ref, quoted=True
-                            ),
-                        )
-                    ],
-                )
+            agg_inner = exp.Sub(
+                this=exp.column(end_col, table=source_ref, quoted=True),
+                expression=exp.column(start_col, table=source_ref, quoted=True),
+            )
+        agg_expr = _AGG_NODE[sql_agg](this=agg_inner)
 
         # Build main SELECT
         final_query = exp.Select()
