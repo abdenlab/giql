@@ -1951,7 +1951,12 @@ class CoverageTransformer:
             copy=False,
         )
 
-        # Attach the WITH clause
-        final_query.set("with_", with_clause)
+        # Attach the WITH clause, preserving any user CTEs from the input query
+        existing_with = query.args.get("with_")
+        if existing_with:
+            merged_ctes = [cte.copy() for cte in existing_with.expressions] + [bins_cte]
+            final_query.set("with_", exp.With(expressions=merged_ctes))
+        else:
+            final_query.set("with_", with_clause)
 
         return final_query

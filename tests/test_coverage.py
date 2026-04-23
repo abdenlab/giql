@@ -868,6 +868,40 @@ class TestCoverageTransformer:
                 f"bin [{bin_start},{bin_start + 500}) expected 0, got {value}"
             )
 
+    def test_transform_end_to_end_preserves_user_ctes(self, to_df):
+        """Test user-defined CTEs are preserved when COVERAGE wraps them.
+
+        Given:
+            A query with a user-defined CTE (selected) that pre-filters
+            the source, followed by SELECT COVERAGE(...) FROM selected
+        When:
+            COVERAGE is transpiled and executed
+        Then:
+            The user CTE should be preserved alongside __giql_bins and
+            the query should execute without "table not found" errors
+        """
+        # Arrange
+        giql_sql = transpile(
+            "WITH selected AS (SELECT chrom, start, \"end\" FROM features WHERE score > 50) "
+            "SELECT COVERAGE(interval, 1000) FROM selected",
+            tables=["features", "selected"],
+        )
+        conn = duckdb.connect(":memory:")
+        conn.execute(
+            "CREATE TABLE features AS "
+            "SELECT 'chr1' AS chrom, 100 AS start, 200 AS \"end\", 80 AS score "
+            "UNION ALL SELECT 'chr1', 1100, 1200, 10 "
+            "UNION ALL SELECT 'chr1', 2100, 2200, 90"
+        )
+
+        # Act
+        df = to_df(conn.execute(giql_sql))
+        conn.close()
+
+        # Assert
+        assert set(df["start"].tolist()) == {0, 1000, 2000}
+        assert df[df["start"] == 1000].iloc[0]["value"] == 0
+
     def test_transform_end_to_end_where_with_table_alias(self, to_df):
         """Test alias-qualified WHERE resolves in chroms subquery.
 
