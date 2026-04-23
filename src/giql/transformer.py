@@ -1666,8 +1666,10 @@ class CoverageTransformer:
         if not table_name:
             raise ValueError(
                 "COVERAGE requires a FROM clause that references a table "
-                "by name. Subqueries and VALUES clauses in FROM are not "
-                "yet supported."
+                "or CTE by name. Inline subqueries and VALUES clauses in "
+                "FROM are not yet supported — wrap the derivation in a "
+                "WITH clause (CTE) and select COVERAGE(...) from the CTE "
+                "by name instead."
             )
         table_alias = self._get_table_alias(query)
         source_ref = table_alias or table_name or "source"

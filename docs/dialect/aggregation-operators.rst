@@ -442,6 +442,25 @@ Assuming the source table includes a ``score`` column, compute coverage of high-
    FROM features
    WHERE score > 10
 
+Supported FROM clauses
+~~~~~~~~~~~~~~~~~~~~~~
+
+``COVERAGE`` requires a ``FROM`` clause that references a table or named CTE. Inline subqueries (``FROM (SELECT ...) AS sub``) and ``VALUES`` clauses are not supported — wrap the derivation in a ``WITH`` clause and select ``COVERAGE(...)`` from the CTE by name:
+
+.. code-block:: sql
+
+   -- Not supported: inline subquery in FROM
+   SELECT COVERAGE(interval, 1000)
+   FROM (SELECT * FROM features WHERE score > 50) AS filtered
+
+   -- Supported: same derivation wrapped in a CTE
+   WITH filtered AS (
+       SELECT * FROM features WHERE score > 50
+   )
+   SELECT COVERAGE(interval, 1000) FROM filtered
+
+Any ``WITH`` clauses you declare are preserved alongside the internal ``__giql_bins`` CTE in the transpiled SQL.
+
 Performance Notes
 ~~~~~~~~~~~~~~~~~
 
