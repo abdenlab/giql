@@ -1714,7 +1714,13 @@ class CoverageTransformer:
         )
 
         if table_name:
-            chroms_select.from_(exp.to_table(table_name), copy=False)
+            if table_alias:
+                chroms_select.from_(
+                    exp.alias_(exp.to_table(table_name), table_alias, table=True),
+                    copy=False,
+                )
+            else:
+                chroms_select.from_(exp.to_table(table_name), copy=False)
 
         # Apply WHERE from original query to the chroms subquery too,
         # qualifying unqualified column references with the table name

@@ -868,6 +868,39 @@ class TestCoverageTransformer:
                 f"bin [{bin_start},{bin_start + 500}) expected 0, got {value}"
             )
 
+    def test_transform_end_to_end_where_with_table_alias(self, to_df):
+        """Test alias-qualified WHERE resolves in chroms subquery.
+
+        Given:
+            A FROM clause with a table alias (features f) and a WHERE
+            qualifying a column by that alias (f.score > 10)
+        When:
+            COVERAGE is transpiled and executed
+        Then:
+            The query should run without binder errors and produce all
+            three bins with WHERE-filtering applied
+        """
+        # Arrange
+        giql_sql = transpile(
+            "SELECT COVERAGE(interval, 1000) FROM features f WHERE f.score > 10",
+            tables=["features"],
+        )
+        conn = duckdb.connect(":memory:")
+        conn.execute(
+            "CREATE TABLE features AS "
+            "SELECT 'chr1' AS chrom, 100 AS start, 200 AS \"end\", 50 AS score "
+            "UNION ALL SELECT 'chr1', 1100, 1200, 5 "
+            "UNION ALL SELECT 'chr1', 2100, 2200, 80"
+        )
+
+        # Act
+        df = to_df(conn.execute(giql_sql))
+        conn.close()
+
+        # Assert
+        assert len(df) == 3
+        assert set(df["start"].tolist()) == {0, 1000, 2000}
+
     def test_transform_end_to_end_where_preserves_zero_bins(self, to_df):
         """Test WHERE in ON preserves bins without matching intervals.
 
