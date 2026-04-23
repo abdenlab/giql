@@ -1657,11 +1657,18 @@ class CoverageTransformer:
         resolution_expr = coverage_expr.args.get("resolution")
         if isinstance(resolution_expr, exp.Literal):
             resolution = int(resolution_expr.this)
+        elif (
+            isinstance(resolution_expr, exp.Neg)
+            and isinstance(resolution_expr.this, exp.Literal)
+        ):
+            resolution = -int(resolution_expr.this.this)
         else:
-            try:
-                resolution = int(str(resolution_expr.this))
-            except (ValueError, AttributeError):
-                raise ValueError("COVERAGE resolution must be an integer literal")
+            raise ValueError("COVERAGE resolution must be an integer literal")
+
+        if resolution <= 0:
+            raise ValueError(
+                f"COVERAGE resolution must be positive, got {resolution}"
+            )
 
         stat_expr = coverage_expr.args.get("stat")
         if stat_expr:

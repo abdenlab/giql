@@ -767,6 +767,40 @@ class TestCoverageTransformer:
                 tables=["features"],
             )
 
+    def test_transform_with_negative_resolution(self):
+        """Test negative resolution raises descriptive error.
+
+        Given:
+            A COVERAGE query with resolution = -1
+        When:
+            Transpiled
+        Then:
+            It should raise ValueError matching "positive"
+        """
+        # Act & Assert
+        with pytest.raises(ValueError, match="positive"):
+            transpile(
+                "SELECT COVERAGE(interval, -1) FROM features",
+                tables=["features"],
+            )
+
+    def test_transform_with_zero_resolution(self):
+        """Test zero resolution raises descriptive error.
+
+        Given:
+            A COVERAGE query with resolution = 0
+        When:
+            Transpiled
+        Then:
+            It should raise ValueError matching "positive"
+        """
+        # Act & Assert
+        with pytest.raises(ValueError, match="positive"):
+            transpile(
+                "SELECT COVERAGE(interval, 0) FROM features",
+                tables=["features"],
+            )
+
     # ------------------------------------------------------------------
     # Functional / DuckDB end-to-end (CT-022 to CT-026)
     # ------------------------------------------------------------------
