@@ -136,11 +136,11 @@ create a view or CTE that trims each interval to its 5' end, then apply
 .. code-block:: sql
 
    WITH five_prime AS (
-       SELECT chrom, start, start + 1 AS end
+       SELECT chrom, "start", "start" + 1 AS "end"
        FROM features
        WHERE strand = '+'
        UNION ALL
-       SELECT chrom, end - 1 AS start, end
+       SELECT chrom, "end" - 1 AS "start", "end"
        FROM features
        WHERE strand = '-'
    )
