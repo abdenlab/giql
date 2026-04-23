@@ -353,13 +353,17 @@ This is useful for:
 
 The operator works as an aggregate function, returning one row per bin with the bin coordinates and the computed statistic.
 
+.. note::
+
+   COVERAGE depends on ``LATERAL`` plus ``generate_series`` for bin generation, which DuckDB and PostgreSQL both support. SQLite does not currently provide either primitive, so this operator is not yet available on the SQLite backend.
+
 Syntax
 ~~~~~~
 
 .. code-block:: sql
 
    -- Basic coverage (count overlapping intervals per bin)
-   SELECT COVERAGE(interval, resolution) FROM features
+   SELECT COVERAGE(interval, <bin_width>) FROM features
 
    -- With a named statistic (either := or => syntax)
    SELECT COVERAGE(interval, 1000, stat := 'mean') FROM features
@@ -377,8 +381,8 @@ Parameters
 **interval**
    A genomic column.
 
-**resolution**
-   Bin width in base pairs. Can be given as a positional or named parameter.
+**resolution** *(required)*
+   Bin width in base pairs — must be a positive integer literal. Can be given as a positional or named parameter (``COVERAGE(interval, 1000)`` or ``COVERAGE(interval, resolution := 1000)``). Omitting it, or supplying a non-positive value, raises ``ValueError`` at transpile time.
 
 **stat** *(optional)*
    Aggregation function applied to overlapping intervals per bin. One of:

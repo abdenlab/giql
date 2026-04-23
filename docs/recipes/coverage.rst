@@ -7,6 +7,8 @@ summaries using GIQL's ``COVERAGE`` operator.
 Basic Coverage
 --------------
 
+Binned coverage underpins most genome-wide signal summaries — read-pileup plots for ChIP-seq, exon-level depth in RNA-seq, and peak-density overviews across megabases. The recipes below start from a canonical interval-count and build toward more specialised summaries.
+
 Count Overlapping Features
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -45,6 +47,23 @@ Use a finer resolution of 100 bp:
    FROM reads
 
 **Use case:** High-resolution coverage tracks for visualisation.
+
+Named Resolution Parameter
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+For longer expressions, the resolution is easier to read when supplied by name alongside other named parameters:
+
+.. code-block:: sql
+
+   SELECT COVERAGE(
+       interval,
+       resolution := 500,
+       stat := 'mean',
+       target := 'score'
+   ) AS avg_score
+   FROM features
+
+Both ``:=`` and ``=>`` are accepted for named parameters.
 
 Coverage Statistics
 -------------------
@@ -116,7 +135,7 @@ Compute coverage for each strand separately by filtering:
 **Use case:** Strand-specific signal tracks for RNA-seq or stranded assays.
 
 Coverage of High-Scoring Features
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Restrict coverage to features above a quality threshold:
 
