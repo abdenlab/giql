@@ -11,6 +11,7 @@ from giql import transpile
 from .utils.bedtools_wrapper import closest
 from .utils.data_models import GenomicInterval
 from .utils.duckdb_loader import load_intervals
+from .utils.random_intervals import generate_random_intervals
 
 pytestmark = pytest.mark.integration
 
@@ -352,25 +353,20 @@ def test_nearest_should_match_bedtools_on_large_multi_chromosome_dataset(duckdb_
         It should produce the same row count as bedtools on the full dataset
     """
     # Arrange
-    import random
-
-    rng = random.Random(42)
-    intervals_a = []
-    intervals_b = []
-
-    for chrom_num in range(1, 4):
-        chrom = f"chr{chrom_num}"
-        for i in range(50):
-            start = rng.randint(0, 900_000)
-            size = rng.randint(100, 1000)
-            intervals_a.append(
-                GenomicInterval(chrom, start, start + size, f"a_{chrom_num}_{i}", 0, "+")
-            )
-            start = rng.randint(0, 900_000)
-            size = rng.randint(100, 1000)
-            intervals_b.append(
-                GenomicInterval(chrom, start, start + size, f"b_{chrom_num}_{i}", 0, "+")
-            )
+    intervals_a = generate_random_intervals(
+        seed=42,
+        prefix="a",
+        count_per_chrom=50,
+        n_chroms=3,
+        start_max=900_000,
+    )
+    intervals_b = generate_random_intervals(
+        seed=43,
+        prefix="b",
+        count_per_chrom=50,
+        n_chroms=3,
+        start_max=900_000,
+    )
 
     # Act
     giql_result, bedtools_result = _load_and_query_nearest(

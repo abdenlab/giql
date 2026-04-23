@@ -12,6 +12,7 @@ from .utils.bedtools_wrapper import merge
 from .utils.comparison import compare_results
 from .utils.data_models import GenomicInterval
 from .utils.duckdb_loader import load_intervals
+from .utils.random_intervals import generate_random_intervals
 
 pytestmark = pytest.mark.integration
 
@@ -278,19 +279,14 @@ def test_merge_should_match_bedtools_when_dataset_is_large(duckdb_connection):
         It should produce results matching bedtools on the full dataset
     """
     # Arrange
-    import random
-
-    rng = random.Random(42)
-    intervals = []
-
-    for chrom_num in range(1, 4):
-        chrom = f"chr{chrom_num}"
-        for i in range(100):
-            start = rng.randint(0, 500_000)
-            size = rng.randint(100, 2000)
-            intervals.append(
-                GenomicInterval(chrom, start, start + size, f"{chrom}_{i}", 0, "+")
-            )
+    intervals = generate_random_intervals(
+        seed=42,
+        prefix="chr",
+        count_per_chrom=100,
+        n_chroms=3,
+        start_max=500_000,
+        max_size=2000,
+    )
 
     # Act
     comparison = _run_merge_comparison(duckdb_connection, intervals)
