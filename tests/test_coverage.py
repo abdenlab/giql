@@ -767,6 +767,24 @@ class TestCoverageTransformer:
                 tables=["features"],
             )
 
+    def test_transform_with_subquery_from_raises(self):
+        """Test subquery in FROM raises a descriptive error.
+
+        Given:
+            A COVERAGE query whose FROM clause is an inline subquery
+        When:
+            Transpiled
+        Then:
+            It should raise ValueError matching "FROM clause"
+        """
+        # Act & Assert
+        with pytest.raises(ValueError, match="FROM clause"):
+            transpile(
+                "SELECT COVERAGE(interval, 1000) "
+                "FROM (SELECT * FROM features) AS sub",
+                tables=["features"],
+            )
+
     def test_transform_with_negative_resolution(self):
         """Test negative resolution raises descriptive error.
 

@@ -1665,6 +1665,12 @@ class CoverageTransformer:
             self.cluster_transformer._get_genomic_columns(query)
         )
         table_name = self.cluster_transformer._get_table_name(query)
+        if not table_name:
+            raise ValueError(
+                "COVERAGE requires a FROM clause that references a table "
+                "by name. Subqueries and VALUES clauses in FROM are not "
+                "yet supported."
+            )
         table_alias = self._get_table_alias(query)
         source_ref = table_alias or table_name or "source"
 
