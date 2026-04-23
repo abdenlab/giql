@@ -38,7 +38,17 @@ def _make_tables(*names: str, **custom: Table) -> Tables:
     return tables
 
 
-def _transform_and_sql(query: str, transformer_cls, tables: Tables | None = None) -> str:
+def _transpile_with_transformer(
+    query: str, transformer_cls, tables: Tables | None = None
+) -> str:
+    """Run the full parse-transform-generate pipeline for SQL-substring assertions.
+
+    Returned SQL reflects the composition of parser, ``transformer_cls``,
+    and :class:`BaseGIQLGenerator`. Tests that assert on SQL output are
+    exercising the end-to-end transpilation contract; if one of them
+    fails, check all three stages to localise the regression rather
+    than assuming the transformer is at fault.
+    """
     tables = tables or _make_tables("features")
     ast = parse_one(query, dialect=GIQLDialect)
     transformer = transformer_cls(tables)
@@ -94,7 +104,7 @@ class TestClusterTransformer:
             It should produce a result containing LAG and SUM window expressions
         """
         # Act
-        sql = _transform_and_sql(
+        sql = _transpile_with_transformer(
             "SELECT *, CLUSTER(interval) FROM features", ClusterTransformer
         )
 
@@ -114,7 +124,7 @@ class TestClusterTransformer:
             It should preserve the alias on the SUM window expression
         """
         # Act
-        sql = _transform_and_sql(
+        sql = _transpile_with_transformer(
             "SELECT *, CLUSTER(interval) AS cluster_id FROM features",
             ClusterTransformer,
         )
@@ -133,7 +143,7 @@ class TestClusterTransformer:
             It should add distance 1000 to the LAG result
         """
         # Act
-        sql = _transform_and_sql(
+        sql = _transpile_with_transformer(
             "SELECT *, CLUSTER(interval, 1000) FROM features",
             ClusterTransformer,
         )
@@ -154,7 +164,7 @@ class TestClusterTransformer:
             It should partition by chrom AND strand
         """
         # Act
-        sql = _transform_and_sql(
+        sql = _transpile_with_transformer(
             "SELECT *, CLUSTER(interval, stranded := true) FROM features",
             ClusterTransformer,
         )
@@ -227,7 +237,7 @@ class TestClusterTransformer:
         tables = _make_tables(features=custom)
 
         # Act
-        sql = _transform_and_sql(
+        sql = _transpile_with_transformer(
             "SELECT *, CLUSTER(interval) FROM features",
             ClusterTransformer,
             tables=tables,
@@ -249,7 +259,7 @@ class TestClusterTransformer:
             It should recursively transform the CTE subquery
         """
         # Act
-        sql = _transform_and_sql(
+        sql = _transpile_with_transformer(
             "WITH c AS (SELECT *, CLUSTER(interval) AS cid FROM features) "
             "SELECT * FROM c",
             ClusterTransformer,
@@ -271,7 +281,7 @@ class TestClusterTransformer:
             It should preserve the WHERE clause
         """
         # Act
-        sql = _transform_and_sql(
+        sql = _transpile_with_transformer(
             "SELECT *, CLUSTER(interval) FROM features WHERE score > 10",
             ClusterTransformer,
         )
@@ -290,7 +300,7 @@ class TestClusterTransformer:
             It should add missing required genomic columns to the CTE select list
         """
         # Act
-        sql = _transform_and_sql(
+        sql = _transpile_with_transformer(
             "SELECT name, CLUSTER(interval) AS cid FROM features",
             ClusterTransformer,
         )
@@ -322,7 +332,7 @@ class TestMergeTransformer:
             It should produce a result with GROUP BY, MIN(start), MAX(end)
         """
         # Act
-        sql = _transform_and_sql(
+        sql = _transpile_with_transformer(
             "SELECT MERGE(interval) FROM features", MergeTransformer
         )
 
@@ -343,7 +353,7 @@ class TestMergeTransformer:
             It should still produce valid output with fixed columns
         """
         # Act
-        sql = _transform_and_sql(
+        sql = _transpile_with_transformer(
             "SELECT MERGE(interval) AS merged FROM features",
             MergeTransformer,
         )
@@ -365,7 +375,7 @@ class TestMergeTransformer:
             It should pass the distance through to CLUSTER
         """
         # Act
-        sql = _transform_and_sql(
+        sql = _transpile_with_transformer(
             "SELECT MERGE(interval, 1000) FROM features",
             MergeTransformer,
         )
@@ -384,7 +394,7 @@ class TestMergeTransformer:
             strand should appear in GROUP BY and partition
         """
         # Act
-        sql = _transform_and_sql(
+        sql = _transpile_with_transformer(
             "SELECT MERGE(interval, stranded := true) FROM features",
             MergeTransformer,
         )
@@ -469,7 +479,7 @@ class TestMergeTransformer:
             It should preserve the WHERE clause in the clustered subquery
         """
         # Act
-        sql = _transform_and_sql(
+        sql = _transpile_with_transformer(
             "SELECT MERGE(interval) FROM features WHERE score > 10",
             MergeTransformer,
         )
@@ -488,7 +498,7 @@ class TestMergeTransformer:
             It should recursively transform the CTE subquery
         """
         # Act
-        sql = _transform_and_sql(
+        sql = _transpile_with_transformer(
             "WITH m AS (SELECT MERGE(interval) FROM features) SELECT * FROM m",
             MergeTransformer,
         )
