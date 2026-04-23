@@ -1525,21 +1525,6 @@ class CoverageTransformer:
         self.tables = tables
         self.cluster_transformer = ClusterTransformer(tables)
 
-    def _get_table_alias(self, query: exp.Select) -> str | None:
-        """Extract table alias from query's FROM clause.
-
-        :param query:
-            Query to extract alias from
-        :return:
-            Table alias if present, None otherwise
-        """
-        from_clause = query.args.get("from_")
-        if not from_clause:
-            return None
-        if isinstance(from_clause.this, exp.Table):
-            return from_clause.this.alias
-        return None
-
     def transform(self, query: exp.Expression) -> exp.Expression:
         """Transform query if it contains COVERAGE expressions.
 
@@ -1575,6 +1560,21 @@ class CoverageTransformer:
             raise ValueError("Multiple COVERAGE expressions not yet supported")
 
         return self._transform_for_coverage(query, coverage_exprs[0])
+
+    def _get_table_alias(self, query: exp.Select) -> str | None:
+        """Extract table alias from query's FROM clause.
+
+        :param query:
+            Query to extract alias from
+        :return:
+            Table alias if present, None otherwise
+        """
+        from_clause = query.args.get("from_")
+        if not from_clause:
+            return None
+        if isinstance(from_clause.this, exp.Table):
+            return from_clause.this.alias
+        return None
 
     def _transform_subqueries_in_node(self, node: exp.Expression):
         """Recursively transform subqueries within an expression node.
