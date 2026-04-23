@@ -4,8 +4,10 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from tests.integration.bedtools.utils.data_models import ComparisonResult
-from tests.integration.bedtools.utils.data_models import GenomicInterval
+from .data_models import ComparisonResult
+from .data_models import GenomicInterval
+
+pytestmark = pytest.mark.integration
 
 
 class TestGenomicInterval:
