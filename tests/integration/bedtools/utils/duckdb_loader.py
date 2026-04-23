@@ -24,4 +24,7 @@ def load_intervals(conn, table_name: str, intervals: list[tuple]) -> None:
             strand VARCHAR
         )
     """)
-    conn.executemany(f"INSERT INTO {table_name} VALUES (?,?,?,?,?,?)", intervals)
+    if intervals:
+        conn.executemany(
+            f"INSERT INTO {table_name} VALUES (?,?,?,?,?,?)", intervals
+        )

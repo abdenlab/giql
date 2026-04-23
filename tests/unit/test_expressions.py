@@ -22,8 +22,9 @@ from giql.expressions import Intersects
 from giql.expressions import SpatialPredicate
 from giql.expressions import SpatialSetPredicate
 from giql.expressions import Within
+from giql.transformer import COVERAGE_STAT_MAP
 
-VALID_STATS = ["count", "mean", "sum", "min", "max"]
+VALID_STATS = list(COVERAGE_STAT_MAP)
 
 
 class TestGenomicRange:

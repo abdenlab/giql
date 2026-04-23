@@ -102,16 +102,19 @@ def test_load_intervals_should_insert_all_rows_when_intervals_span_multiple_chro
     assert count == 3
 
 
-def test_load_intervals_should_raise_when_intervals_empty(conn):
-    """Test that load_intervals surfaces DuckDB's error on an empty input list.
+def test_load_intervals_should_create_empty_table_when_intervals_empty(conn):
+    """Test that load_intervals accepts an empty interval list.
 
     Given:
         A DuckDB connection and an empty list of intervals.
     When:
         load_intervals is called with the empty list.
     Then:
-        It should raise duckdb.InvalidInputException because executemany requires a non-empty list.
+        It should create the table with the default schema and zero rows.
     """
-    # Arrange, act, & assert
-    with pytest.raises(duckdb.InvalidInputException):
-        load_intervals(conn, "t", [])
+    # Arrange, act
+    load_intervals(conn, "t", [])
+
+    # Assert
+    count = conn.execute("SELECT COUNT(*) FROM t").fetchone()[0]
+    assert count == 0

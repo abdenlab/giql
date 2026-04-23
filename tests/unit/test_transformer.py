@@ -22,7 +22,7 @@ from giql.transformer import ClusterTransformer
 from giql.transformer import CoverageTransformer
 from giql.transformer import MergeTransformer
 
-VALID_STATS = ["count", "mean", "sum", "min", "max"]
+VALID_STATS = list(COVERAGE_STAT_MAP)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -1112,7 +1112,7 @@ class TestCoverageTransformer:
         When:
             COVERAGE count is transpiled and executed
         Then:
-            It should return count=2 for that bin
+            It should return exactly one bin with count=2
         """
         # Arrange
         giql_sql = transpile(
@@ -1131,6 +1131,8 @@ class TestCoverageTransformer:
         conn.close()
 
         # Assert
+        assert len(df) == 1
+        assert set(df["start"].tolist()) == {0}
         row = df[df["start"] == 0].iloc[0]
         assert row["value"] == 2
 
@@ -1138,11 +1140,13 @@ class TestCoverageTransformer:
         """Test zero-coverage bins are present via LEFT JOIN.
 
         Given:
-            A DuckDB table with intervals covering only some bins
+            A DuckDB table with intervals in bins [0,1000) and [2000,3000)
+            but none in bin [1000,2000), and COVERAGE resolution=1000
         When:
             COVERAGE count is transpiled and executed
         Then:
-            Bins beyond intervals should appear with count=0
+            All three bins should be returned and the middle bin should
+            report value=0
         """
         # Arrange
         giql_sql = transpile(
@@ -1153,7 +1157,7 @@ class TestCoverageTransformer:
         conn.execute(
             "CREATE TABLE features AS "
             "SELECT 'chr1' AS chrom, 100 AS start, 200 AS \"end\" "
-            "UNION ALL SELECT 'chr1', 1500, 2500"
+            "UNION ALL SELECT 'chr1', 2500, 2600"
         )
 
         # Act
@@ -1161,8 +1165,11 @@ class TestCoverageTransformer:
         conn.close()
 
         # Assert
-        assert len(df) >= 3
+        assert len(df) == 3
+        assert set(df["start"].tolist()) == {0, 1000, 2000}
         assert df[df["start"] == 0].iloc[0]["value"] == 1
+        assert df[df["start"] == 1000].iloc[0]["value"] == 0
+        assert df[df["start"] == 2000].iloc[0]["value"] == 1
 
     def test_transform_should_omit_trailing_bin_when_end_on_boundary(self, to_df):
         """Test no spurious trailing bin when MAX(end) is on a bin boundary.

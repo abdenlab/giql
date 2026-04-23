@@ -351,9 +351,10 @@ def test_closest_should_pair_a_with_nearest_b_and_distance():
 
     # Assert
     assert len(result) == 1
-    # Last field is distance
-    # bedtools 2.31+ may report 101 (1-based gap) vs 100 (0-based)
-    assert result[0][-1] in (100, 101)
+    # bedtools >= 2.31 reports N+1 for an N-base half-open gap between
+    # intervals (here 300 - 200 = 100, so expected distance is 101).
+    # The project pins bedtools >= 2.31.0 via pixi.
+    assert result[0][-1] == 101
 
 
 def test_closest_should_match_per_chromosome():
@@ -433,8 +434,10 @@ def test_closest_should_return_k_neighbors():
     result = closest(a, b, k=3)
 
     # Assert
-    # bedtools returns up to k nearest; exact count may vary by version
-    assert len(result) >= 2
+    # bedtools 2.31 with -t first collapses tied-distance candidates
+    # (b1 and b2 are both distance 51 from a1), so k=3 returns 2 rows
+    # for this specific fixture rather than 3.
+    assert len(result) == 2
 
 
 def test_bedtool_to_tuples_should_parse_bed3():
