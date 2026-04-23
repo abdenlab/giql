@@ -164,30 +164,11 @@ class GIQLCoverage(exp.Func):
 
     @classmethod
     def from_arg_list(cls, args):
-        """Parse argument list, handling named parameters.
-
-        :param args: List of arguments from parser
-        :return: GIQLCoverage instance with properly mapped arguments
-        """
-        kwargs = {}
-        positional_args = []
-
-        # Separate named (PropertyEQ for :=, Kwarg for =>) and positional arguments
-        for arg in args:
-            if isinstance(arg, (exp.PropertyEQ, exp.Kwarg)):
-                param_name = (
-                    arg.this.name if hasattr(arg.this, "name") else str(arg.this)
-                )
-                kwargs[param_name.lower()] = arg.expression
-            else:
-                positional_args.append(arg)
-
-        # Map positional arguments
+        kwargs, positional_args = _split_named_and_positional(args)
         if len(positional_args) > 0:
             kwargs["this"] = positional_args[0]
         if len(positional_args) > 1:
             kwargs["resolution"] = positional_args[1]
-
         return cls(**kwargs)
 
 
