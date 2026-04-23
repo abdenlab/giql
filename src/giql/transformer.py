@@ -1635,10 +1635,9 @@ class CoverageTransformer:
 
         stat_expr = coverage_expr.args.get("stat")
         if stat_expr:
-            if isinstance(stat_expr, exp.Literal):
-                stat = stat_expr.this.strip("'\"").lower()
-            else:
-                stat = str(stat_expr).strip("'\"").lower()
+            if not isinstance(stat_expr, exp.Literal):
+                raise ValueError("COVERAGE stat must be a string literal")
+            stat = stat_expr.this.strip("'\"").lower()
         else:
             stat = "count"
 
@@ -1653,10 +1652,9 @@ class CoverageTransformer:
         # Extract target parameter
         target_expr = coverage_expr.args.get("target")
         if target_expr:
-            if isinstance(target_expr, exp.Literal):
-                target_col = target_expr.this.strip("'\"")
-            else:
-                target_col = str(target_expr).strip("'\"")
+            if not isinstance(target_expr, exp.Literal):
+                raise ValueError("COVERAGE target must be a string literal")
+            target_col = target_expr.this.strip("'\"")
         else:
             target_col = None
 

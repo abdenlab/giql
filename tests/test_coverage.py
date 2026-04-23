@@ -767,6 +767,40 @@ class TestCoverageTransformer:
                 tables=["features"],
             )
 
+    def test_transform_with_non_literal_stat_raises(self):
+        """Test non-literal stat argument raises descriptive error.
+
+        Given:
+            A COVERAGE query where stat is an unquoted column reference
+        When:
+            Transpiled
+        Then:
+            It should raise ValueError matching "string literal"
+        """
+        # Act & Assert
+        with pytest.raises(ValueError, match="string literal"):
+            transpile(
+                "SELECT COVERAGE(interval, 1000, stat := score) FROM features",
+                tables=["features"],
+            )
+
+    def test_transform_with_non_literal_target_raises(self):
+        """Test non-literal target argument raises descriptive error.
+
+        Given:
+            A COVERAGE query where target is an unquoted column reference
+        When:
+            Transpiled
+        Then:
+            It should raise ValueError matching "string literal"
+        """
+        # Act & Assert
+        with pytest.raises(ValueError, match="string literal"):
+            transpile(
+                "SELECT COVERAGE(interval, 1000, target := score) FROM features",
+                tables=["features"],
+            )
+
     def test_transform_with_subquery_from_raises(self):
         """Test subquery in FROM raises a descriptive error.
 
