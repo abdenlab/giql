@@ -1805,10 +1805,7 @@ class CoverageTransformer:
                 agg_expr = exp.Anonymous(
                     this="COUNT",
                     expressions=[
-                        exp.Column(
-                            this=exp.Star(),
-                            table=exp.Identifier(this=source_ref),
-                        )
+                        exp.column(chrom_col, table=source_ref, quoted=True),
                     ],
                 )
         else:

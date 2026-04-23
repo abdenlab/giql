@@ -831,6 +831,43 @@ class TestCoverageTransformer:
         assert len(df) >= 3
         assert df[df["start"] == 0].iloc[0]["value"] == 1
 
+    def test_transform_end_to_end_zero_bin_value_is_zero(self, to_df):
+        """Test bins with no matching source rows return value=0.
+
+        Given:
+            A DuckDB table with intervals at chr1:100-200 and chr1:2500-2600
+            and COVERAGE resolution=500 (bins [0,500), [500,1000), ...,
+            [2500,3000))
+        When:
+            COVERAGE count is transpiled and executed
+        Then:
+            Bins [500,1000), [1000,1500), [1500,2000), [2000,2500) should
+            all report value=0
+        """
+        # Arrange
+        giql_sql = transpile(
+            "SELECT COVERAGE(interval, 500) FROM features",
+            tables=["features"],
+        )
+        conn = duckdb.connect(":memory:")
+        conn.execute(
+            "CREATE TABLE features AS "
+            "SELECT 'chr1' AS chrom, 100 AS start, 200 AS \"end\" "
+            "UNION ALL SELECT 'chr1', 2500, 2600"
+        )
+
+        # Act
+        df = to_df(conn.execute(giql_sql))
+        conn.close()
+
+        # Assert
+        empty_bin_starts = {500, 1000, 1500, 2000}
+        for bin_start in empty_bin_starts:
+            value = df[df["start"] == bin_start].iloc[0]["value"]
+            assert value == 0, (
+                f"bin [{bin_start},{bin_start + 500}) expected 0, got {value}"
+            )
+
     def test_transform_end_to_end_where_preserves_zero_bins(self, to_df):
         """Test WHERE in ON preserves bins without matching intervals.
 
