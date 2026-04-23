@@ -1743,14 +1743,20 @@ class CoverageTransformer:
         # FROM __giql_chroms subquery
         bins_select.from_(chroms_subquery, copy=False)
 
-        # CROSS JOIN LATERAL generate_series(0, __max_end, resolution) AS t(bin_start)
+        # CROSS JOIN LATERAL generate_series(0, __max_end - 1, resolution)
+        # AS t(bin_start) — upper bound subtracts 1 because generate_series
+        # is endpoint-inclusive and we don't want a trailing empty bin when
+        # MAX(end) lands exactly on a bin boundary.
         lateral_join = exp.Join(
             this=exp.Lateral(
                 this=exp.Anonymous(
                     this="generate_series",
                     expressions=[
                         exp.Literal.number(0),
-                        exp.column("__max_end"),
+                        exp.Sub(
+                            this=exp.column("__max_end"),
+                            expression=exp.Literal.number(1),
+                        ),
                         exp.Literal.number(resolution),
                     ],
                 ),

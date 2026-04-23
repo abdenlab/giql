@@ -865,6 +865,37 @@ class TestCoverageTransformer:
         assert len(df) >= 3
         assert df[df["start"] == 0].iloc[0]["value"] == 1
 
+    def test_transform_end_to_end_no_trailing_bin_on_boundary(self, to_df):
+        """Test no spurious trailing bin when MAX(end) is on a bin boundary.
+
+        Given:
+            An interval at chr1:100-1000 with resolution=1000 — MAX(end)
+            lands exactly on a bin boundary
+        When:
+            COVERAGE is transpiled and executed
+        Then:
+            Exactly one bin [0,1000) should be returned with value=1
+        """
+        # Arrange
+        giql_sql = transpile(
+            "SELECT COVERAGE(interval, 1000) FROM features",
+            tables=["features"],
+        )
+        conn = duckdb.connect(":memory:")
+        conn.execute(
+            "CREATE TABLE features AS "
+            "SELECT 'chr1' AS chrom, 100 AS start, 1000 AS \"end\""
+        )
+
+        # Act
+        df = to_df(conn.execute(giql_sql))
+        conn.close()
+
+        # Assert
+        assert len(df) == 1
+        assert df.iloc[0]["start"] == 0
+        assert df.iloc[0]["value"] == 1
+
     def test_transform_end_to_end_zero_bin_value_is_zero(self, to_df):
         """Test bins with no matching source rows return value=0.
 
