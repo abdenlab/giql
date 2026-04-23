@@ -1523,21 +1523,7 @@ class CoverageTransformer:
             Table configurations for column mapping
         """
         self.tables = tables
-
-    def _get_table_name(self, query: exp.Select) -> str | None:
-        """Extract table name from query's FROM clause.
-
-        :param query:
-            Query to extract table name from
-        :return:
-            Table name if FROM contains a simple table, None otherwise
-        """
-        from_clause = query.args.get("from_")
-        if not from_clause:
-            return None
-        if isinstance(from_clause.this, exp.Table):
-            return from_clause.this.name
-        return None
+        self.cluster_transformer = ClusterTransformer(tables)
 
     def _get_table_alias(self, query: exp.Select) -> str | None:
         """Extract table alias from query's FROM clause.
@@ -1553,29 +1539,6 @@ class CoverageTransformer:
         if isinstance(from_clause.this, exp.Table):
             return from_clause.this.alias
         return None
-
-    def _get_genomic_columns(self, query: exp.Select) -> tuple[str, str, str]:
-        """Get genomic column names from table config or defaults.
-
-        :param query:
-            Query to extract table and column info from
-        :return:
-            Tuple of (chrom_col, start_col, end_col)
-        """
-        table_name = self._get_table_name(query)
-
-        chrom_col = DEFAULT_CHROM_COL
-        start_col = DEFAULT_START_COL
-        end_col = DEFAULT_END_COL
-
-        if table_name:
-            table = self.tables.get(table_name)
-            if table:
-                chrom_col = table.chrom_col
-                start_col = table.start_col
-                end_col = table.end_col
-
-        return chrom_col, start_col, end_col
 
     def transform(self, query: exp.Expression) -> exp.Expression:
         """Transform query if it contains COVERAGE expressions.
@@ -1698,8 +1661,10 @@ class CoverageTransformer:
             target_col = None
 
         # Get column names and table info
-        chrom_col, start_col, end_col = self._get_genomic_columns(query)
-        table_name = self._get_table_name(query)
+        chrom_col, start_col, end_col, _ = (
+            self.cluster_transformer._get_genomic_columns(query)
+        )
+        table_name = self.cluster_transformer._get_table_name(query)
         table_alias = self._get_table_alias(query)
         source_ref = table_alias or table_name or "source"
 
