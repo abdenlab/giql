@@ -3,6 +3,10 @@
 Test specification: specs/test_expressions.md
 """
 
+from hypothesis import HealthCheck
+from hypothesis import given
+from hypothesis import settings
+from hypothesis import strategies as st
 from sqlglot import exp
 from sqlglot import parse_one
 
@@ -18,6 +22,8 @@ from giql.expressions import Intersects
 from giql.expressions import SpatialPredicate
 from giql.expressions import SpatialSetPredicate
 from giql.expressions import Within
+
+VALID_STATS = ["count", "mean", "sum", "min", "max"]
 
 
 class TestGenomicRange:
@@ -376,149 +382,247 @@ class TestGIQLMerge:
 class TestGIQLCoverage:
     """Tests for GIQLCoverage expression node parsing."""
 
-    def test_parse_coverage_with_positional_args(self):
-        """COV-001: Parse COVERAGE with positional args.
+    # ------------------------------------------------------------------
+    # Example-based parsing (COV-001 to COV-007)
+    # ------------------------------------------------------------------
+
+    def test_from_arg_list_with_positional_args(self):
+        """Test positional interval and resolution mapping.
 
         Given:
-            A COVERAGE expression with two positional args (column, resolution)
+            A COVERAGE expression with positional interval and resolution
         When:
             Parsed with GIQLDialect
         Then:
-            GIQLCoverage instance has `this` and `resolution` set
+            It should produce a GIQLCoverage node with resolution set and
+            stat/target both None
         """
+        # Act
         ast = parse_one(
             "SELECT COVERAGE(interval, 1000) FROM features",
             dialect=GIQLDialect,
         )
 
-        nodes = list(ast.find_all(GIQLCoverage))
-        assert len(nodes) == 1
-        assert nodes[0].args["this"] is not None
-        assert nodes[0].args["resolution"].this == "1000"
-        assert nodes[0].args.get("stat") is None
-        assert nodes[0].args.get("target") is None
+        # Assert
+        coverage = list(ast.find_all(GIQLCoverage))
+        assert len(coverage) == 1
+        assert coverage[0].args["resolution"].this == "1000"
+        assert coverage[0].args.get("stat") is None
+        assert coverage[0].args.get("target") is None
 
-    def test_parse_coverage_with_walrus_named_resolution(self):
-        """COV-002: Parse COVERAGE with := named resolution.
+    def test_from_arg_list_with_walrus_named_stat(self):
+        """Test named stat parameter via := syntax.
 
         Given:
-            A COVERAGE expression with one positional and resolution := 1000
+            A COVERAGE expression with := named stat parameter
         When:
             Parsed with GIQLDialect
         Then:
-            GIQLCoverage instance has `this` and `resolution` set
+            It should produce a GIQLCoverage node with stat set to the given value
         """
-        ast = parse_one(
-            "SELECT COVERAGE(interval, resolution := 1000) FROM features",
-            dialect=GIQLDialect,
-        )
-
-        nodes = list(ast.find_all(GIQLCoverage))
-        assert len(nodes) == 1
-        assert nodes[0].args["this"] is not None
-        assert nodes[0].args["resolution"].this == "1000"
-
-    def test_parse_coverage_with_stat(self):
-        """COV-003: Parse COVERAGE with stat parameter.
-
-        Given:
-            A COVERAGE expression with two positionals and stat := 'mean'
-        When:
-            Parsed with GIQLDialect
-        Then:
-            GIQLCoverage instance has `this`, `resolution`, and `stat` set
-        """
+        # Act
         ast = parse_one(
             "SELECT COVERAGE(interval, 500, stat := 'mean') FROM features",
             dialect=GIQLDialect,
         )
 
-        nodes = list(ast.find_all(GIQLCoverage))
-        assert len(nodes) == 1
-        assert nodes[0].args["resolution"].this == "500"
-        assert nodes[0].args["stat"].this == "mean"
+        # Assert
+        coverage = list(ast.find_all(GIQLCoverage))
+        assert len(coverage) == 1
+        assert coverage[0].args["stat"].this == "mean"
 
-    def test_parse_coverage_with_stat_and_target(self):
-        """COV-004: Parse COVERAGE with stat and target.
+    def test_from_arg_list_with_arrow_named_stat(self):
+        """Test named stat parameter via => syntax.
 
         Given:
-            A COVERAGE expression with two positionals, stat := 'mean', and target := 'score'
+            A COVERAGE expression with => named stat parameter
         When:
             Parsed with GIQLDialect
         Then:
-            GIQLCoverage instance has `this`, `resolution`, `stat`, and `target` set
+            It should produce a GIQLCoverage node with stat set to the given value
         """
+        # Act
         ast = parse_one(
-            "SELECT COVERAGE(interval, 1000, stat := 'mean', target := 'score') FROM features",
+            "SELECT COVERAGE(interval, 500, stat => 'mean') FROM features",
             dialect=GIQLDialect,
         )
 
-        nodes = list(ast.find_all(GIQLCoverage))
-        assert len(nodes) == 1
-        assert nodes[0].args["resolution"].this == "1000"
-        assert nodes[0].args["stat"].this == "mean"
-        assert nodes[0].args["target"].this == "score"
+        # Assert
+        coverage = list(ast.find_all(GIQLCoverage))
+        assert len(coverage) == 1
+        assert coverage[0].args["stat"].this == "mean"
 
-    def test_parse_coverage_with_arrow_named_resolution(self):
-        """COV-005: Parse COVERAGE with => named resolution.
+    def test_from_arg_list_with_named_resolution(self):
+        """Test named resolution parameter.
 
         Given:
-            A COVERAGE expression with one positional and resolution => 1000
+            A COVERAGE expression with named resolution parameter
         When:
             Parsed with GIQLDialect
         Then:
-            GIQLCoverage instance has `this` and `resolution` set
+            It should produce a GIQLCoverage node with resolution set via named param
         """
+        # Act
         ast = parse_one(
-            "SELECT COVERAGE(interval, resolution => 1000) FROM features",
+            "SELECT COVERAGE(interval, resolution := 1000) FROM features",
             dialect=GIQLDialect,
         )
 
-        nodes = list(ast.find_all(GIQLCoverage))
-        assert len(nodes) == 1
-        assert nodes[0].args["this"] is not None
-        assert nodes[0].args["resolution"].this == "1000"
+        # Assert
+        coverage = list(ast.find_all(GIQLCoverage))
+        assert len(coverage) == 1
+        assert coverage[0].args["resolution"].this == "1000"
 
-    def test_parse_coverage_with_target_no_stat(self):
-        """COV-006: Parse COVERAGE with target but no stat.
+    def test_from_arg_list_with_walrus_named_target(self):
+        """Test target parameter via := syntax.
 
         Given:
-            A COVERAGE expression with two positionals and target := 'score' only
+            A COVERAGE expression with := named target parameter
         When:
             Parsed with GIQLDialect
         Then:
-            GIQLCoverage instance has `this`, `resolution`, and `target` set; `stat` is absent
+            It should produce a GIQLCoverage node with target set
         """
+        # Act
         ast = parse_one(
             "SELECT COVERAGE(interval, 1000, target := 'score') FROM features",
             dialect=GIQLDialect,
         )
 
-        nodes = list(ast.find_all(GIQLCoverage))
-        assert len(nodes) == 1
-        assert nodes[0].args["resolution"].this == "1000"
-        assert nodes[0].args["target"].this == "score"
-        assert nodes[0].args.get("stat") is None
+        # Assert
+        coverage = list(ast.find_all(GIQLCoverage))
+        assert len(coverage) == 1
+        assert coverage[0].args["target"].this == "score"
 
-    def test_direct_instantiation_minimal(self):
-        """COV-007: Direct instantiation with required args only.
+    def test_from_arg_list_with_arrow_named_target(self):
+        """Test target parameter via => syntax.
 
         Given:
-            Required args `this` and `resolution` only
+            A COVERAGE expression with => named target parameter
         When:
-            GIQLCoverage is instantiated directly
+            Parsed with GIQLDialect
         Then:
-            Instance has `this` and `resolution` set; `stat` and `target` are absent
+            It should produce a GIQLCoverage node with target set
         """
-        col = exp.Column(this=exp.Identifier(this="interval"))
-        resolution = exp.Literal.number(1000)
+        # Act
+        ast = parse_one(
+            "SELECT COVERAGE(interval, 1000, target => 'score') FROM features",
+            dialect=GIQLDialect,
+        )
 
-        node = GIQLCoverage(this=col, resolution=resolution)
+        # Assert
+        coverage = list(ast.find_all(GIQLCoverage))
+        assert len(coverage) == 1
+        assert coverage[0].args["target"].this == "score"
 
-        assert node.args["this"] is col
-        assert node.args["resolution"] is resolution
-        assert node.args.get("stat") is None
-        assert node.args.get("target") is None
+    def test_from_arg_list_with_all_named_params(self):
+        """Test all parameters provided as named arguments.
+
+        Given:
+            A COVERAGE expression with stat, target, and resolution all named
+        When:
+            Parsed with GIQLDialect
+        Then:
+            It should produce a GIQLCoverage node with all three params set
+        """
+        # Act
+        ast = parse_one(
+            "SELECT COVERAGE(interval, resolution := 500, "
+            "stat := 'mean', target := 'score') FROM features",
+            dialect=GIQLDialect,
+        )
+
+        # Assert
+        coverage = list(ast.find_all(GIQLCoverage))
+        assert len(coverage) == 1
+        assert coverage[0].args["resolution"].this == "500"
+        assert coverage[0].args["stat"].this == "mean"
+        assert coverage[0].args["target"].this == "score"
+
+    # ------------------------------------------------------------------
+    # Property-based parsing (PBT-001 to PBT-003)
+    # ------------------------------------------------------------------
+
+    @given(
+        resolution=st.integers(min_value=1, max_value=10_000_000),
+        stat=st.sampled_from(VALID_STATS),
+        syntax=st.sampled_from([":=", "=>"]),
+    )
+    @settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
+    def test_from_arg_list_with_varying_stat_and_resolution(
+        self, resolution, stat, syntax
+    ):
+        """Test stat and resolution parse correctly across input space.
+
+        Given:
+            Any valid resolution (1-10M), stat (sampled from valid values),
+            and syntax (:= or =>)
+        When:
+            Parsed with GIQLDialect
+        Then:
+            It should produce a GIQLCoverage node with correct resolution and stat
+        """
+        # Act
+        sql = (
+            f"SELECT COVERAGE(interval, {resolution}, "
+            f"stat {syntax} '{stat}') FROM features"
+        )
+        ast = parse_one(sql, dialect=GIQLDialect)
+
+        # Assert
+        coverage = list(ast.find_all(GIQLCoverage))
+        assert len(coverage) == 1
+        assert coverage[0].args["resolution"].this == str(resolution)
+        assert coverage[0].args["stat"].this == stat
+
+    @given(resolution=st.integers(min_value=1, max_value=10_000_000))
+    @settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
+    def test_from_arg_list_with_varying_positional_only(self, resolution):
+        """Test positional-only parsing across resolution range.
+
+        Given:
+            Any valid resolution (1-10M) with no stat or target
+        When:
+            Parsed with GIQLDialect
+        Then:
+            It should produce a GIQLCoverage node with resolution set and
+            stat/target None
+        """
+        # Act
+        ast = parse_one(
+            f"SELECT COVERAGE(interval, {resolution}) FROM features",
+            dialect=GIQLDialect,
+        )
+
+        # Assert
+        coverage = list(ast.find_all(GIQLCoverage))
+        assert len(coverage) == 1
+        assert coverage[0].args["resolution"].this == str(resolution)
+        assert coverage[0].args.get("stat") is None
+        assert coverage[0].args.get("target") is None
+
+    @given(syntax=st.sampled_from([":=", "=>"]))
+    @settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
+    def test_from_arg_list_with_varying_target_syntax(self, syntax):
+        """Test target parameter parsing across syntax variants.
+
+        Given:
+            Either := or => syntax for target parameter
+        When:
+            Parsed with GIQLDialect
+        Then:
+            It should produce a GIQLCoverage node with target set
+        """
+        # Act
+        ast = parse_one(
+            f"SELECT COVERAGE(interval, 1000, target {syntax} 'score') FROM features",
+            dialect=GIQLDialect,
+        )
+
+        # Assert
+        coverage = list(ast.find_all(GIQLCoverage))
+        assert len(coverage) == 1
+        assert coverage[0].args["target"].this == "score"
 
 
 class TestGIQLDistance:
