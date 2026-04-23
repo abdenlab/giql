@@ -252,50 +252,56 @@ def test_workflow_intersect_filter_chrom_merge(duckdb_connection):
     assert comparison.match, comparison.failure_message()
 
 
-def test_workflow_full_pipeline_step_by_step(duckdb_connection):
+def test_pipeline_should_match_bedtools_when_chained_step_by_step(
+    duckdb_connection,
+):
+    """Test chained GIQL pipeline matches bedtools at each step.
+
+    Given:
+        Three interval sets across two chromosomes — A and B as inputs
+        for intersect + merge, C as reference for nearest — hand-crafted
+        so the pipeline output is unambiguous (no tie-breaking)
+    When:
+        Each GIQL step's output is materialized as a table and fed
+        back into the next GIQL step, and each bedtools equivalent
+        operates on its own prior step's output
+    Then:
+        GIQL and bedtools outputs should match at each of the three
+        stages: full row equality for intersect and merge, and
+        equal (a_name, b_name) neighbor pairs for nearest (distance
+        values are compared in the dedicated nearest tests because
+        bedtools 2.31+ uses the N+1 half-open gap convention)
     """
-    GIVEN a generated dataset across 3 chromosomes
-    WHEN full pipeline (intersect -> merge -> nearest) is run
-    THEN each intermediate step matches bedtools
-    """
-    import random
+    # Arrange
+    intervals_a = [
+        GenomicInterval("chr1", 100, 300, "a1", 0, "+"),
+        GenomicInterval("chr1", 500, 700, "a2", 0, "+"),
+        GenomicInterval("chr2", 100, 300, "a3", 0, "+"),
+    ]
+    intervals_b = [
+        GenomicInterval("chr1", 200, 400, "b1", 0, "+"),
+        GenomicInterval("chr1", 600, 800, "b2", 0, "+"),
+        GenomicInterval("chr2", 200, 400, "b3", 0, "+"),
+    ]
+    intervals_c = [
+        GenomicInterval("chr1", 5000, 5100, "c1", 0, "+"),
+        GenomicInterval("chr2", 5000, 5100, "c2", 0, "+"),
+    ]
+    load_intervals(
+        duckdb_connection, "intervals_a", [i.to_tuple() for i in intervals_a]
+    )
+    load_intervals(
+        duckdb_connection, "intervals_b", [i.to_tuple() for i in intervals_b]
+    )
+    load_intervals(
+        duckdb_connection, "intervals_c", [i.to_tuple() for i in intervals_c]
+    )
 
-    rng = random.Random(99)
-    intervals_a = []
-    intervals_b = []
-    intervals_c = []
-
-    for chrom_num in range(1, 4):
-        chrom = f"chr{chrom_num}"
-        for i in range(30):
-            start = rng.randint(0, 100_000)
-            size = rng.randint(100, 1000)
-            intervals_a.append(
-                GenomicInterval(chrom, start, start + size, f"a_{chrom_num}_{i}", 0, "+")
-            )
-        for i in range(30):
-            start = rng.randint(0, 100_000)
-            size = rng.randint(100, 1000)
-            intervals_b.append(
-                GenomicInterval(chrom, start, start + size, f"b_{chrom_num}_{i}", 0, "+")
-            )
-        for i in range(10):
-            start = rng.randint(0, 100_000)
-            size = rng.randint(100, 1000)
-            intervals_c.append(
-                GenomicInterval(chrom, start, start + size, f"c_{chrom_num}_{i}", 0, "+")
-            )
-
-    load_intervals(duckdb_connection, "intervals_a", [i.to_tuple() for i in intervals_a])
-    load_intervals(duckdb_connection, "intervals_b", [i.to_tuple() for i in intervals_b])
-    load_intervals(duckdb_connection, "intervals_c", [i.to_tuple() for i in intervals_c])
-
-    # Step 1: Intersect A with B
-    bt_intersected = intersect(
+    # Act & Assert — Step 1: GIQL intersect vs bedtools intersect
+    bt_step1 = intersect(
         [i.to_tuple() for i in intervals_a],
         [i.to_tuple() for i in intervals_b],
     )
-
     sql_step1 = transpile(
         """
         SELECT DISTINCT a.*
@@ -305,38 +311,45 @@ def test_workflow_full_pipeline_step_by_step(duckdb_connection):
         tables=["intervals_a", "intervals_b"],
     )
     giql_step1 = duckdb_connection.execute(sql_step1).fetchall()
+    c1 = compare_results(giql_step1, bt_step1)
+    assert c1.match, f"Step 1 (intersect): {c1.failure_message()}"
 
-    comparison1 = compare_results(giql_step1, bt_intersected)
-    assert comparison1.match, (
-        f"Step 1 (intersect) failed: {comparison1.failure_message()}"
+    # Act & Assert — Step 2: materialize GIQL step-1 output, GIQL MERGE
+    assert giql_step1, "fixture should produce at least one intersecting row"
+    load_intervals(duckdb_connection, "step1_results", giql_step1)
+    bt_step2 = merge(bt_step1)
+    sql_step2 = transpile(
+        "SELECT MERGE(interval) FROM step1_results",
+        tables=["step1_results"],
     )
+    giql_step2 = duckdb_connection.execute(sql_step2).fetchall()
+    c2 = compare_results(giql_step2, bt_step2)
+    assert c2.match, f"Step 2 (merge): {c2.failure_message()}"
 
-    # Step 2: Merge the intersected results
-    if bt_intersected:
-        bt_merged = merge(bt_intersected)
-    else:
-        bt_merged = []
-
-    if giql_step1:
-        # Create temp table from step 1 results for step 2
-        duckdb_connection.execute("""
-            CREATE TABLE step1_results AS
-            SELECT * FROM (
-                SELECT DISTINCT a.*
-                FROM intervals_a a, intervals_b b
-                WHERE a.chrom = b.chrom
-                  AND a."start" < b."end"
-                  AND a."end" > b."start"
-            )
-        """)
-
-        sql_step2 = transpile(
-            "SELECT MERGE(interval) FROM step1_results",
-            tables=["step1_results"],
-        )
-        giql_step2 = duckdb_connection.execute(sql_step2).fetchall()
-
-        comparison2 = compare_results(giql_step2, bt_merged)
-        assert comparison2.match, (
-            f"Step 2 (merge) failed: {comparison2.failure_message()}"
-        )
+    # Act & Assert — Step 3: pad BED3 step-2 output to BED6, GIQL NEAREST
+    assert giql_step2, "step 2 should produce at least one merged interval"
+    giql_step2_bed6 = [
+        (row[0], row[1], row[2], f"step2_{i}", 0, "+")
+        for i, row in enumerate(giql_step2)
+    ]
+    load_intervals(duckdb_connection, "step2_results", giql_step2_bed6)
+    bt_step3 = closest(
+        giql_step2_bed6, [i.to_tuple() for i in intervals_c]
+    )
+    sql_step3 = transpile(
+        """
+        SELECT a.*, b.*
+        FROM step2_results a
+        CROSS JOIN LATERAL NEAREST(intervals_c, reference := a.interval) b
+        ORDER BY a.chrom, a.start
+        """,
+        tables=["step2_results", "intervals_c"],
+    )
+    giql_step3 = duckdb_connection.execute(sql_step3).fetchall()
+    giql_pairs = {(row[3], row[9]) for row in giql_step3}
+    bt_pairs = {(row[3], row[9]) for row in bt_step3}
+    assert giql_pairs == bt_pairs, (
+        f"Step 3 (nearest) neighbor pairs differ\n"
+        f"  GIQL: {sorted(giql_pairs)}\n"
+        f"  bedtools: {sorted(bt_pairs)}"
+    )
