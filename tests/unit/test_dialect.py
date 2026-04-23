@@ -23,20 +23,34 @@ from giql.expressions import Within
 class TestDialectConstants:
     """Tests for module-level constants and token registration."""
 
-    def test_dc_001_constant_values(self):
-        """GIVEN the module is imported
-        WHEN INTERSECTS, CONTAINS, WITHIN constants are accessed
-        THEN they equal "INTERSECTS", "CONTAINS", "WITHIN" respectively.
+    def test_constants_should_equal_their_uppercase_names(self):
+        """Test module-level spatial-operator constants expose their uppercase names.
+
+        Given:
+            The giql.dialect module is imported
+        When:
+            INTERSECTS, CONTAINS, and WITHIN constants are accessed
+        Then:
+            It should equal "INTERSECTS", "CONTAINS", and "WITHIN" respectively
         """
+        # DC-001
+        # Arrange / Act / Assert
         assert INTERSECTS == "INTERSECTS"
         assert CONTAINS == "CONTAINS"
         assert WITHIN == "WITHIN"
 
-    def test_dc_002_token_type_attributes(self):
-        """GIVEN the module is imported
-        WHEN TokenType attributes are checked
-        THEN TokenType has INTERSECTS, CONTAINS, WITHIN attributes.
+    def test_TokenType_should_expose_spatial_operator_attributes(self):
+        """Test that TokenType is extended with spatial-operator attributes.
+
+        Given:
+            The giql.dialect module is imported
+        When:
+            TokenType attributes are checked for spatial operators
+        Then:
+            It should expose INTERSECTS, CONTAINS, and WITHIN attributes
         """
+        # DC-002
+        # Arrange / Act / Assert
         assert hasattr(TokenType, "INTERSECTS")
         assert hasattr(TokenType, "CONTAINS")
         assert hasattr(TokenType, "WITHIN")
@@ -45,176 +59,341 @@ class TestDialectConstants:
 class TestGIQLDialect:
     """Tests for GIQLDialect parsing of spatial predicates and GIQL functions."""
 
-    def test_gd_001_intersects_predicate(self):
-        """GIVEN a query string with `column INTERSECTS 'chr1:1000-2000'`
-        WHEN the query is parsed with GIQLDialect
-        THEN the AST contains an Intersects node with correct left and right expressions.
+    def test_parse_one_should_produce_Intersects_node_for_intersects_predicate(self):
+        """Test parsing `column INTERSECTS 'chr1:1000-2000'` yields an Intersects node.
+
+        Given:
+            A SELECT query containing `column INTERSECTS 'chr1:1000-2000'`
+        When:
+            The query is parsed with GIQLDialect
+        Then:
+            It should produce an Intersects node whose left side is the column
+            and whose right side is the literal range string
         """
+        # GD-001
+        # Arrange
+        query = "SELECT * FROM t WHERE column INTERSECTS 'chr1:1000-2000'"
+
+        # Act
         ast = parse_one(
-            "SELECT * FROM t WHERE column INTERSECTS 'chr1:1000-2000'",
+            query,
             dialect=GIQLDialect,
         )
+
+        # Assert
         nodes = list(ast.find_all(Intersects))
         assert len(nodes) == 1
         node = nodes[0]
         assert node.this.name == "column"
         assert node.expression.this == "chr1:1000-2000"
 
-    def test_gd_002_contains_predicate(self):
-        """GIVEN a query string with `column CONTAINS 'chr1:1500'`
-        WHEN the query is parsed with GIQLDialect
-        THEN the AST contains a Contains node.
+    def test_parse_one_should_produce_Contains_node_for_contains_predicate(self):
+        """Test parsing `column CONTAINS 'chr1:1500'` yields a Contains node.
+
+        Given:
+            A SELECT query containing `column CONTAINS 'chr1:1500'`
+        When:
+            The query is parsed with GIQLDialect
+        Then:
+            It should produce exactly one Contains node in the AST
         """
+        # GD-002
+        # Arrange
+        query = "SELECT * FROM t WHERE column CONTAINS 'chr1:1500'"
+
+        # Act
         ast = parse_one(
-            "SELECT * FROM t WHERE column CONTAINS 'chr1:1500'",
+            query,
             dialect=GIQLDialect,
         )
+
+        # Assert
         nodes = list(ast.find_all(Contains))
         assert len(nodes) == 1
 
-    def test_gd_003_within_predicate(self):
-        """GIVEN a query string with `column WITHIN 'chr1:1000-5000'`
-        WHEN the query is parsed with GIQLDialect
-        THEN the AST contains a Within node.
+    def test_parse_one_should_produce_Within_node_for_within_predicate(self):
+        """Test parsing `column WITHIN 'chr1:1000-5000'` yields a Within node.
+
+        Given:
+            A SELECT query containing `column WITHIN 'chr1:1000-5000'`
+        When:
+            The query is parsed with GIQLDialect
+        Then:
+            It should produce exactly one Within node in the AST
         """
+        # GD-003
+        # Arrange
+        query = "SELECT * FROM t WHERE column WITHIN 'chr1:1000-5000'"
+
+        # Act
         ast = parse_one(
-            "SELECT * FROM t WHERE column WITHIN 'chr1:1000-5000'",
+            query,
             dialect=GIQLDialect,
         )
+
+        # Assert
         nodes = list(ast.find_all(Within))
         assert len(nodes) == 1
 
-    def test_gd_004_intersects_any(self):
-        """GIVEN a query with `column INTERSECTS ANY('chr1:1000-2000', 'chr1:5000-6000')`
-        WHEN the query is parsed
-        THEN the AST contains a SpatialSetPredicate with quantifier=ANY.
+    def test_parse_one_should_set_quantifier_to_ANY_for_intersects_any(self):
+        """Test `INTERSECTS ANY(...)` produces a SpatialSetPredicate with quantifier ANY.
+
+        Given:
+            A SELECT query containing `column INTERSECTS ANY('chr1:1000-2000', 'chr1:5000-6000')`
+        When:
+            The query is parsed with GIQLDialect
+        Then:
+            It should produce a SpatialSetPredicate whose quantifier argument is "ANY"
         """
+        # GD-004
+        # Arrange
+        query = (
+            "SELECT * FROM t WHERE column INTERSECTS ANY('chr1:1000-2000', 'chr1:5000-6000')"
+        )
+
+        # Act
         ast = parse_one(
-            "SELECT * FROM t WHERE column INTERSECTS ANY('chr1:1000-2000', 'chr1:5000-6000')",
+            query,
             dialect=GIQLDialect,
         )
+
+        # Assert
         nodes = list(ast.find_all(SpatialSetPredicate))
         assert len(nodes) == 1
         node = nodes[0]
         assert node.args["quantifier"] == "ANY"
 
-    def test_gd_005_intersects_all(self):
-        """GIVEN a query with `column INTERSECTS ALL('chr1:1000-2000', 'chr1:5000-6000')`
-        WHEN the query is parsed
-        THEN the AST contains a SpatialSetPredicate with quantifier=ALL.
+    def test_parse_one_should_set_quantifier_to_ALL_for_intersects_all(self):
+        """Test `INTERSECTS ALL(...)` produces a SpatialSetPredicate with quantifier ALL.
+
+        Given:
+            A SELECT query containing `column INTERSECTS ALL('chr1:1000-2000', 'chr1:5000-6000')`
+        When:
+            The query is parsed with GIQLDialect
+        Then:
+            It should produce a SpatialSetPredicate whose quantifier argument is "ALL"
         """
+        # GD-005
+        # Arrange
+        query = (
+            "SELECT * FROM t WHERE column INTERSECTS ALL('chr1:1000-2000', 'chr1:5000-6000')"
+        )
+
+        # Act
         ast = parse_one(
-            "SELECT * FROM t WHERE column INTERSECTS ALL('chr1:1000-2000', 'chr1:5000-6000')",
+            query,
             dialect=GIQLDialect,
         )
+
+        # Assert
         nodes = list(ast.find_all(SpatialSetPredicate))
         assert len(nodes) == 1
         node = nodes[0]
         assert node.args["quantifier"] == "ALL"
 
-    def test_gd_006_plain_sql_fallback(self):
-        """GIVEN a query with no spatial operators (plain SQL)
-        WHEN the query is parsed with GIQLDialect
-        THEN the AST is a standard SELECT without spatial nodes.
+    def test_parse_one_should_produce_plain_select_when_no_spatial_operators_are_used(self):
+        """Test plain SQL parses without any spatial nodes under GIQLDialect.
+
+        Given:
+            A SELECT query with no spatial operators
+        When:
+            The query is parsed with GIQLDialect
+        Then:
+            It should produce a standard Select AST containing no
+            SpatialPredicate or SpatialSetPredicate nodes
         """
+        # GD-006
+        # Arrange
+        query = "SELECT id, name FROM t WHERE id = 1"
+
+        # Act
         ast = parse_one(
-            "SELECT id, name FROM t WHERE id = 1",
+            query,
             dialect=GIQLDialect,
         )
+
+        # Assert
         spatial_nodes = list(ast.find_all(SpatialPredicate, SpatialSetPredicate))
         assert len(spatial_nodes) == 0
         assert ast.find(exp.Select) is not None
 
-    def test_gd_007_cluster_basic(self):
-        """GIVEN a query with `CLUSTER(interval)`
-        WHEN the query is parsed
-        THEN the AST contains a GIQLCluster node.
+    def test_parse_one_should_produce_GIQLCluster_node_for_cluster_call(self):
+        """Test `CLUSTER(interval)` parses into a GIQLCluster AST node.
+
+        Given:
+            A SELECT query containing `CLUSTER(interval)`
+        When:
+            The query is parsed with GIQLDialect
+        Then:
+            It should produce exactly one GIQLCluster node in the AST
         """
+        # GD-007
+        # Arrange
+        query = "SELECT CLUSTER(interval) FROM t"
+
+        # Act
         ast = parse_one(
-            "SELECT CLUSTER(interval) FROM t",
+            query,
             dialect=GIQLDialect,
         )
+
+        # Assert
         nodes = list(ast.find_all(GIQLCluster))
         assert len(nodes) == 1
 
-    def test_gd_008_cluster_with_distance(self):
-        """GIVEN a query with `CLUSTER(interval, 1000)`
-        WHEN the query is parsed
-        THEN the GIQLCluster node has distance arg set.
+    def test_parse_one_should_set_distance_arg_on_GIQLCluster_when_distance_is_given(self):
+        """Test `CLUSTER(interval, 1000)` sets the distance argument on GIQLCluster.
+
+        Given:
+            A SELECT query containing `CLUSTER(interval, 1000)`
+        When:
+            The query is parsed with GIQLDialect
+        Then:
+            It should produce a GIQLCluster node whose distance argument is set
         """
+        # GD-008
+        # Arrange
+        query = "SELECT CLUSTER(interval, 1000) FROM t"
+
+        # Act
         ast = parse_one(
-            "SELECT CLUSTER(interval, 1000) FROM t",
+            query,
             dialect=GIQLDialect,
         )
+
+        # Assert
         nodes = list(ast.find_all(GIQLCluster))
         assert len(nodes) == 1
         node = nodes[0]
         assert node.args.get("distance") is not None
 
-    def test_gd_009_merge_basic(self):
-        """GIVEN a query with `MERGE(interval)`
-        WHEN the query is parsed
-        THEN the AST contains a GIQLMerge node.
+    def test_parse_one_should_produce_GIQLMerge_node_for_merge_call(self):
+        """Test `MERGE(interval)` parses into a GIQLMerge AST node.
+
+        Given:
+            A SELECT query containing `MERGE(interval)`
+        When:
+            The query is parsed with GIQLDialect
+        Then:
+            It should produce exactly one GIQLMerge node in the AST
         """
+        # GD-009
+        # Arrange
+        query = "SELECT MERGE(interval) FROM t"
+
+        # Act
         ast = parse_one(
-            "SELECT MERGE(interval) FROM t",
+            query,
             dialect=GIQLDialect,
         )
+
+        # Assert
         nodes = list(ast.find_all(GIQLMerge))
         assert len(nodes) == 1
 
-    def test_gd_010_coverage_with_resolution(self):
-        """GIVEN a query with `COVERAGE(interval, 1000)`
-        WHEN the query is parsed
-        THEN the AST contains a GIQLCoverage node with resolution set.
+    def test_parse_one_should_set_resolution_arg_on_GIQLCoverage_when_resolution_is_positional(self):
+        """Test `COVERAGE(interval, 1000)` sets the resolution argument on GIQLCoverage.
+
+        Given:
+            A SELECT query containing `COVERAGE(interval, 1000)`
+        When:
+            The query is parsed with GIQLDialect
+        Then:
+            It should produce a GIQLCoverage node whose resolution argument is set
         """
+        # GD-010
+        # Arrange
+        query = "SELECT COVERAGE(interval, 1000) FROM t"
+
+        # Act
         ast = parse_one(
-            "SELECT COVERAGE(interval, 1000) FROM t",
+            query,
             dialect=GIQLDialect,
         )
+
+        # Assert
         nodes = list(ast.find_all(GIQLCoverage))
         assert len(nodes) == 1
         node = nodes[0]
         assert node.args.get("resolution") is not None
 
-    def test_gd_011_coverage_with_stat(self):
-        """GIVEN a query with `COVERAGE(interval, 500, stat := 'mean')`
-        WHEN the query is parsed
-        THEN the GIQLCoverage node has stat arg set.
+    def test_parse_one_should_set_stat_arg_on_GIQLCoverage_when_stat_named_param_is_given(self):
+        """Test `COVERAGE(interval, 500, stat := 'mean')` sets the stat argument.
+
+        Given:
+            A SELECT query containing `COVERAGE(interval, 500, stat := 'mean')`
+        When:
+            The query is parsed with GIQLDialect
+        Then:
+            It should produce a GIQLCoverage node whose stat argument equals "mean"
         """
+        # GD-011
+        # Arrange
+        query = "SELECT COVERAGE(interval, 500, stat := 'mean') FROM t"
+
+        # Act
         ast = parse_one(
-            "SELECT COVERAGE(interval, 500, stat := 'mean') FROM t",
+            query,
             dialect=GIQLDialect,
         )
+
+        # Assert
         nodes = list(ast.find_all(GIQLCoverage))
         assert len(nodes) == 1
         node = nodes[0]
         assert node.args.get("stat") is not None
         assert node.args["stat"].this == "mean"
 
-    def test_gd_012_coverage_with_kwarg_resolution(self):
-        """GIVEN a query with `COVERAGE(interval, resolution => 1000)`
-        WHEN the query is parsed
-        THEN the GIQLCoverage node has resolution set via Kwarg.
+    def test_parse_one_should_set_resolution_arg_on_GIQLCoverage_when_resolution_is_passed_as_kwarg(self):
+        """Test `COVERAGE(interval, resolution => 1000)` sets resolution via Kwarg syntax.
+
+        Given:
+            A SELECT query containing `COVERAGE(interval, resolution => 1000)`
+        When:
+            The query is parsed with GIQLDialect
+        Then:
+            It should produce a GIQLCoverage node whose resolution argument is set
         """
+        # GD-012
+        # Arrange
+        query = "SELECT COVERAGE(interval, resolution => 1000) FROM t"
+
+        # Act
         ast = parse_one(
-            "SELECT COVERAGE(interval, resolution => 1000) FROM t",
+            query,
             dialect=GIQLDialect,
         )
+
+        # Assert
         nodes = list(ast.find_all(GIQLCoverage))
         assert len(nodes) == 1
         node = nodes[0]
         assert node.args.get("resolution") is not None
 
-    def test_gd_013_coverage_with_stat_and_target(self):
-        """GIVEN a query with `COVERAGE(interval, 1000, stat := 'mean', target := 'score')`
-        WHEN the query is parsed
-        THEN the GIQLCoverage node has stat and target args set.
+    def test_parse_one_should_set_stat_and_target_args_on_GIQLCoverage_when_both_are_given(self):
+        """Test `COVERAGE(interval, 1000, stat := 'mean', target := 'score')` sets both args.
+
+        Given:
+            A SELECT query containing
+            `COVERAGE(interval, 1000, stat := 'mean', target := 'score')`
+        When:
+            The query is parsed with GIQLDialect
+        Then:
+            It should produce a GIQLCoverage node with stat="mean" and target="score"
         """
+        # GD-013
+        # Arrange
+        query = (
+            "SELECT COVERAGE(interval, 1000, stat := 'mean', target := 'score') FROM t"
+        )
+
+        # Act
         ast = parse_one(
-            "SELECT COVERAGE(interval, 1000, stat := 'mean', target := 'score') FROM t",
+            query,
             dialect=GIQLDialect,
         )
+
+        # Assert
         nodes = list(ast.find_all(GIQLCoverage))
         assert len(nodes) == 1
         node = nodes[0]
@@ -223,27 +402,51 @@ class TestGIQLDialect:
         assert node.args.get("target") is not None
         assert node.args["target"].this == "score"
 
-    def test_gd_014_distance_function(self):
-        """GIVEN a query with `DISTANCE(a.interval, b.interval)`
-        WHEN the query is parsed
-        THEN the AST contains a GIQLDistance node.
+    def test_parse_one_should_produce_GIQLDistance_node_for_distance_call(self):
+        """Test `DISTANCE(a.interval, b.interval)` parses into a GIQLDistance AST node.
+
+        Given:
+            A SELECT query containing `DISTANCE(a.interval, b.interval)`
+        When:
+            The query is parsed with GIQLDialect
+        Then:
+            It should produce exactly one GIQLDistance node in the AST
         """
+        # GD-014
+        # Arrange
+        query = "SELECT DISTANCE(a.interval, b.interval) FROM t"
+
+        # Act
         ast = parse_one(
-            "SELECT DISTANCE(a.interval, b.interval) FROM t",
+            query,
             dialect=GIQLDialect,
         )
+
+        # Assert
         nodes = list(ast.find_all(GIQLDistance))
         assert len(nodes) == 1
 
-    def test_gd_015_nearest_with_k(self):
-        """GIVEN a query with `NEAREST(genes, k := 3)`
-        WHEN the query is parsed
-        THEN the AST contains a GIQLNearest node with k arg set.
+    def test_parse_one_should_set_k_arg_on_GIQLNearest_when_k_named_param_is_given(self):
+        """Test `NEAREST(genes, k := 3)` sets the k argument on GIQLNearest.
+
+        Given:
+            A SELECT query containing `NEAREST(genes, k := 3)`
+        When:
+            The query is parsed with GIQLDialect
+        Then:
+            It should produce a GIQLNearest node whose k argument is set
         """
+        # GD-015
+        # Arrange
+        query = "SELECT NEAREST(genes, k := 3) FROM t"
+
+        # Act
         ast = parse_one(
-            "SELECT NEAREST(genes, k := 3) FROM t",
+            query,
             dialect=GIQLDialect,
         )
+
+        # Assert
         nodes = list(ast.find_all(GIQLNearest))
         assert len(nodes) == 1
         node = nodes[0]

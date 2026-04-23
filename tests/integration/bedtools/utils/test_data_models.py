@@ -11,13 +11,20 @@ pytestmark = pytest.mark.integration
 
 
 class TestGenomicInterval:
-    def test_basic_instantiation(self):
+    def test___init___should_succeed_when_minimal_args_supplied(self):
+        """Test that minimal instantiation populates required fields and defaults.
+
+        Given:
+            Valid chrom, start, end values
+        When:
+            GenomicInterval is instantiated
+        Then:
+            It should create an object with correct attributes and None defaults
         """
-        GIVEN valid chrom, start, end values
-        WHEN GenomicInterval is instantiated
-        THEN object is created with correct attributes
-        """
+        # Arrange / Act
         gi = GenomicInterval("chr1", 100, 200)
+
+        # Assert
         assert gi.chrom == "chr1"
         assert gi.start == 100
         assert gi.end == 200
@@ -25,13 +32,20 @@ class TestGenomicInterval:
         assert gi.score is None
         assert gi.strand is None
 
-    def test_full_instantiation(self):
+    def test___init___should_populate_optional_fields_when_supplied(self):
+        """Test that all fields are set when provided to the constructor.
+
+        Given:
+            All fields provided
+        When:
+            GenomicInterval is instantiated
+        Then:
+            It should set all attributes correctly
         """
-        GIVEN all fields provided
-        WHEN GenomicInterval is instantiated
-        THEN all attributes are set correctly
-        """
+        # Arrange / Act
         gi = GenomicInterval("chrX", 500, 1000, "gene1", 800, "+")
+
+        # Assert
         assert gi.chrom == "chrX"
         assert gi.start == 500
         assert gi.end == 1000
@@ -39,105 +53,176 @@ class TestGenomicInterval:
         assert gi.score == 800
         assert gi.strand == "+"
 
-    def test_start_equals_end_raises(self):
+    def test___post_init___should_raise_when_start_equals_end(self):
+        """Test that a zero-length interval is rejected.
+
+        Given:
+            start equals end
+        When:
+            GenomicInterval is instantiated
+        Then:
+            It should raise ValueError
         """
-        GIVEN start equals end
-        WHEN GenomicInterval is instantiated
-        THEN ValueError is raised
-        """
+        # Arrange / Act / Assert
         with pytest.raises(ValueError, match="start .* >= end"):
             GenomicInterval("chr1", 200, 200)
 
-    def test_start_greater_than_end_raises(self):
+    def test___post_init___should_raise_when_start_greater_than_end(self):
+        """Test that an inverted interval is rejected.
+
+        Given:
+            start > end
+        When:
+            GenomicInterval is instantiated
+        Then:
+            It should raise ValueError
         """
-        GIVEN start > end
-        WHEN GenomicInterval is instantiated
-        THEN ValueError is raised
-        """
+        # Arrange / Act / Assert
         with pytest.raises(ValueError, match="start .* >= end"):
             GenomicInterval("chr1", 300, 200)
 
-    def test_negative_start_raises(self):
+    def test___post_init___should_raise_when_start_is_negative(self):
+        """Test that a negative start coordinate is rejected.
+
+        Given:
+            start < 0
+        When:
+            GenomicInterval is instantiated
+        Then:
+            It should raise ValueError
         """
-        GIVEN start < 0
-        WHEN GenomicInterval is instantiated
-        THEN ValueError is raised
-        """
+        # Arrange / Act / Assert
         with pytest.raises(ValueError, match="start .* < 0"):
             GenomicInterval("chr1", -1, 200)
 
-    def test_invalid_strand_raises(self):
+    def test___post_init___should_raise_when_strand_is_invalid(self):
+        """Test that an invalid strand value is rejected.
+
+        Given:
+            An invalid strand value
+        When:
+            GenomicInterval is instantiated
+        Then:
+            It should raise ValueError
         """
-        GIVEN an invalid strand value
-        WHEN GenomicInterval is instantiated
-        THEN ValueError is raised
-        """
+        # Arrange / Act / Assert
         with pytest.raises(ValueError, match="Invalid strand"):
             GenomicInterval("chr1", 100, 200, strand="X")
 
-    def test_score_below_range_raises(self):
+    def test___post_init___should_raise_when_score_below_range(self):
+        """Test that a score below the BED range is rejected.
+
+        Given:
+            score < 0
+        When:
+            GenomicInterval is instantiated
+        Then:
+            It should raise ValueError
         """
-        GIVEN score < 0
-        WHEN GenomicInterval is instantiated
-        THEN ValueError is raised
-        """
+        # Arrange / Act / Assert
         with pytest.raises(ValueError, match="Invalid score"):
             GenomicInterval("chr1", 100, 200, score=-1)
 
-    def test_score_above_range_raises(self):
+    def test___post_init___should_raise_when_score_above_range(self):
+        """Test that a score above the BED range is rejected.
+
+        Given:
+            score > 1000
+        When:
+            GenomicInterval is instantiated
+        Then:
+            It should raise ValueError
         """
-        GIVEN score > 1000
-        WHEN GenomicInterval is instantiated
-        THEN ValueError is raised
-        """
+        # Arrange / Act / Assert
         with pytest.raises(ValueError, match="Invalid score"):
             GenomicInterval("chr1", 100, 200, score=1001)
 
     @pytest.mark.parametrize("strand", ["+", "-", "."])
-    def test_valid_strand_values(self, strand):
+    def test___post_init___should_accept_when_strand_is_valid(self, strand):
+        """Test that each allowed strand value is accepted.
+
+        Given:
+            A valid strand value
+        When:
+            GenomicInterval is instantiated
+        Then:
+            It should create the object successfully
         """
-        GIVEN a valid strand value
-        WHEN GenomicInterval is instantiated
-        THEN object is created successfully
-        """
+        # Arrange / Act
         gi = GenomicInterval("chr1", 100, 200, strand=strand)
+
+        # Assert
         assert gi.strand == strand
 
-    def test_score_boundary_zero(self):
+    def test___post_init___should_accept_when_score_is_zero(self):
+        """Test that the lower boundary score is accepted.
+
+        Given:
+            score = 0
+        When:
+            GenomicInterval is instantiated
+        Then:
+            It should create the object successfully
         """
-        GIVEN score = 0
-        WHEN GenomicInterval is instantiated
-        THEN object is created successfully
-        """
+        # Arrange / Act
         gi = GenomicInterval("chr1", 100, 200, score=0)
+
+        # Assert
         assert gi.score == 0
 
-    def test_score_boundary_thousand(self):
+    def test___post_init___should_accept_when_score_is_thousand(self):
+        """Test that the upper boundary score is accepted.
+
+        Given:
+            score = 1000
+        When:
+            GenomicInterval is instantiated
+        Then:
+            It should create the object successfully
         """
-        GIVEN score = 1000
-        WHEN GenomicInterval is instantiated
-        THEN object is created successfully
-        """
+        # Arrange / Act
         gi = GenomicInterval("chr1", 100, 200, score=1000)
+
+        # Assert
         assert gi.score == 1000
 
-    def test_to_tuple(self):
-        """
-        GIVEN a GenomicInterval with all fields
-        WHEN to_tuple() is called
-        THEN returns 6-element tuple with all field values
-        """
-        gi = GenomicInterval("chr1", 100, 200, "a1", 500, "+")
-        assert gi.to_tuple() == ("chr1", 100, 200, "a1", 500, "+")
+    def test_to_tuple_should_return_all_fields_when_fully_populated(self):
+        """Test that to_tuple returns every field in order.
 
-    def test_to_tuple_with_nones(self):
+        Given:
+            A GenomicInterval with all fields
+        When:
+            to_tuple() is called
+        Then:
+            It should return a 6-element tuple with all field values
         """
-        GIVEN a GenomicInterval with optional fields as None
-        WHEN to_tuple() is called
-        THEN tuple contains None for optional fields
+        # Arrange
+        gi = GenomicInterval("chr1", 100, 200, "a1", 500, "+")
+
+        # Act
+        result = gi.to_tuple()
+
+        # Assert
+        assert result == ("chr1", 100, 200, "a1", 500, "+")
+
+    def test_to_tuple_should_include_none_when_optional_fields_missing(self):
+        """Test that to_tuple preserves None for unset optional fields.
+
+        Given:
+            A GenomicInterval with optional fields as None
+        When:
+            to_tuple() is called
+        Then:
+            It should return a tuple containing None for optional fields
         """
+        # Arrange
         gi = GenomicInterval("chr1", 100, 200)
-        assert gi.to_tuple() == ("chr1", 100, 200, None, None, None)
+
+        # Act
+        result = gi.to_tuple()
+
+        # Assert
+        assert result == ("chr1", 100, 200, None, None, None)
 
     @given(
         chrom=st.sampled_from(["chr1", "chr2", "chrX", "chrM"]),
@@ -146,98 +231,163 @@ class TestGenomicInterval:
         strand=st.sampled_from(["+", "-", "."]),
         score=st.integers(min_value=0, max_value=1000),
     )
-    def test_to_tuple_roundtrip(self, chrom, start, size, strand, score):
+    def test_to_tuple_should_roundtrip_when_any_valid_interval(
+        self, chrom, start, size, strand, score
+    ):
+        """Test that to_tuple reflects the exact constructor inputs.
+
+        Given:
+            Any valid GenomicInterval
+        When:
+            to_tuple() is called
+        Then:
+            It should return a tuple that matches the interval's key fields
         """
-        GIVEN any valid GenomicInterval
-        WHEN to_tuple() is called
-        THEN the tuple can be used to reconstruct the interval's key fields
-        """
+        # Arrange
         end = start + size
         gi = GenomicInterval(chrom, start, end, "name", score, strand)
+
+        # Act
         t = gi.to_tuple()
+
+        # Assert
         assert t == (chrom, start, end, "name", score, strand)
 
 
 class TestComparisonResult:
-    def test_matching_result(self):
+    def test___init___should_populate_attributes_when_match_is_true(self):
+        """Test that a matching result stores its fields correctly.
+
+        Given:
+            match=True with equal row counts
+        When:
+            ComparisonResult is instantiated
+        Then:
+            It should set attributes correctly with an empty differences list
         """
-        GIVEN match=True with equal row counts
-        WHEN ComparisonResult is instantiated
-        THEN attributes are set correctly
-        """
+        # Arrange / Act
         cr = ComparisonResult(match=True, giql_row_count=5, bedtools_row_count=5)
+
+        # Assert
         assert cr.match is True
         assert cr.giql_row_count == 5
         assert cr.bedtools_row_count == 5
         assert cr.differences == []
 
-    def test_mismatching_result(self):
+    def test___init___should_populate_attributes_when_match_is_false(self):
+        """Test that a mismatching result stores its differences.
+
+        Given:
+            match=False with differences
+        When:
+            ComparisonResult is instantiated
+        Then:
+            It should set attributes correctly including the differences list
         """
-        GIVEN match=False with differences
-        WHEN ComparisonResult is instantiated
-        THEN attributes are set correctly
-        """
+        # Arrange
         diffs = ["Row 0: mismatch"]
+
+        # Act
         cr = ComparisonResult(
             match=False,
             giql_row_count=3,
             bedtools_row_count=4,
             differences=diffs,
         )
+
+        # Assert
         assert cr.match is False
         assert cr.differences == diffs
 
-    def test_bool_true(self):
+    def test___bool___should_return_true_when_match_is_true(self):
+        """Test truthiness of a matching result.
+
+        Given:
+            A matching ComparisonResult
+        When:
+            Used in a boolean context
+        Then:
+            It should evaluate to True
         """
-        GIVEN a matching ComparisonResult
-        WHEN used in boolean context
-        THEN evaluates to True
-        """
+        # Arrange
         cr = ComparisonResult(match=True, giql_row_count=1, bedtools_row_count=1)
+
+        # Act / Assert
         assert cr
 
-    def test_bool_false(self):
+    def test___bool___should_return_false_when_match_is_false(self):
+        """Test falsiness of a non-matching result.
+
+        Given:
+            A non-matching ComparisonResult
+        When:
+            Used in a boolean context
+        Then:
+            It should evaluate to False
         """
-        GIVEN a non-matching ComparisonResult
-        WHEN used in boolean context
-        THEN evaluates to False
-        """
+        # Arrange
         cr = ComparisonResult(match=False, giql_row_count=1, bedtools_row_count=2)
+
+        # Act / Assert
         assert not cr
 
-    def test_failure_message_match(self):
-        """
-        GIVEN a matching ComparisonResult
-        WHEN failure_message() is called
-        THEN returns success message
-        """
-        cr = ComparisonResult(match=True, giql_row_count=1, bedtools_row_count=1)
-        assert "match" in cr.failure_message().lower()
+    def test_failure_message_should_return_success_when_match_is_true(self):
+        """Test the message for a matching result.
 
-    def test_failure_message_mismatch(self):
+        Given:
+            A matching ComparisonResult
+        When:
+            failure_message() is called
+        Then:
+            It should return a success message
         """
-        GIVEN a non-matching ComparisonResult with differences
-        WHEN failure_message() is called
-        THEN returns formatted message with row counts and differences
+        # Arrange
+        cr = ComparisonResult(match=True, giql_row_count=1, bedtools_row_count=1)
+
+        # Act
+        msg = cr.failure_message()
+
+        # Assert
+        assert "match" in msg.lower()
+
+    def test_failure_message_should_include_counts_and_diffs_when_mismatch(self):
+        """Test the message formatting for a mismatching result.
+
+        Given:
+            A non-matching ComparisonResult with differences
+        When:
+            failure_message() is called
+        Then:
+            It should return a formatted message with row counts and differences
         """
+        # Arrange
         cr = ComparisonResult(
             match=False,
             giql_row_count=3,
             bedtools_row_count=5,
             differences=["Row 0: val mismatch", "Row 1: missing"],
         )
+
+        # Act
         msg = cr.failure_message()
+
+        # Assert
         assert "3" in msg
         assert "5" in msg
         assert "Row 0: val mismatch" in msg
         assert "Row 1: missing" in msg
 
-    def test_failure_message_truncates_at_ten(self):
+    def test_failure_message_should_truncate_when_over_ten_differences(self):
+        """Test that the message truncates the differences list at ten.
+
+        Given:
+            A ComparisonResult with more than 10 differences
+        When:
+            failure_message() is called
+        Then:
+            It should show only the first 10 with a count of the remainder
         """
-        GIVEN a ComparisonResult with more than 10 differences
-        WHEN failure_message() is called
-        THEN only first 10 are shown with a count of remaining
-        """
+        # Arrange
         diffs = [f"diff_{i}" for i in range(15)]
         cr = ComparisonResult(
             match=False,
@@ -245,16 +395,27 @@ class TestComparisonResult:
             bedtools_row_count=15,
             differences=diffs,
         )
+
+        # Act
         msg = cr.failure_message()
+
+        # Assert
         assert "diff_9" in msg
         assert "diff_10" not in msg
         assert "5 more" in msg
 
-    def test_default_metadata(self):
+    def test___init___should_default_metadata_when_not_supplied(self):
+        """Test that comparison_metadata defaults to an empty dict.
+
+        Given:
+            No comparison_metadata provided
+        When:
+            ComparisonResult is instantiated
+        Then:
+            It should default metadata to an empty dict
         """
-        GIVEN no comparison_metadata provided
-        WHEN ComparisonResult is instantiated
-        THEN metadata defaults to empty dict
-        """
+        # Arrange / Act
         cr = ComparisonResult(match=True, giql_row_count=0, bedtools_row_count=0)
+
+        # Assert
         assert cr.comparison_metadata == {}

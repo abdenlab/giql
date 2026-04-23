@@ -55,8 +55,17 @@ def _transform_and_sql(query: str, transformer_cls, tables: Tables | None = None
 class TestCoverageStatMap:
     """Tests for the COVERAGE_STAT_MAP module-level constant."""
 
-    def test_csm_001_coverage_stat_map_has_correct_mappings(self):
-        """GIVEN the module is imported WHEN COVERAGE_STAT_MAP is accessed THEN it maps count->COUNT, mean->AVG, sum->SUM, min->MIN, max->MAX."""
+    def test_COVERAGE_STAT_MAP_should_contain_all_supported_stats(self):
+        """Test COVERAGE_STAT_MAP maps stat names to SQL aggregates.
+
+        Given:
+            The transformer module is imported
+        When:
+            COVERAGE_STAT_MAP is accessed
+        Then:
+            It should map count->COUNT, mean->AVG, sum->SUM, min->MIN, max->MAX
+        """
+        # Act & Assert
         assert COVERAGE_STAT_MAP == {
             "count": "COUNT",
             "mean": "AVG",
@@ -74,62 +83,141 @@ class TestCoverageStatMap:
 class TestClusterTransformer:
     """Tests for ClusterTransformer.transform."""
 
-    def test_ct_001_basic_cluster_has_lag_and_sum_windows(self):
-        """GIVEN a Tables instance and a parsed SELECT with CLUSTER(interval) WHEN transform is called THEN the result contains LAG and SUM window expressions."""
+    def test_transform_should_produce_lag_and_sum_windows_when_basic_cluster(self):
+        """Test basic CLUSTER produces LAG and SUM window expressions.
+
+        Given:
+            A Tables instance and a parsed SELECT with CLUSTER(interval)
+        When:
+            transform is called
+        Then:
+            It should produce a result containing LAG and SUM window expressions
+        """
+        # Act
         sql = _transform_and_sql(
             "SELECT *, CLUSTER(interval) FROM features", ClusterTransformer
         )
+
+        # Assert
         upper = sql.upper()
         assert "LAG" in upper
         assert "SUM" in upper
 
-    def test_ct_002_cluster_alias_preserved(self):
-        """GIVEN a parsed SELECT with CLUSTER(interval) AS cluster_id WHEN transform is called THEN the alias is preserved on the SUM window expression."""
+    def test_transform_should_preserve_alias_when_cluster_has_alias(self):
+        """Test CLUSTER alias is preserved on the SUM window expression.
+
+        Given:
+            A parsed SELECT with CLUSTER(interval) AS cluster_id
+        When:
+            transform is called
+        Then:
+            It should preserve the alias on the SUM window expression
+        """
+        # Act
         sql = _transform_and_sql(
             "SELECT *, CLUSTER(interval) AS cluster_id FROM features",
             ClusterTransformer,
         )
+
+        # Assert
         assert "cluster_id" in sql
 
-    def test_ct_003_cluster_with_distance(self):
-        """GIVEN a parsed SELECT with CLUSTER(interval, 1000) WHEN transform is called THEN the LAG result has distance 1000 added."""
+    def test_transform_should_include_distance_when_cluster_has_distance(self):
+        """Test CLUSTER with distance adds the distance to the LAG result.
+
+        Given:
+            A parsed SELECT with CLUSTER(interval, 1000)
+        When:
+            transform is called
+        Then:
+            It should add distance 1000 to the LAG result
+        """
+        # Act
         sql = _transform_and_sql(
             "SELECT *, CLUSTER(interval, 1000) FROM features",
             ClusterTransformer,
         )
+
+        # Assert
         upper = sql.upper()
         assert "LAG" in upper
         assert "1000" in sql
 
-    def test_ct_004_cluster_stranded_partitions_by_strand(self):
-        """GIVEN a parsed SELECT with CLUSTER(interval, stranded := true) WHEN transform is called THEN the result partitions by chrom AND strand."""
+    def test_transform_should_partition_by_strand_when_stranded(self):
+        """Test stranded CLUSTER partitions by chrom AND strand.
+
+        Given:
+            A parsed SELECT with CLUSTER(interval, stranded := true)
+        When:
+            transform is called
+        Then:
+            It should partition by chrom AND strand
+        """
+        # Act
         sql = _transform_and_sql(
             "SELECT *, CLUSTER(interval, stranded := true) FROM features",
             ClusterTransformer,
         )
+
+        # Assert
         upper = sql.upper()
         assert "STRAND" in upper
         # Both chrom and strand should appear in partition
         assert "CHROM" in upper
 
-    def test_ct_005_non_select_returns_unchanged(self):
-        """GIVEN a non-SELECT expression WHEN transform is called THEN the expression is returned unchanged."""
+    def test_transform_should_return_unchanged_when_expression_is_not_select(self):
+        """Test non-SELECT expression passes through unchanged.
+
+        Given:
+            A non-SELECT expression
+        When:
+            transform is called
+        Then:
+            It should return the expression unchanged
+        """
+        # Arrange
         tables = _make_tables("features")
         transformer = ClusterTransformer(tables)
         insert = exp.Insert(this=exp.to_table("features"))
+
+        # Act
         result = transformer.transform(insert)
+
+        # Assert
         assert result is insert
 
-    def test_ct_006_no_cluster_returns_unchanged(self):
-        """GIVEN a SELECT with no CLUSTER expressions WHEN transform is called THEN the query is returned unchanged."""
+    def test_transform_should_return_unchanged_when_no_cluster(self):
+        """Test SELECT without CLUSTER passes through unchanged.
+
+        Given:
+            A SELECT with no CLUSTER expressions
+        When:
+            transform is called
+        Then:
+            It should return the query unchanged
+        """
+        # Arrange
         tables = _make_tables("features")
         transformer = ClusterTransformer(tables)
         ast = parse_one("SELECT * FROM features", dialect=GIQLDialect)
+
+        # Act
         result = transformer.transform(ast)
+
+        # Assert
         assert result is ast
 
-    def test_ct_007_custom_column_names_via_tables(self):
-        """GIVEN a Tables instance with custom column names WHEN transform is called on a CLUSTER query THEN the generated query uses custom column names."""
+    def test_transform_should_use_custom_column_names_when_tables_configured(self):
+        """Test custom column names from Tables propagate into output SQL.
+
+        Given:
+            A Tables instance with custom column names
+        When:
+            transform is called on a CLUSTER query
+        Then:
+            The generated query should use the custom column names
+        """
+        # Arrange
         custom = Table(
             "features",
             chrom_col="chromosome",
@@ -137,40 +225,77 @@ class TestClusterTransformer:
             end_col="end_pos",
         )
         tables = _make_tables(features=custom)
+
+        # Act
         sql = _transform_and_sql(
             "SELECT *, CLUSTER(interval) FROM features",
             ClusterTransformer,
             tables=tables,
         )
+
+        # Assert
         assert "chromosome" in sql
         assert "start_pos" in sql
         assert "end_pos" in sql
 
-    def test_ct_008_cluster_inside_cte_recursive_transformation(self):
-        """GIVEN a SELECT with CLUSTER inside a CTE subquery WHEN transform is called THEN the CTE subquery is recursively transformed."""
+    def test_transform_should_recurse_when_cluster_inside_cte(self):
+        """Test CLUSTER inside a CTE subquery is recursively transformed.
+
+        Given:
+            A SELECT with CLUSTER inside a CTE subquery
+        When:
+            transform is called
+        Then:
+            It should recursively transform the CTE subquery
+        """
+        # Act
         sql = _transform_and_sql(
             "WITH c AS (SELECT *, CLUSTER(interval) AS cid FROM features) "
             "SELECT * FROM c",
             ClusterTransformer,
         )
+
+        # Assert
         upper = sql.upper()
         assert "LAG" in upper
         assert "SUM" in upper
 
-    def test_ct_009_cluster_with_where_preserved(self):
-        """GIVEN a SELECT with CLUSTER and a WHERE clause WHEN transform is called THEN the WHERE clause is preserved."""
+    def test_transform_should_preserve_where_when_cluster_has_where(self):
+        """Test WHERE clause is preserved alongside CLUSTER.
+
+        Given:
+            A SELECT with CLUSTER and a WHERE clause
+        When:
+            transform is called
+        Then:
+            It should preserve the WHERE clause
+        """
+        # Act
         sql = _transform_and_sql(
             "SELECT *, CLUSTER(interval) FROM features WHERE score > 10",
             ClusterTransformer,
         )
+
+        # Assert
         assert "score > 10" in sql
 
-    def test_ct_010_specific_columns_with_cluster_adds_required_cols(self):
-        """GIVEN a SELECT with specific columns (not *) and CLUSTER WHEN transform is called THEN missing required genomic columns are added to the CTE select list."""
+    def test_transform_should_add_required_genomic_columns_when_specific_columns(self):
+        """Test specific column selection adds required genomic cols to CTE.
+
+        Given:
+            A SELECT with specific columns (not *) and CLUSTER
+        When:
+            transform is called
+        Then:
+            It should add missing required genomic columns to the CTE select list
+        """
+        # Act
         sql = _transform_and_sql(
             "SELECT name, CLUSTER(interval) AS cid FROM features",
             ClusterTransformer,
         )
+
+        # Assert
         upper = sql.upper()
         # Required genomic cols should be in the output
         assert "CHROM" in upper
@@ -186,86 +311,189 @@ class TestClusterTransformer:
 class TestMergeTransformer:
     """Tests for MergeTransformer.transform."""
 
-    def test_mt_001_basic_merge_has_group_by_min_max(self):
-        """GIVEN a Tables instance and a parsed SELECT with MERGE(interval) WHEN transform is called THEN the result has GROUP BY, MIN(start), MAX(end)."""
+    def test_transform_should_produce_group_by_min_max_when_basic_merge(self):
+        """Test basic MERGE produces GROUP BY with MIN(start) and MAX(end).
+
+        Given:
+            A Tables instance and a parsed SELECT with MERGE(interval)
+        When:
+            transform is called
+        Then:
+            It should produce a result with GROUP BY, MIN(start), MAX(end)
+        """
+        # Act
         sql = _transform_and_sql(
             "SELECT MERGE(interval) FROM features", MergeTransformer
         )
+
+        # Assert
         upper = sql.upper()
         assert "GROUP BY" in upper
         assert "MIN(" in upper
         assert "MAX(" in upper
 
-    def test_mt_002_merge_alias_dropped_output_fixed(self):
-        """GIVEN a parsed SELECT with MERGE(interval) AS merged WHEN transform is called THEN the query still produces valid output with fixed columns."""
+    def test_transform_should_produce_fixed_columns_when_merge_has_alias(self):
+        """Test MERGE alias is dropped but output still has fixed columns.
+
+        Given:
+            A parsed SELECT with MERGE(interval) AS merged
+        When:
+            transform is called
+        Then:
+            It should still produce valid output with fixed columns
+        """
+        # Act
         sql = _transform_and_sql(
             "SELECT MERGE(interval) AS merged FROM features",
             MergeTransformer,
         )
+
+        # Assert
         upper = sql.upper()
         assert "GROUP BY" in upper
         assert "MIN(" in upper
         assert "MAX(" in upper
 
-    def test_mt_003_merge_with_distance(self):
-        """GIVEN a parsed SELECT with MERGE(interval, 1000) WHEN transform is called THEN the distance is passed through to CLUSTER."""
+    def test_transform_should_pass_distance_when_merge_has_distance(self):
+        """Test MERGE with distance passes the distance through to CLUSTER.
+
+        Given:
+            A parsed SELECT with MERGE(interval, 1000)
+        When:
+            transform is called
+        Then:
+            It should pass the distance through to CLUSTER
+        """
+        # Act
         sql = _transform_and_sql(
             "SELECT MERGE(interval, 1000) FROM features",
             MergeTransformer,
         )
+
+        # Assert
         assert "1000" in sql
 
-    def test_mt_004_merge_stranded_adds_strand_to_group_by(self):
-        """GIVEN a parsed SELECT with MERGE(interval, stranded := true) WHEN transform is called THEN strand appears in GROUP BY and partition."""
+    def test_transform_should_add_strand_to_group_by_when_stranded(self):
+        """Test stranded MERGE adds strand to GROUP BY and partition.
+
+        Given:
+            A parsed SELECT with MERGE(interval, stranded := true)
+        When:
+            transform is called
+        Then:
+            strand should appear in GROUP BY and partition
+        """
+        # Act
         sql = _transform_and_sql(
             "SELECT MERGE(interval, stranded := true) FROM features",
             MergeTransformer,
         )
+
+        # Assert
         upper = sql.upper()
         assert "STRAND" in upper
         assert "GROUP BY" in upper
 
-    def test_mt_005_non_select_returns_unchanged(self):
-        """GIVEN a non-SELECT expression WHEN transform is called THEN the expression is returned unchanged."""
+    def test_transform_should_return_unchanged_when_expression_is_not_select(self):
+        """Test non-SELECT expression passes through unchanged.
+
+        Given:
+            A non-SELECT expression
+        When:
+            transform is called
+        Then:
+            It should return the expression unchanged
+        """
+        # Arrange
         tables = _make_tables("features")
         transformer = MergeTransformer(tables)
         insert = exp.Insert(this=exp.to_table("features"))
+
+        # Act
         result = transformer.transform(insert)
+
+        # Assert
         assert result is insert
 
-    def test_mt_006_no_merge_returns_unchanged(self):
-        """GIVEN a SELECT with no MERGE expressions WHEN transform is called THEN the query is returned unchanged."""
+    def test_transform_should_return_unchanged_when_no_merge(self):
+        """Test SELECT without MERGE passes through unchanged.
+
+        Given:
+            A SELECT with no MERGE expressions
+        When:
+            transform is called
+        Then:
+            It should return the query unchanged
+        """
+        # Arrange
         tables = _make_tables("features")
         transformer = MergeTransformer(tables)
         ast = parse_one("SELECT * FROM features", dialect=GIQLDialect)
+
+        # Act
         result = transformer.transform(ast)
+
+        # Assert
         assert result is ast
 
-    def test_mt_007_two_merge_expressions_raises_value_error(self):
-        """GIVEN a SELECT with two MERGE expressions WHEN transform is called THEN it raises ValueError."""
+    def test_transform_should_raise_when_multiple_merge_expressions(self):
+        """Test two MERGE expressions raise ValueError.
+
+        Given:
+            A SELECT with two MERGE expressions
+        When:
+            transform is called
+        Then:
+            It should raise ValueError
+        """
+        # Arrange
         tables = _make_tables("features")
         transformer = MergeTransformer(tables)
         ast = parse_one(
             "SELECT MERGE(interval), MERGE(interval) FROM features",
             dialect=GIQLDialect,
         )
+
+        # Act & Assert
         with pytest.raises(ValueError, match="Multiple MERGE"):
             transformer.transform(ast)
 
-    def test_mt_008_merge_with_where_preserved(self):
-        """GIVEN a SELECT with MERGE and a WHERE clause WHEN transform is called THEN the WHERE clause is preserved in the clustered subquery."""
+    def test_transform_should_preserve_where_when_merge_has_where(self):
+        """Test WHERE clause is preserved in the clustered subquery.
+
+        Given:
+            A SELECT with MERGE and a WHERE clause
+        When:
+            transform is called
+        Then:
+            It should preserve the WHERE clause in the clustered subquery
+        """
+        # Act
         sql = _transform_and_sql(
             "SELECT MERGE(interval) FROM features WHERE score > 10",
             MergeTransformer,
         )
+
+        # Assert
         assert "score > 10" in sql
 
-    def test_mt_009_merge_inside_cte_recursive_transformation(self):
-        """GIVEN a SELECT with MERGE inside a CTE subquery WHEN transform is called THEN the CTE subquery is recursively transformed."""
+    def test_transform_should_recurse_when_merge_inside_cte(self):
+        """Test MERGE inside a CTE subquery is recursively transformed.
+
+        Given:
+            A SELECT with MERGE inside a CTE subquery
+        When:
+            transform is called
+        Then:
+            It should recursively transform the CTE subquery
+        """
+        # Act
         sql = _transform_and_sql(
             "WITH m AS (SELECT MERGE(interval) FROM features) SELECT * FROM m",
             MergeTransformer,
         )
+
+        # Assert
         upper = sql.upper()
         assert "GROUP BY" in upper
         assert "MIN(" in upper
@@ -281,10 +509,10 @@ class TestCoverageTransformer:
     """Tests for CoverageTransformer.transform via transpile()."""
 
     # ------------------------------------------------------------------
-    # Instantiation (CT-001)
+    # Instantiation
     # ------------------------------------------------------------------
 
-    def test___init___with_tables(self):
+    def test___init___should_store_tables_reference(self):
         """Test CoverageTransformer stores its tables reference.
 
         Given:
@@ -305,10 +533,10 @@ class TestCoverageTransformer:
         assert transformer.tables is tables
 
     # ------------------------------------------------------------------
-    # Basic transpilation (CT-002, CT-003)
+    # Basic transpilation
     # ------------------------------------------------------------------
 
-    def test_transform_with_basic_count(self):
+    def test_transform_should_produce_expected_sql_structure_when_basic_count(self):
         """Test basic COVERAGE produces correct SQL structure.
 
         Given:
@@ -334,7 +562,7 @@ class TestCoverageTransformer:
         assert "COUNT" in upper
         assert "ORDER BY" in upper
 
-    def test_transform_without_coverage_expression(self):
+    def test_transform_should_return_unchanged_when_no_coverage_expression(self):
         """Test non-COVERAGE query passes through unchanged.
 
         Given:
@@ -357,10 +585,10 @@ class TestCoverageTransformer:
         assert result is ast
 
     # ------------------------------------------------------------------
-    # Stat parameter (CT-004 to CT-007)
+    # Stat parameter
     # ------------------------------------------------------------------
 
-    def test_transform_with_stat_mean(self):
+    def test_transform_should_use_avg_when_stat_is_mean(self):
         """Test stat='mean' maps to AVG aggregate.
 
         Given:
@@ -381,7 +609,7 @@ class TestCoverageTransformer:
         assert "AVG" in upper
         assert "COUNT" not in upper
 
-    def test_transform_with_stat_sum(self):
+    def test_transform_should_use_sum_when_stat_is_sum(self):
         """Test stat='sum' maps to SUM aggregate.
 
         Given:
@@ -400,7 +628,7 @@ class TestCoverageTransformer:
         # Assert
         assert "SUM" in sql.upper()
 
-    def test_transform_with_stat_min(self):
+    def test_transform_should_use_min_when_stat_is_min(self):
         """Test stat='min' maps to MIN aggregate.
 
         Given:
@@ -419,7 +647,7 @@ class TestCoverageTransformer:
         # Assert
         assert "MIN(" in sql.upper()
 
-    def test_transform_with_stat_max(self):
+    def test_transform_should_use_max_when_stat_is_max(self):
         """Test stat='max' maps to MAX aggregate.
 
         Given:
@@ -439,10 +667,10 @@ class TestCoverageTransformer:
         assert "MAX(" in sql.upper()
 
     # ------------------------------------------------------------------
-    # Target parameter (CT-008, CT-009)
+    # Target parameter
     # ------------------------------------------------------------------
 
-    def test_transform_with_target_and_mean(self):
+    def test_transform_should_use_avg_on_target_when_target_with_mean(self):
         """Test target column used with mean stat.
 
         Given:
@@ -464,7 +692,7 @@ class TestCoverageTransformer:
         assert "AVG" in upper
         assert "SCORE" in upper
 
-    def test_transform_with_target_and_count(self):
+    def test_transform_should_count_target_column_when_target_with_count(self):
         """Test target column used with default count stat.
 
         Given:
@@ -487,10 +715,10 @@ class TestCoverageTransformer:
         assert ".*)" not in sql
 
     # ------------------------------------------------------------------
-    # Default alias (CT-010, CT-011)
+    # Default alias
     # ------------------------------------------------------------------
 
-    def test_transform_with_default_alias(self):
+    def test_transform_should_use_value_alias_when_no_explicit_alias(self):
         """Test bare COVERAGE gets default 'value' alias.
 
         Given:
@@ -509,7 +737,7 @@ class TestCoverageTransformer:
         # Assert
         assert "AS value" in sql
 
-    def test_transform_with_explicit_alias(self):
+    def test_transform_should_use_explicit_alias_when_alias_provided(self):
         """Test explicit AS alias overrides default.
 
         Given:
@@ -530,10 +758,10 @@ class TestCoverageTransformer:
         assert "AS value" not in sql
 
     # ------------------------------------------------------------------
-    # WHERE clause semantics (CT-012, CT-013, CT-014)
+    # WHERE clause semantics
     # ------------------------------------------------------------------
 
-    def test_transform_where_moves_to_join_on(self):
+    def test_transform_should_move_where_to_join_on_when_where_present(self):
         """Test WHERE migrates into LEFT JOIN ON clause.
 
         Given:
@@ -559,7 +787,7 @@ class TestCoverageTransformer:
         on_clause = after_join.split("GROUP BY")[0]
         assert "score > 10" in on_clause
 
-    def test_transform_where_qualifies_columns_in_on(self):
+    def test_transform_should_qualify_columns_in_on_when_where_present(self):
         """Test WHERE column references are qualified with source table in ON.
 
         Given:
@@ -581,7 +809,7 @@ class TestCoverageTransformer:
         on_clause = after_join.split("GROUP BY")[0]
         assert "features.score" in on_clause
 
-    def test_transform_where_applied_to_chroms_subquery(self):
+    def test_transform_should_apply_where_to_chroms_subquery_when_where_present(self):
         """Test WHERE is also applied to the chroms subquery.
 
         Given:
@@ -604,10 +832,10 @@ class TestCoverageTransformer:
         assert "features.score > 10" in cte_part
 
     # ------------------------------------------------------------------
-    # Column mapping (CT-015)
+    # Column mapping
     # ------------------------------------------------------------------
 
-    def test_transform_with_custom_column_mapping(self):
+    def test_transform_should_use_custom_column_names_when_mapping_provided(self):
         """Test custom column names are used throughout.
 
         Given:
@@ -638,10 +866,10 @@ class TestCoverageTransformer:
         assert "end_pos" in sql
 
     # ------------------------------------------------------------------
-    # Additional SELECT columns (CT-016)
+    # Additional SELECT columns
     # ------------------------------------------------------------------
 
-    def test_transform_with_additional_select_columns(self):
+    def test_transform_should_include_extra_columns_when_additional_select_columns(self):
         """Test extra SELECT columns pass through alongside COVERAGE.
 
         Given:
@@ -664,10 +892,10 @@ class TestCoverageTransformer:
         assert "COUNT" in upper
 
     # ------------------------------------------------------------------
-    # Table alias (CT-017)
+    # Table alias
     # ------------------------------------------------------------------
 
-    def test_transform_with_table_alias(self):
+    def test_transform_should_use_alias_as_source_when_table_has_alias(self):
         """Test table alias is used as source reference in JOIN.
 
         Given:
@@ -689,10 +917,10 @@ class TestCoverageTransformer:
         assert "LEFT JOIN" in upper
 
     # ------------------------------------------------------------------
-    # Resolution (CT-018)
+    # Resolution
     # ------------------------------------------------------------------
 
-    def test_transform_with_resolution_propagation(self):
+    def test_transform_should_propagate_resolution_when_resolution_provided(self):
         """Test resolution value propagates to generate_series and bin width.
 
         Given:
@@ -712,10 +940,10 @@ class TestCoverageTransformer:
         assert "500" in sql
 
     # ------------------------------------------------------------------
-    # CTE nesting (CT-019)
+    # CTE nesting
     # ------------------------------------------------------------------
 
-    def test_transform_with_coverage_in_cte(self):
+    def test_transform_should_transform_coverage_when_coverage_inside_cte(self):
         """Test COVERAGE inside a WITH clause is transformed correctly.
 
         Given:
@@ -739,10 +967,10 @@ class TestCoverageTransformer:
         assert "COUNT" in upper
 
     # ------------------------------------------------------------------
-    # Error handling (CT-020, CT-021)
+    # Error handling
     # ------------------------------------------------------------------
 
-    def test_transform_with_invalid_stat(self):
+    def test_transform_should_raise_when_stat_is_invalid(self):
         """Test invalid stat raises descriptive error.
 
         Given:
@@ -759,7 +987,7 @@ class TestCoverageTransformer:
                 tables=["features"],
             )
 
-    def test_transform_with_multiple_coverage(self):
+    def test_transform_should_raise_when_multiple_coverage_expressions(self):
         """Test multiple COVERAGE expressions raise error.
 
         Given:
@@ -776,7 +1004,7 @@ class TestCoverageTransformer:
                 tables=["features"],
             )
 
-    def test_transform_with_non_literal_stat_raises(self):
+    def test_transform_should_raise_when_stat_is_not_literal(self):
         """Test non-literal stat argument raises descriptive error.
 
         Given:
@@ -793,7 +1021,7 @@ class TestCoverageTransformer:
                 tables=["features"],
             )
 
-    def test_transform_with_non_literal_target_raises(self):
+    def test_transform_should_raise_when_target_is_not_literal(self):
         """Test non-literal target argument raises descriptive error.
 
         Given:
@@ -810,7 +1038,7 @@ class TestCoverageTransformer:
                 tables=["features"],
             )
 
-    def test_transform_with_subquery_from_raises(self):
+    def test_transform_should_raise_when_from_is_subquery(self):
         """Test subquery in FROM raises a descriptive error.
 
         Given:
@@ -828,7 +1056,7 @@ class TestCoverageTransformer:
                 tables=["features"],
             )
 
-    def test_transform_with_negative_resolution(self):
+    def test_transform_should_raise_when_resolution_is_negative(self):
         """Test negative resolution raises descriptive error.
 
         Given:
@@ -845,7 +1073,7 @@ class TestCoverageTransformer:
                 tables=["features"],
             )
 
-    def test_transform_with_zero_resolution(self):
+    def test_transform_should_raise_when_resolution_is_zero(self):
         """Test zero resolution raises descriptive error.
 
         Given:
@@ -863,10 +1091,10 @@ class TestCoverageTransformer:
             )
 
     # ------------------------------------------------------------------
-    # Functional / DuckDB end-to-end (CT-022 to CT-026)
+    # Functional / DuckDB end-to-end
     # ------------------------------------------------------------------
 
-    def test_transform_end_to_end_basic_count(self, to_df):
+    def test_transform_should_produce_bins_when_basic_count(self, to_df):
         """Test count correctness with two intervals in one bin.
 
         Given:
@@ -896,7 +1124,7 @@ class TestCoverageTransformer:
         row = df[df["start"] == 0].iloc[0]
         assert row["value"] == 2
 
-    def test_transform_end_to_end_zero_coverage_bins(self, to_df):
+    def test_transform_should_produce_zero_coverage_bins_when_gaps_exist(self, to_df):
         """Test zero-coverage bins are present via LEFT JOIN.
 
         Given:
@@ -926,7 +1154,7 @@ class TestCoverageTransformer:
         assert len(df) >= 3
         assert df[df["start"] == 0].iloc[0]["value"] == 1
 
-    def test_transform_end_to_end_no_trailing_bin_on_boundary(self, to_df):
+    def test_transform_should_omit_trailing_bin_when_end_on_boundary(self, to_df):
         """Test no spurious trailing bin when MAX(end) is on a bin boundary.
 
         Given:
@@ -957,7 +1185,7 @@ class TestCoverageTransformer:
         assert df.iloc[0]["start"] == 0
         assert df.iloc[0]["value"] == 1
 
-    def test_transform_end_to_end_zero_bin_value_is_zero(self, to_df):
+    def test_transform_should_return_zero_when_bin_has_no_matching_rows(self, to_df):
         """Test bins with no matching source rows return value=0.
 
         Given:
@@ -994,7 +1222,7 @@ class TestCoverageTransformer:
                 f"bin [{bin_start},{bin_start + 500}) expected 0, got {value}"
             )
 
-    def test_transform_end_to_end_preserves_user_ctes(self, to_df):
+    def test_transform_should_preserve_user_ctes_when_coverage_wraps_them(self, to_df):
         """Test user-defined CTEs are preserved when COVERAGE wraps them.
 
         Given:
@@ -1028,7 +1256,7 @@ class TestCoverageTransformer:
         assert set(df["start"].tolist()) == {0, 1000, 2000}
         assert df[df["start"] == 1000].iloc[0]["value"] == 0
 
-    def test_transform_end_to_end_where_with_table_alias(self, to_df):
+    def test_transform_should_resolve_alias_when_where_uses_table_alias(self, to_df):
         """Test alias-qualified WHERE resolves in chroms subquery.
 
         Given:
@@ -1061,7 +1289,7 @@ class TestCoverageTransformer:
         assert len(df) == 3
         assert set(df["start"].tolist()) == {0, 1000, 2000}
 
-    def test_transform_end_to_end_where_preserves_zero_bins(self, to_df):
+    def test_transform_should_preserve_zero_bins_when_where_in_on(self, to_df):
         """Test WHERE in ON preserves bins without matching intervals.
 
         Given:
@@ -1094,7 +1322,7 @@ class TestCoverageTransformer:
         assert len(df) == 3
         assert set(df["start"].tolist()) == {0, 1000, 2000}
 
-    def test_transform_end_to_end_mean_with_target(self, to_df):
+    def test_transform_should_compute_average_when_mean_with_target(self, to_df):
         """Test mean stat with target column produces correct average.
 
         Given:
@@ -1127,7 +1355,7 @@ class TestCoverageTransformer:
         row = df[df["start"] == 0].iloc[0]
         assert row["value"] == pytest.approx(15.0)
 
-    def test_transform_end_to_end_min_stat(self, to_df):
+    def test_transform_should_return_minimum_interval_length_when_stat_is_min(self, to_df):
         """Test min stat returns minimum interval length.
 
         Given:
@@ -1158,7 +1386,7 @@ class TestCoverageTransformer:
         assert row["value"] == 100
 
     # ------------------------------------------------------------------
-    # Property-based transpilation (PBT-T001, PBT-T002)
+    # Property-based transpilation
     # ------------------------------------------------------------------
 
     @given(
@@ -1166,7 +1394,9 @@ class TestCoverageTransformer:
         stat=st.sampled_from(VALID_STATS),
     )
     @settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
-    def test_transform_with_varying_stat_and_resolution(self, resolution, stat):
+    def test_transform_should_map_stat_to_aggregate_when_varying_stat_and_resolution(
+        self, resolution, stat
+    ):
         """Test stat parameter maps to correct SQL aggregate across input space.
 
         Given:
@@ -1203,7 +1433,7 @@ class TestCoverageTransformer:
         stat=st.sampled_from(VALID_STATS),
     )
     @settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
-    def test_transform_structural_invariants_with_varying_stat_and_resolution(
+    def test_transform_should_contain_structural_elements_when_varying_stat_and_resolution(
         self, resolution, stat
     ):
         """Test transpiled SQL always contains required structural elements.
