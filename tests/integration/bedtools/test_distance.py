@@ -5,7 +5,11 @@ genomic distance between intervals, cross-validated against bedtools
 closest -d output.
 """
 
+import pytest
+
 from .utils.data_models import GenomicInterval
+
+pytestmark = pytest.mark.integration
 
 
 def test_distance_non_overlapping(giql_query):

@@ -4,11 +4,15 @@ These tests cover distance calculations, multi-query scenarios, and scale
 to ensure comprehensive GIQL/bedtools equivalence for nearest operations.
 """
 
+import pytest
+
 from giql import transpile
 
 from .utils.bedtools_wrapper import closest
 from .utils.data_models import GenomicInterval
 from .utils.duckdb_loader import load_intervals
+
+pytestmark = pytest.mark.integration
 
 
 def _load_and_query_nearest(

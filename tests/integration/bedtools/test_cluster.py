@@ -6,11 +6,15 @@ CLUSTER equivalent, we cross-validate against bedtools merge: the
 number of distinct clusters should equal the number of merged intervals.
 """
 
+import pytest
+
 from giql import transpile
 
 from .utils.bedtools_wrapper import merge
 from .utils.data_models import GenomicInterval
 from .utils.duckdb_loader import load_intervals
+
+pytestmark = pytest.mark.integration
 
 
 def test_cluster_basic(duckdb_connection):

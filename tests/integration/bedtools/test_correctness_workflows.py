@@ -5,6 +5,8 @@ equivalent bedtools command pipelines. Corresponds to User Story 4 (P3)
 from the bedtools integration test spec.
 """
 
+import pytest
+
 from giql import transpile
 
 from .utils.bedtools_wrapper import closest
@@ -13,6 +15,8 @@ from .utils.bedtools_wrapper import merge
 from .utils.comparison import compare_results
 from .utils.data_models import GenomicInterval
 from .utils.duckdb_loader import load_intervals
+
+pytestmark = pytest.mark.integration
 
 
 def test_workflow_intersect_then_merge(duckdb_connection):
