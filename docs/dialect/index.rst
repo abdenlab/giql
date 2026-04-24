@@ -95,9 +95,9 @@ Combine and cluster genomic intervals.
    * - :ref:`MERGE <merge-operator>`
      - Combine overlapping intervals into unified regions
      - ``SELECT MERGE(interval) FROM features``
-   * - :ref:`COVERAGE <coverage-operator>`
-     - Compute binned genome coverage from interval data
-     - ``SELECT COVERAGE(interval, 1000) FROM features``
+   * - :ref:`RASTERIZE <rasterize-operator>`
+     - Rasterize intervals onto a fixed bin grid with per-bin counts
+     - ``SELECT RASTERIZE(interval, 1000) FROM features``
 
 See :doc:`aggregation-operators` for detailed documentation.
 

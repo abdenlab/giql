@@ -328,22 +328,22 @@ Related Operators
 ~~~~~~~~~~~~~~~~~
 
 - :ref:`CLUSTER <cluster-operator>` - Assign cluster IDs without merging
-- :ref:`COVERAGE <coverage-operator>` - Compute binned genome coverage
+- :ref:`RASTERIZE <rasterize-operator>` - Rasterize intervals onto a fixed bin grid
 - :ref:`INTERSECTS <intersects-operator>` - Test for overlap between specific pairs
 
 ----
 
-.. _coverage-operator:
+.. _rasterize-operator:
 
-COVERAGE
---------
+RASTERIZE
+---------
 
-Compute binned genome coverage by tiling the genome into fixed-width bins.
+Rasterize interval data onto a fixed-resolution bin grid, counting overlaps per bin.
 
 Description
 ~~~~~~~~~~~
 
-The ``COVERAGE`` operator tiles the genome into fixed-width bins and counts the number of intervals overlapping each bin. It generates a bin grid using ``generate_series`` and joins it against the source table to count overlapping features per bin.
+The ``RASTERIZE`` operator tiles the genome into fixed-width bins and counts the number of intervals overlapping each bin. It generates a bin grid using ``generate_series`` and joins it against the source table to count overlapping features per bin.
 
 This is useful for:
 
@@ -357,7 +357,7 @@ The operator works as an aggregate function, returning one row per bin with the 
 
 .. note::
 
-   COVERAGE depends on ``LATERAL`` plus ``generate_series`` for bin generation, which DuckDB and PostgreSQL both support. SQLite does not currently provide either primitive, so this operator is not yet available on the SQLite backend.
+   RASTERIZE depends on ``LATERAL`` plus ``generate_series`` for bin generation, which DuckDB and PostgreSQL both support. SQLite does not currently provide either primitive, so this operator is not yet available on the SQLite backend.
 
 .. note::
 
@@ -369,10 +369,10 @@ Syntax
 .. code-block:: sql
 
    -- Count overlapping intervals per bin
-   SELECT COVERAGE(interval, <bin_width>) FROM features
+   SELECT RASTERIZE(interval, <bin_width>) FROM features
 
    -- Named resolution parameter
-   SELECT COVERAGE(interval, resolution := 500) FROM features
+   SELECT RASTERIZE(interval, resolution := 500) FROM features
 
 Parameters
 ~~~~~~~~~~
@@ -381,7 +381,7 @@ Parameters
    A genomic column.
 
 **resolution** *(required)*
-   Bin width in base pairs — must be a positive integer literal. Can be given as a positional or named parameter (``COVERAGE(interval, 1000)`` or ``COVERAGE(interval, resolution := 1000)``). Omitting it, or supplying a non-positive value, raises ``ValueError`` at transpile time.
+   Bin width in base pairs — must be a positive integer literal. Can be given as a positional or named parameter (``RASTERIZE(interval, 1000)`` or ``RASTERIZE(interval, resolution := 1000)``). Omitting it, or supplying a non-positive value, raises ``ValueError`` at transpile time.
 
 Return Value
 ~~~~~~~~~~~~
@@ -396,20 +396,20 @@ Returns one row per genomic bin:
 Examples
 ~~~~~~~~
 
-**Basic Coverage:**
+**Basic Count:**
 
 Count the number of features overlapping each 1 kb bin:
 
 .. code-block:: sql
 
-   SELECT COVERAGE(interval, 1000)
+   SELECT RASTERIZE(interval, 1000)
    FROM features
 
 **Named Alias:**
 
 .. code-block:: sql
 
-   SELECT COVERAGE(interval, 1000) AS depth
+   SELECT RASTERIZE(interval, 1000) AS depth
    FROM reads
 
 **With WHERE Filter:**
@@ -418,26 +418,26 @@ Assuming the source table includes a ``score`` column, count high-scoring featur
 
 .. code-block:: sql
 
-   SELECT COVERAGE(interval, 1000) AS depth
+   SELECT RASTERIZE(interval, 1000) AS depth
    FROM features
    WHERE score > 10
 
 Supported FROM clauses
 ~~~~~~~~~~~~~~~~~~~~~~
 
-``COVERAGE`` requires a ``FROM`` clause that references a table or named CTE. Inline subqueries (``FROM (SELECT ...) AS sub``) and ``VALUES`` clauses are not supported — wrap the derivation in a ``WITH`` clause and select ``COVERAGE(...)`` from the CTE by name:
+``RASTERIZE`` requires a ``FROM`` clause that references a table or named CTE. Inline subqueries (``FROM (SELECT ...) AS sub``) and ``VALUES`` clauses are not supported — wrap the derivation in a ``WITH`` clause and select ``RASTERIZE(...)`` from the CTE by name:
 
 .. code-block:: sql
 
    -- Not supported: inline subquery in FROM
-   SELECT COVERAGE(interval, 1000)
+   SELECT RASTERIZE(interval, 1000)
    FROM (SELECT * FROM features WHERE score > 50) AS filtered
 
    -- Supported: same derivation wrapped in a CTE
    WITH filtered AS (
        SELECT * FROM features WHERE score > 50
    )
-   SELECT COVERAGE(interval, 1000) FROM filtered
+   SELECT RASTERIZE(interval, 1000) FROM filtered
 
 Any ``WITH`` clauses you declare are preserved alongside the internal ``__giql_bins`` CTE in the transpiled SQL.
 

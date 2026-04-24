@@ -19,9 +19,9 @@ Recipe Categories
    Clustering overlapping intervals, distance-based clustering,
    merging intervals, and aggregating cluster statistics.
 
-:doc:`coverage`
-   Binned genome coverage, coverage statistics, strand-specific coverage,
-   normalisation, and 5' end counting.
+:doc:`rasterize`
+   Rasterizing intervals onto a fixed bin grid: per-bin counts,
+   strand-specific counts, normalisation, and 5' end counting.
 
 :doc:`advanced`
    Multi-range matching, complex filtering with joins, aggregate statistics,
