@@ -17,12 +17,9 @@ from giql import transpile
 from giql.dialect import GIQLDialect
 from giql.generators import BaseGIQLGenerator
 from giql.table import Tables
-from giql.transformer import COVERAGE_STAT_MAP
 from giql.transformer import ClusterTransformer
 from giql.transformer import CoverageTransformer
 from giql.transformer import MergeTransformer
-
-VALID_STATS = list(COVERAGE_STAT_MAP)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -55,34 +52,6 @@ def _transpile_with_transformer(
     result = transformer.transform(ast)
     generator = BaseGIQLGenerator(tables=tables)
     return generator.generate(result)
-
-
-# ===========================================================================
-# TestCoverageStatMap
-# ===========================================================================
-
-
-class TestCoverageStatMap:
-    """Tests for the COVERAGE_STAT_MAP module-level constant."""
-
-    def test_COVERAGE_STAT_MAP_should_contain_all_supported_stats(self):
-        """Test COVERAGE_STAT_MAP maps stat names to SQL aggregates.
-
-        Given:
-            The transformer module is imported
-        When:
-            COVERAGE_STAT_MAP is accessed
-        Then:
-            It should map count->COUNT, mean->AVG, sum->SUM, min->MIN, max->MAX
-        """
-        # Act & Assert
-        assert COVERAGE_STAT_MAP == {
-            "count": "COUNT",
-            "mean": "AVG",
-            "sum": "SUM",
-            "min": "MIN",
-            "max": "MAX",
-        }
 
 
 # ===========================================================================
@@ -595,136 +564,6 @@ class TestCoverageTransformer:
         assert result is ast
 
     # ------------------------------------------------------------------
-    # Stat parameter
-    # ------------------------------------------------------------------
-
-    def test_transform_should_use_avg_when_stat_is_mean(self):
-        """Test stat='mean' maps to AVG aggregate.
-
-        Given:
-            A COVERAGE query with stat := 'mean'
-        When:
-            Transpiled
-        Then:
-            It should use AVG aggregate, not COUNT
-        """
-        # Act
-        sql = transpile(
-            "SELECT COVERAGE(interval, 1000, stat := 'mean') FROM features",
-            tables=["features"],
-        )
-
-        # Assert
-        upper = sql.upper()
-        assert "AVG" in upper
-        assert "COUNT" not in upper
-
-    def test_transform_should_use_sum_when_stat_is_sum(self):
-        """Test stat='sum' maps to SUM aggregate.
-
-        Given:
-            A COVERAGE query with stat := 'sum'
-        When:
-            Transpiled
-        Then:
-            It should use SUM aggregate
-        """
-        # Act
-        sql = transpile(
-            "SELECT COVERAGE(interval, 1000, stat := 'sum') FROM features",
-            tables=["features"],
-        )
-
-        # Assert
-        assert "SUM" in sql.upper()
-
-    def test_transform_should_use_min_when_stat_is_min(self):
-        """Test stat='min' maps to MIN aggregate.
-
-        Given:
-            A COVERAGE query with stat := 'min'
-        When:
-            Transpiled
-        Then:
-            It should use MIN aggregate
-        """
-        # Act
-        sql = transpile(
-            "SELECT COVERAGE(interval, 1000, stat := 'min') FROM features",
-            tables=["features"],
-        )
-
-        # Assert
-        assert "MIN(" in sql.upper()
-
-    def test_transform_should_use_max_when_stat_is_max(self):
-        """Test stat='max' maps to MAX aggregate.
-
-        Given:
-            A COVERAGE query with stat := 'max'
-        When:
-            Transpiled
-        Then:
-            It should use MAX aggregate
-        """
-        # Act
-        sql = transpile(
-            "SELECT COVERAGE(interval, 1000, stat := 'max') FROM features",
-            tables=["features"],
-        )
-
-        # Assert
-        assert "MAX(" in sql.upper()
-
-    # ------------------------------------------------------------------
-    # Target parameter
-    # ------------------------------------------------------------------
-
-    def test_transform_should_use_avg_on_target_when_target_with_mean(self):
-        """Test target column used with mean stat.
-
-        Given:
-            A COVERAGE query with stat := 'mean' and target := 'score'
-        When:
-            Transpiled
-        Then:
-            It should use AVG on the score column
-        """
-        # Act
-        sql = transpile(
-            "SELECT COVERAGE(interval, 1000, stat := 'mean', "
-            "target := 'score') FROM features",
-            tables=["features"],
-        )
-
-        # Assert
-        upper = sql.upper()
-        assert "AVG" in upper
-        assert "SCORE" in upper
-
-    def test_transform_should_count_target_column_when_target_with_count(self):
-        """Test target column used with default count stat.
-
-        Given:
-            A COVERAGE query with target := 'score' (default count)
-        When:
-            Transpiled
-        Then:
-            It should use COUNT on the score column, not COUNT(*)
-        """
-        # Act
-        sql = transpile(
-            "SELECT COVERAGE(interval, 1000, target := 'score') FROM features",
-            tables=["features"],
-        )
-
-        # Assert
-        upper = sql.upper()
-        assert "COUNT" in upper
-        assert "SCORE" in upper
-        assert ".*)" not in sql
-
-    # ------------------------------------------------------------------
     # Default alias
     # ------------------------------------------------------------------
 
@@ -980,23 +819,6 @@ class TestCoverageTransformer:
     # Error handling
     # ------------------------------------------------------------------
 
-    def test_transform_should_raise_when_stat_is_invalid(self):
-        """Test invalid stat raises descriptive error.
-
-        Given:
-            A COVERAGE query with an invalid stat value
-        When:
-            Transpiled
-        Then:
-            It should raise ValueError matching "Unknown COVERAGE stat"
-        """
-        # Act & Assert
-        with pytest.raises(ValueError, match="Unknown COVERAGE stat"):
-            transpile(
-                "SELECT COVERAGE(interval, 1000, stat := 'median') FROM features",
-                tables=["features"],
-            )
-
     def test_transform_should_raise_when_multiple_coverage_expressions(self):
         """Test multiple COVERAGE expressions raise error.
 
@@ -1011,40 +833,6 @@ class TestCoverageTransformer:
         with pytest.raises(ValueError, match="Multiple COVERAGE"):
             transpile(
                 "SELECT COVERAGE(interval, 1000), COVERAGE(interval, 500) FROM features",
-                tables=["features"],
-            )
-
-    def test_transform_should_raise_when_stat_is_not_literal(self):
-        """Test non-literal stat argument raises descriptive error.
-
-        Given:
-            A COVERAGE query where stat is an unquoted column reference
-        When:
-            Transpiled
-        Then:
-            It should raise ValueError matching "string literal"
-        """
-        # Act & Assert
-        with pytest.raises(ValueError, match="string literal"):
-            transpile(
-                "SELECT COVERAGE(interval, 1000, stat := score) FROM features",
-                tables=["features"],
-            )
-
-    def test_transform_should_raise_when_target_is_not_literal(self):
-        """Test non-literal target argument raises descriptive error.
-
-        Given:
-            A COVERAGE query where target is an unquoted column reference
-        When:
-            Transpiled
-        Then:
-            It should raise ValueError matching "string literal"
-        """
-        # Act & Assert
-        with pytest.raises(ValueError, match="string literal"):
-            transpile(
-                "SELECT COVERAGE(interval, 1000, target := score) FROM features",
                 tables=["features"],
             )
 
@@ -1339,133 +1127,62 @@ class TestCoverageTransformer:
         assert len(df) == 3
         assert set(df["start"].tolist()) == {0, 1000, 2000}
 
-    def test_transform_should_compute_average_when_mean_with_target(self, to_df):
-        """Test mean stat with target column produces correct average.
+    def test_transform_should_count_interval_in_each_overlapped_bin_when_interval_spans_bins(
+        self, to_df
+    ):
+        """Test bedtools-coverage convention: an interval is counted in every bin it overlaps.
 
         Given:
-            A DuckDB table with a score column and two intervals in one bin
+            A DuckDB table with one interval [500, 2500) that spans the
+            three adjacent 1000bp bins [0, 1000), [1000, 2000), [2000, 3000)
         When:
-            COVERAGE with stat='mean' and target='score' is transpiled
-            and executed
+            COVERAGE count is transpiled and executed
         Then:
-            It should return the average of the score values
+            The interval should be counted once in each of the three bins,
+            matching `bedtools coverage` semantics — totals do not conserve
         """
         # Arrange
         giql_sql = transpile(
-            "SELECT COVERAGE(interval, 1000, stat := 'mean', "
-            "target := 'score') FROM features",
+            "SELECT COVERAGE(interval, 1000) FROM features",
             tables=["features"],
         )
         conn = duckdb.connect(":memory:")
         conn.execute(
             "CREATE TABLE features AS "
-            "SELECT 'chr1' AS chrom, 100 AS start, 200 AS \"end\", "
-            "10.0 AS score "
-            "UNION ALL SELECT 'chr1', 300, 400, 20.0"
+            "SELECT 'chr1' AS chrom, 500 AS start, 2500 AS \"end\""
         )
 
         # Act
-        df = to_df(conn.execute(giql_sql))
+        df = to_df(conn.execute(giql_sql)).sort_values("start").reset_index(drop=True)
         conn.close()
 
         # Assert
-        row = df[df["start"] == 0].iloc[0]
-        assert row["value"] == pytest.approx(15.0)
-
-    def test_transform_should_return_minimum_interval_length_when_stat_is_min(self, to_df):
-        """Test min stat returns minimum interval length.
-
-        Given:
-            A DuckDB table with intervals of different lengths in one bin
-        When:
-            COVERAGE with stat='min' is transpiled and executed
-        Then:
-            It should return the minimum interval length
-        """
-        # Arrange
-        giql_sql = transpile(
-            "SELECT COVERAGE(interval, 1000, stat := 'min') FROM features",
-            tables=["features"],
-        )
-        conn = duckdb.connect(":memory:")
-        conn.execute(
-            "CREATE TABLE features AS "
-            "SELECT 'chr1' AS chrom, 100 AS start, 200 AS \"end\" "
-            "UNION ALL SELECT 'chr1', 300, 600"
-        )
-
-        # Act
-        df = to_df(conn.execute(giql_sql))
-        conn.close()
-
-        # Assert
-        row = df[df["start"] == 0].iloc[0]
-        assert row["value"] == 100
+        assert df["start"].tolist() == [0, 1000, 2000]
+        assert df["value"].tolist() == [1, 1, 1]
 
     # ------------------------------------------------------------------
     # Property-based transpilation
     # ------------------------------------------------------------------
 
-    @given(
-        resolution=st.integers(min_value=1, max_value=10_000_000),
-        stat=st.sampled_from(VALID_STATS),
-    )
+    @given(resolution=st.integers(min_value=1, max_value=10_000_000))
     @settings(max_examples=50, suppress_health_check=[HealthCheck.function_scoped_fixture])
-    def test_transform_should_map_stat_to_aggregate_when_varying_stat_and_resolution(
-        self, resolution, stat
-    ):
-        """Test stat parameter maps to correct SQL aggregate across input space.
-
-        Given:
-            Any valid stat (count/mean/sum/min/max) and resolution (1-10M)
-        When:
-            Transpiled via transpile()
-        Then:
-            The output SQL should contain the corresponding SQL aggregate
-            function name and the resolution value
-        """
-        # Arrange
-        stat_to_sql = {
-            "count": "COUNT",
-            "mean": "AVG",
-            "sum": "SUM(",
-            "min": "MIN(",
-            "max": "MAX(",
-        }
-        expected_agg = stat_to_sql[stat]
-
-        # Act
-        sql = transpile(
-            f"SELECT COVERAGE(interval, {resolution}, stat := '{stat}') FROM features",
-            tables=["features"],
-        )
-
-        # Assert
-        upper = sql.upper()
-        assert expected_agg in upper
-        assert str(resolution) in sql
-
-    @given(
-        resolution=st.integers(min_value=1, max_value=10_000_000),
-        stat=st.sampled_from(VALID_STATS),
-    )
-    @settings(max_examples=50, suppress_health_check=[HealthCheck.function_scoped_fixture])
-    def test_transform_should_contain_structural_elements_when_varying_stat_and_resolution(
-        self, resolution, stat
+    def test_transform_should_contain_structural_elements_when_varying_resolution(
+        self, resolution
     ):
         """Test transpiled SQL always contains required structural elements.
 
         Given:
-            Any valid stat (count/mean/sum/min/max) and resolution (1-10M)
+            Any valid resolution (1-10M)
         When:
             Transpiled via transpile()
         Then:
             The output SQL should always contain __GIQL_BINS,
-            GENERATE_SERIES, LEFT JOIN, GROUP BY, and ORDER BY
+            GENERATE_SERIES, LEFT JOIN, GROUP BY, COUNT, ORDER BY,
+            and the resolution value as the bin step
         """
         # Act
         sql = transpile(
-            f"SELECT COVERAGE(interval, {resolution}, stat := '{stat}') FROM features",
+            f"SELECT COVERAGE(interval, {resolution}) FROM features",
             tables=["features"],
         )
 
@@ -1475,4 +1192,6 @@ class TestCoverageTransformer:
         assert "GENERATE_SERIES" in upper
         assert "LEFT JOIN" in upper
         assert "GROUP BY" in upper
+        assert "COUNT" in upper
         assert "ORDER BY" in upper
+        assert str(resolution) in sql

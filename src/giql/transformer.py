@@ -6,7 +6,6 @@ SQL with CTEs.
 """
 
 import itertools
-from typing import Final
 
 from sqlglot import exp
 
@@ -20,25 +19,6 @@ from giql.expressions import GIQLCoverage
 from giql.expressions import GIQLMerge
 from giql.expressions import Intersects
 from giql.table import Tables
-
-# Mapping from COVERAGE stat parameter to SQL aggregate function
-COVERAGE_STAT_MAP: Final[dict[str, str]] = {
-    "count": "COUNT",
-    "mean": "AVG",
-    "sum": "SUM",
-    "min": "MIN",
-    "max": "MAX",
-}
-
-# Typed SQLGlot node class for each SQL aggregate name so the transformer
-# emits dialect-correct renderings instead of opaque exp.Anonymous nodes.
-_AGG_NODE: Final[dict[str, type[exp.AggFunc]]] = {
-    "COUNT": exp.Count,
-    "AVG": exp.Avg,
-    "SUM": exp.Sum,
-    "MIN": exp.Min,
-    "MAX": exp.Max,
-}
 
 
 class ClusterTransformer:
@@ -1644,31 +1624,6 @@ class CoverageTransformer:
                 f"COVERAGE resolution must be positive, got {resolution}"
             )
 
-        stat_expr = coverage_expr.args.get("stat")
-        if stat_expr:
-            if not isinstance(stat_expr, exp.Literal):
-                raise ValueError("COVERAGE stat must be a string literal")
-            stat = stat_expr.this.strip("'\"").lower()
-        else:
-            stat = "count"
-
-        if stat not in COVERAGE_STAT_MAP:
-            raise ValueError(
-                f"Unknown COVERAGE stat '{stat}'. "
-                f"Must be one of: {', '.join(COVERAGE_STAT_MAP)}"
-            )
-
-        sql_agg = COVERAGE_STAT_MAP[stat]
-
-        # Extract target parameter
-        target_expr = coverage_expr.args.get("target")
-        if target_expr:
-            if not isinstance(target_expr, exp.Literal):
-                raise ValueError("COVERAGE target must be a string literal")
-            target_col = target_expr.this.strip("'\"")
-        else:
-            target_col = None
-
         # Get column names and table info
         chrom_col, start_col, end_col, _ = (
             self.cluster_transformer._get_genomic_columns(query)
@@ -1793,22 +1748,12 @@ class CoverageTransformer:
         )
         with_clause = exp.With(expressions=[bins_cte])
 
-        # Build the aggregate expression using typed SQLGlot nodes so each
-        # dialect renders them correctly (exp.Anonymous bypasses dialect hooks).
-        if stat == "count":
-            agg_inner = exp.column(
-                target_col if target_col else chrom_col,
-                table=source_ref,
-                quoted=True,
-            )
-        elif target_col:
-            agg_inner = exp.column(target_col, table=source_ref, quoted=True)
-        else:
-            agg_inner = exp.Sub(
-                this=exp.column(end_col, table=source_ref, quoted=True),
-                expression=exp.column(start_col, table=source_ref, quoted=True),
-            )
-        agg_expr = _AGG_NODE[sql_agg](this=agg_inner)
+        # COUNT(chrom) — null-safe count of intervals overlapping the bin.
+        # Counting a non-null source column gives 0 for empty bins (LEFT JOIN
+        # produces NULLs for non-matches, which COUNT excludes).
+        agg_expr = exp.Count(
+            this=exp.column(chrom_col, table=source_ref, quoted=True),
+        )
 
         # Build main SELECT
         final_query = exp.Select()

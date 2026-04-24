@@ -145,21 +145,18 @@ class GIQLMerge(exp.Func):
 class GIQLCoverage(exp.Func):
     """COVERAGE aggregate function for binned genome coverage.
 
-    Tiles the genome into fixed-width bins and aggregates overlapping
-    intervals per bin using generate_series and JOIN + GROUP BY.
+    Tiles the genome into fixed-width bins and counts the number of
+    overlapping intervals per bin (bedtools-coverage convention: an
+    interval that spans multiple bins is counted in each of them).
 
     Examples:
         COVERAGE(interval, 1000)
-        COVERAGE(interval, 500, stat := 'mean')
         COVERAGE(interval, resolution := 1000)
-        COVERAGE(interval, 1000, stat := 'mean', target := 'score')
     """
 
     arg_types = {
         "this": True,  # genomic column
         "resolution": True,  # bin width (positional or named)
-        "stat": False,  # aggregation: 'count', 'mean', 'sum', 'min', 'max'
-        "target": False,  # column to aggregate (default: interval length)
     }
 
     @classmethod

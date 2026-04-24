@@ -317,33 +317,6 @@ class TestGIQLDialect:
         node = nodes[0]
         assert node.args.get("resolution") is not None
 
-    def test_parse_one_should_set_stat_arg_on_GIQLCoverage_when_stat_named_param_is_given(self):
-        """Test `COVERAGE(interval, 500, stat := 'mean')` sets the stat argument.
-
-        Given:
-            A SELECT query containing `COVERAGE(interval, 500, stat := 'mean')`
-        When:
-            The query is parsed with GIQLDialect
-        Then:
-            It should produce a GIQLCoverage node whose stat argument equals "mean"
-        """
-        # GD-011
-        # Arrange
-        query = "SELECT COVERAGE(interval, 500, stat := 'mean') FROM t"
-
-        # Act
-        ast = parse_one(
-            query,
-            dialect=GIQLDialect,
-        )
-
-        # Assert
-        nodes = list(ast.find_all(GIQLCoverage))
-        assert len(nodes) == 1
-        node = nodes[0]
-        assert node.args.get("stat") is not None
-        assert node.args["stat"].this == "mean"
-
     def test_parse_one_should_set_resolution_arg_on_GIQLCoverage_when_resolution_is_passed_as_kwarg(self):
         """Test `COVERAGE(interval, resolution => 1000)` sets resolution via Kwarg syntax.
 
@@ -369,38 +342,6 @@ class TestGIQLDialect:
         assert len(nodes) == 1
         node = nodes[0]
         assert node.args.get("resolution") is not None
-
-    def test_parse_one_should_set_stat_and_target_args_on_GIQLCoverage_when_both_are_given(self):
-        """Test `COVERAGE(interval, 1000, stat := 'mean', target := 'score')` sets both args.
-
-        Given:
-            A SELECT query containing
-            `COVERAGE(interval, 1000, stat := 'mean', target := 'score')`
-        When:
-            The query is parsed with GIQLDialect
-        Then:
-            It should produce a GIQLCoverage node with stat="mean" and target="score"
-        """
-        # GD-013
-        # Arrange
-        query = (
-            "SELECT COVERAGE(interval, 1000, stat := 'mean', target := 'score') FROM t"
-        )
-
-        # Act
-        ast = parse_one(
-            query,
-            dialect=GIQLDialect,
-        )
-
-        # Assert
-        nodes = list(ast.find_all(GIQLCoverage))
-        assert len(nodes) == 1
-        node = nodes[0]
-        assert node.args.get("stat") is not None
-        assert node.args["stat"].this == "mean"
-        assert node.args.get("target") is not None
-        assert node.args["target"].this == "score"
 
     def test_parse_one_should_produce_GIQLDistance_node_for_distance_call(self):
         """Test `DISTANCE(a.interval, b.interval)` parses into a GIQLDistance AST node.

@@ -195,47 +195,6 @@ class TestTranspile:
         assert "ORDER BY" in upper
         assert "1000" in sql
 
-    def test_transpile_should_emit_avg_for_coverage_mean_stat(self):
-        """Test COVERAGE with stat 'mean' emits AVG aggregate.
-
-        Given:
-            A query with COVERAGE(interval, 500, stat := 'mean')
-        When:
-            transpile is called
-        Then:
-            It should return SQL that contains an AVG aggregate
-        """
-        # Arrange / Act
-        sql = transpile(
-            "SELECT COVERAGE(interval, 500, stat := 'mean') FROM features",
-            tables=["features"],
-        )
-
-        # Assert
-        upper = sql.upper()
-        assert "AVG" in upper
-
-    def test_transpile_should_apply_avg_to_target_column_for_coverage_mean(self):
-        """Test COVERAGE mean stat with target column emits AVG(target).
-
-        Given:
-            A query with COVERAGE(interval, 1000, stat := 'mean', target := 'score')
-        When:
-            transpile is called
-        Then:
-            It should return SQL that contains AVG applied to the score column
-        """
-        # Arrange / Act
-        sql = transpile(
-            "SELECT COVERAGE(interval, 1000, stat := 'mean', target := 'score') FROM features",
-            tables=["features"],
-        )
-
-        # Assert
-        upper = sql.upper()
-        assert "AVG" in upper
-        assert "SCORE" in upper
-
     def test_transpile_should_use_custom_alias_for_coverage_when_provided(self):
         """Test COVERAGE with AS cov aliases the aggregate column as "cov".
 
@@ -464,19 +423,3 @@ class TestTranspile:
         with pytest.raises(ValueError, match="Parse error"):
             transpile("SELECT * FORM features")
 
-    def test_transpile_should_raise_value_error_for_invalid_coverage_stat(self):
-        """Test unknown COVERAGE stat raises ValueError.
-
-        Given:
-            A query with COVERAGE using an invalid stat name
-        When:
-            transpile is called
-        Then:
-            It should raise ValueError with a message containing "Unknown COVERAGE stat"
-        """
-        # Arrange / Act / Assert
-        with pytest.raises(ValueError, match="Unknown COVERAGE stat"):
-            transpile(
-                "SELECT COVERAGE(interval, 1000, stat := 'invalid_stat') FROM features",
-                tables=["features"],
-            )
