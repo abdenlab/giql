@@ -10,7 +10,7 @@ from giql.dialect import WITHIN
 from giql.dialect import GIQLDialect
 from giql.expressions import Contains
 from giql.expressions import GIQLCluster
-from giql.expressions import GIQLCoverage
+from giql.expressions import GIQLRasterize
 from giql.expressions import GIQLDistance
 from giql.expressions import GIQLMerge
 from giql.expressions import GIQLNearest
@@ -291,19 +291,19 @@ class TestGIQLDialect:
         nodes = list(ast.find_all(GIQLMerge))
         assert len(nodes) == 1
 
-    def test_parse_one_should_set_resolution_arg_on_GIQLCoverage_when_resolution_is_positional(self):
-        """Test `COVERAGE(interval, 1000)` sets the resolution argument on GIQLCoverage.
+    def test_parse_one_should_set_resolution_arg_on_GIQLRasterize_when_resolution_is_positional(self):
+        """Test `RASTERIZE(interval, 1000)` sets the resolution argument on GIQLRasterize.
 
         Given:
-            A SELECT query containing `COVERAGE(interval, 1000)`
+            A SELECT query containing `RASTERIZE(interval, 1000)`
         When:
             The query is parsed with GIQLDialect
         Then:
-            It should produce a GIQLCoverage node whose resolution argument is set
+            It should produce a GIQLRasterize node whose resolution argument is set
         """
         # GD-010
         # Arrange
-        query = "SELECT COVERAGE(interval, 1000) FROM t"
+        query = "SELECT RASTERIZE(interval, 1000) FROM t"
 
         # Act
         ast = parse_one(
@@ -312,24 +312,24 @@ class TestGIQLDialect:
         )
 
         # Assert
-        nodes = list(ast.find_all(GIQLCoverage))
+        nodes = list(ast.find_all(GIQLRasterize))
         assert len(nodes) == 1
         node = nodes[0]
         assert node.args.get("resolution") is not None
 
-    def test_parse_one_should_set_resolution_arg_on_GIQLCoverage_when_resolution_is_passed_as_kwarg(self):
-        """Test `COVERAGE(interval, resolution => 1000)` sets resolution via Kwarg syntax.
+    def test_parse_one_should_set_resolution_arg_on_GIQLRasterize_when_resolution_is_passed_as_kwarg(self):
+        """Test `RASTERIZE(interval, resolution => 1000)` sets resolution via Kwarg syntax.
 
         Given:
-            A SELECT query containing `COVERAGE(interval, resolution => 1000)`
+            A SELECT query containing `RASTERIZE(interval, resolution => 1000)`
         When:
             The query is parsed with GIQLDialect
         Then:
-            It should produce a GIQLCoverage node whose resolution argument is set
+            It should produce a GIQLRasterize node whose resolution argument is set
         """
         # GD-012
         # Arrange
-        query = "SELECT COVERAGE(interval, resolution => 1000) FROM t"
+        query = "SELECT RASTERIZE(interval, resolution => 1000) FROM t"
 
         # Act
         ast = parse_one(
@@ -338,7 +338,7 @@ class TestGIQLDialect:
         )
 
         # Assert
-        nodes = list(ast.find_all(GIQLCoverage))
+        nodes = list(ast.find_all(GIQLRasterize))
         assert len(nodes) == 1
         node = nodes[0]
         assert node.args.get("resolution") is not None

@@ -142,16 +142,16 @@ class GIQLMerge(exp.Func):
         return cls(**kwargs)
 
 
-class GIQLCoverage(exp.Func):
-    """COVERAGE aggregate function for binned genome coverage.
+class GIQLRasterize(exp.Func):
+    """RASTERIZE aggregate function that projects intervals onto a fixed bin grid.
 
     Tiles the genome into fixed-width bins and counts the number of
     overlapping intervals per bin (bedtools-coverage convention: an
     interval that spans multiple bins is counted in each of them).
 
     Examples:
-        COVERAGE(interval, 1000)
-        COVERAGE(interval, resolution := 1000)
+        RASTERIZE(interval, 1000)
+        RASTERIZE(interval, resolution := 1000)
     """
 
     arg_types = {

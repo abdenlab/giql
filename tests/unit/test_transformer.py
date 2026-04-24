@@ -18,7 +18,7 @@ from giql.dialect import GIQLDialect
 from giql.generators import BaseGIQLGenerator
 from giql.table import Tables
 from giql.transformer import ClusterTransformer
-from giql.transformer import CoverageTransformer
+from giql.transformer import RasterizeTransformer
 from giql.transformer import MergeTransformer
 
 # ---------------------------------------------------------------------------
@@ -480,24 +480,24 @@ class TestMergeTransformer:
 
 
 # ===========================================================================
-# TestCoverageTransformer
+# TestRasterizeTransformer
 # ===========================================================================
 
 
-class TestCoverageTransformer:
-    """Tests for CoverageTransformer.transform via transpile()."""
+class TestRasterizeTransformer:
+    """Tests for RasterizeTransformer.transform via transpile()."""
 
     # ------------------------------------------------------------------
     # Instantiation
     # ------------------------------------------------------------------
 
     def test___init___should_store_tables_reference(self):
-        """Test CoverageTransformer stores its tables reference.
+        """Test RasterizeTransformer stores its tables reference.
 
         Given:
             A Tables container with registered tables
         When:
-            CoverageTransformer is instantiated
+            RasterizeTransformer is instantiated
         Then:
             It should store the tables reference
         """
@@ -506,7 +506,7 @@ class TestCoverageTransformer:
         tables.register("features", Table("features"))
 
         # Act
-        transformer = CoverageTransformer(tables)
+        transformer = RasterizeTransformer(tables)
 
         # Assert
         assert transformer.tables is tables
@@ -516,10 +516,10 @@ class TestCoverageTransformer:
     # ------------------------------------------------------------------
 
     def test_transform_should_produce_expected_sql_structure_when_basic_count(self):
-        """Test basic COVERAGE produces correct SQL structure.
+        """Test basic RASTERIZE produces correct SQL structure.
 
         Given:
-            A basic COVERAGE query with count (default stat)
+            A basic RASTERIZE query with count (default stat)
         When:
             Transpiled
         Then:
@@ -528,7 +528,7 @@ class TestCoverageTransformer:
         """
         # Act
         sql = transpile(
-            "SELECT COVERAGE(interval, 1000) FROM features",
+            "SELECT RASTERIZE(interval, 1000) FROM features",
             tables=["features"],
         )
 
@@ -541,20 +541,20 @@ class TestCoverageTransformer:
         assert "COUNT" in upper
         assert "ORDER BY" in upper
 
-    def test_transform_should_return_unchanged_when_no_coverage_expression(self):
-        """Test non-COVERAGE query passes through unchanged.
+    def test_transform_should_return_unchanged_when_no_rasterize_expression(self):
+        """Test non-RASTERIZE query passes through unchanged.
 
         Given:
-            A query with no COVERAGE expression
+            A query with no RASTERIZE expression
         When:
-            Transformed by CoverageTransformer
+            Transformed by RasterizeTransformer
         Then:
             It should return the query unchanged
         """
         # Arrange
         tables = Tables()
         tables.register("features", Table("features"))
-        transformer = CoverageTransformer(tables)
+        transformer = RasterizeTransformer(tables)
         ast = parse_one("SELECT * FROM features", dialect=GIQLDialect)
 
         # Act
@@ -568,10 +568,10 @@ class TestCoverageTransformer:
     # ------------------------------------------------------------------
 
     def test_transform_should_use_value_alias_when_no_explicit_alias(self):
-        """Test bare COVERAGE gets default 'value' alias.
+        """Test bare RASTERIZE gets default 'value' alias.
 
         Given:
-            A COVERAGE query without an explicit AS alias
+            A RASTERIZE query without an explicit AS alias
         When:
             Transpiled
         Then:
@@ -579,7 +579,7 @@ class TestCoverageTransformer:
         """
         # Act
         sql = transpile(
-            "SELECT COVERAGE(interval, 1000) FROM features",
+            "SELECT RASTERIZE(interval, 1000) FROM features",
             tables=["features"],
         )
 
@@ -590,7 +590,7 @@ class TestCoverageTransformer:
         """Test explicit AS alias overrides default.
 
         Given:
-            A COVERAGE query with explicit AS alias
+            A RASTERIZE query with explicit AS alias
         When:
             Transpiled
         Then:
@@ -598,7 +598,7 @@ class TestCoverageTransformer:
         """
         # Act
         sql = transpile(
-            "SELECT COVERAGE(interval, 1000) AS depth FROM features",
+            "SELECT RASTERIZE(interval, 1000) AS depth FROM features",
             tables=["features"],
         )
 
@@ -614,7 +614,7 @@ class TestCoverageTransformer:
         """Test WHERE migrates into LEFT JOIN ON clause.
 
         Given:
-            A COVERAGE query with a WHERE clause
+            A RASTERIZE query with a WHERE clause
         When:
             Transpiled
         Then:
@@ -623,7 +623,7 @@ class TestCoverageTransformer:
         """
         # Act
         sql = transpile(
-            "SELECT COVERAGE(interval, 1000) FROM features WHERE score > 10",
+            "SELECT RASTERIZE(interval, 1000) FROM features WHERE score > 10",
             tables=["features"],
         )
 
@@ -640,7 +640,7 @@ class TestCoverageTransformer:
         """Test WHERE column references are qualified with source table in ON.
 
         Given:
-            A COVERAGE query with a WHERE clause
+            A RASTERIZE query with a WHERE clause
         When:
             Transpiled
         Then:
@@ -649,7 +649,7 @@ class TestCoverageTransformer:
         """
         # Act
         sql = transpile(
-            "SELECT COVERAGE(interval, 1000) FROM features WHERE score > 10",
+            "SELECT RASTERIZE(interval, 1000) FROM features WHERE score > 10",
             tables=["features"],
         )
 
@@ -662,7 +662,7 @@ class TestCoverageTransformer:
         """Test WHERE is also applied to the chroms subquery.
 
         Given:
-            A COVERAGE query with a WHERE clause
+            A RASTERIZE query with a WHERE clause
         When:
             Transpiled
         Then:
@@ -671,7 +671,7 @@ class TestCoverageTransformer:
         """
         # Act
         sql = transpile(
-            "SELECT COVERAGE(interval, 1000) FROM features WHERE score > 10",
+            "SELECT RASTERIZE(interval, 1000) FROM features WHERE score > 10",
             tables=["features"],
         )
 
@@ -688,7 +688,7 @@ class TestCoverageTransformer:
         """Test custom column names are used throughout.
 
         Given:
-            A COVERAGE query with custom column mappings
+            A RASTERIZE query with custom column mappings
             (chromosome, start_pos, end_pos)
         When:
             Transpiled
@@ -697,7 +697,7 @@ class TestCoverageTransformer:
         """
         # Act
         sql = transpile(
-            "SELECT COVERAGE(interval, 1000) FROM peaks",
+            "SELECT RASTERIZE(interval, 1000) FROM peaks",
             tables=[
                 Table(
                     "peaks",
@@ -719,10 +719,10 @@ class TestCoverageTransformer:
     # ------------------------------------------------------------------
 
     def test_transform_should_include_extra_columns_when_additional_select_columns(self):
-        """Test extra SELECT columns pass through alongside COVERAGE.
+        """Test extra SELECT columns pass through alongside RASTERIZE.
 
         Given:
-            A COVERAGE query with additional columns alongside COVERAGE
+            A RASTERIZE query with additional columns alongside RASTERIZE
         When:
             Transpiled
         Then:
@@ -730,7 +730,7 @@ class TestCoverageTransformer:
         """
         # Act
         sql = transpile(
-            "SELECT COVERAGE(interval, 500) AS cov, name FROM features",
+            "SELECT RASTERIZE(interval, 500) AS cov, name FROM features",
             tables=["features"],
         )
 
@@ -748,7 +748,7 @@ class TestCoverageTransformer:
         """Test table alias is used as source reference in JOIN.
 
         Given:
-            A COVERAGE query with a table alias (FROM features f)
+            A RASTERIZE query with a table alias (FROM features f)
         When:
             Transpiled
         Then:
@@ -756,7 +756,7 @@ class TestCoverageTransformer:
         """
         # Act
         sql = transpile(
-            "SELECT COVERAGE(interval, 1000) FROM features f",
+            "SELECT RASTERIZE(interval, 1000) FROM features f",
             tables=["features"],
         )
 
@@ -773,7 +773,7 @@ class TestCoverageTransformer:
         """Test resolution value propagates to generate_series and bin width.
 
         Given:
-            A COVERAGE query with resolution=500
+            A RASTERIZE query with resolution=500
         When:
             Transpiled
         Then:
@@ -781,7 +781,7 @@ class TestCoverageTransformer:
         """
         # Act
         sql = transpile(
-            "SELECT COVERAGE(interval, 500) FROM features",
+            "SELECT RASTERIZE(interval, 500) FROM features",
             tables=["features"],
         )
 
@@ -792,19 +792,19 @@ class TestCoverageTransformer:
     # CTE nesting
     # ------------------------------------------------------------------
 
-    def test_transform_should_transform_coverage_when_coverage_inside_cte(self):
-        """Test COVERAGE inside a WITH clause is transformed correctly.
+    def test_transform_should_transform_rasterize_when_rasterize_inside_cte(self):
+        """Test RASTERIZE inside a WITH clause is transformed correctly.
 
         Given:
-            A COVERAGE expression inside a WITH clause
+            A RASTERIZE expression inside a WITH clause
         When:
             Transpiled
         Then:
-            It should correctly transform the CTE containing COVERAGE
+            It should correctly transform the CTE containing RASTERIZE
         """
         # Act
         sql = transpile(
-            "WITH cov AS (SELECT COVERAGE(interval, 1000) FROM features) "
+            "WITH cov AS (SELECT RASTERIZE(interval, 1000) FROM features) "
             "SELECT * FROM cov",
             tables=["features"],
         )
@@ -819,20 +819,20 @@ class TestCoverageTransformer:
     # Error handling
     # ------------------------------------------------------------------
 
-    def test_transform_should_raise_when_multiple_coverage_expressions(self):
-        """Test multiple COVERAGE expressions raise error.
+    def test_transform_should_raise_when_multiple_rasterize_expressions(self):
+        """Test multiple RASTERIZE expressions raise error.
 
         Given:
-            A query with two COVERAGE expressions
+            A query with two RASTERIZE expressions
         When:
             Transpiled
         Then:
-            It should raise ValueError matching "Multiple COVERAGE"
+            It should raise ValueError matching "Multiple RASTERIZE"
         """
         # Act & Assert
-        with pytest.raises(ValueError, match="Multiple COVERAGE"):
+        with pytest.raises(ValueError, match="Multiple RASTERIZE"):
             transpile(
-                "SELECT COVERAGE(interval, 1000), COVERAGE(interval, 500) FROM features",
+                "SELECT RASTERIZE(interval, 1000), RASTERIZE(interval, 500) FROM features",
                 tables=["features"],
             )
 
@@ -840,7 +840,7 @@ class TestCoverageTransformer:
         """Test subquery in FROM raises a descriptive error.
 
         Given:
-            A COVERAGE query whose FROM clause is an inline subquery
+            A RASTERIZE query whose FROM clause is an inline subquery
         When:
             Transpiled
         Then:
@@ -849,7 +849,7 @@ class TestCoverageTransformer:
         # Act & Assert
         with pytest.raises(ValueError, match="FROM clause"):
             transpile(
-                "SELECT COVERAGE(interval, 1000) "
+                "SELECT RASTERIZE(interval, 1000) "
                 "FROM (SELECT * FROM features) AS sub",
                 tables=["features"],
             )
@@ -858,7 +858,7 @@ class TestCoverageTransformer:
         """Test negative resolution raises descriptive error.
 
         Given:
-            A COVERAGE query with resolution = -1
+            A RASTERIZE query with resolution = -1
         When:
             Transpiled
         Then:
@@ -867,7 +867,7 @@ class TestCoverageTransformer:
         # Act & Assert
         with pytest.raises(ValueError, match="positive"):
             transpile(
-                "SELECT COVERAGE(interval, -1) FROM features",
+                "SELECT RASTERIZE(interval, -1) FROM features",
                 tables=["features"],
             )
 
@@ -875,7 +875,7 @@ class TestCoverageTransformer:
         """Test zero resolution raises descriptive error.
 
         Given:
-            A COVERAGE query with resolution = 0
+            A RASTERIZE query with resolution = 0
         When:
             Transpiled
         Then:
@@ -884,7 +884,7 @@ class TestCoverageTransformer:
         # Act & Assert
         with pytest.raises(ValueError, match="positive"):
             transpile(
-                "SELECT COVERAGE(interval, 0) FROM features",
+                "SELECT RASTERIZE(interval, 0) FROM features",
                 tables=["features"],
             )
 
@@ -898,13 +898,13 @@ class TestCoverageTransformer:
         Given:
             A DuckDB table with two intervals in the same 1000bp bin
         When:
-            COVERAGE count is transpiled and executed
+            RASTERIZE count is transpiled and executed
         Then:
             It should return exactly one bin with count=2
         """
         # Arrange
         giql_sql = transpile(
-            "SELECT COVERAGE(interval, 1000) FROM features",
+            "SELECT RASTERIZE(interval, 1000) FROM features",
             tables=["features"],
         )
         conn = duckdb.connect(":memory:")
@@ -929,16 +929,16 @@ class TestCoverageTransformer:
 
         Given:
             A DuckDB table with intervals in bins [0,1000) and [2000,3000)
-            but none in bin [1000,2000), and COVERAGE resolution=1000
+            but none in bin [1000,2000), and RASTERIZE resolution=1000
         When:
-            COVERAGE count is transpiled and executed
+            RASTERIZE count is transpiled and executed
         Then:
             All three bins should be returned and the middle bin should
             report value=0
         """
         # Arrange
         giql_sql = transpile(
-            "SELECT COVERAGE(interval, 1000) FROM features",
+            "SELECT RASTERIZE(interval, 1000) FROM features",
             tables=["features"],
         )
         conn = duckdb.connect(":memory:")
@@ -966,13 +966,13 @@ class TestCoverageTransformer:
             An interval at chr1:100-1000 with resolution=1000 — MAX(end)
             lands exactly on a bin boundary
         When:
-            COVERAGE is transpiled and executed
+            RASTERIZE is transpiled and executed
         Then:
             Exactly one bin [0,1000) should be returned with value=1
         """
         # Arrange
         giql_sql = transpile(
-            "SELECT COVERAGE(interval, 1000) FROM features",
+            "SELECT RASTERIZE(interval, 1000) FROM features",
             tables=["features"],
         )
         conn = duckdb.connect(":memory:")
@@ -995,17 +995,17 @@ class TestCoverageTransformer:
 
         Given:
             A DuckDB table with intervals at chr1:100-200 and chr1:2500-2600
-            and COVERAGE resolution=500 (bins [0,500), [500,1000), ...,
+            and RASTERIZE resolution=500 (bins [0,500), [500,1000), ...,
             [2500,3000))
         When:
-            COVERAGE count is transpiled and executed
+            RASTERIZE count is transpiled and executed
         Then:
             Bins [500,1000), [1000,1500), [1500,2000), [2000,2500) should
             all report value=0
         """
         # Arrange
         giql_sql = transpile(
-            "SELECT COVERAGE(interval, 500) FROM features",
+            "SELECT RASTERIZE(interval, 500) FROM features",
             tables=["features"],
         )
         conn = duckdb.connect(":memory:")
@@ -1027,14 +1027,14 @@ class TestCoverageTransformer:
                 f"bin [{bin_start},{bin_start + 500}) expected 0, got {value}"
             )
 
-    def test_transform_should_preserve_user_ctes_when_coverage_wraps_them(self, to_df):
-        """Test user-defined CTEs are preserved when COVERAGE wraps them.
+    def test_transform_should_preserve_user_ctes_when_rasterize_wraps_them(self, to_df):
+        """Test user-defined CTEs are preserved when RASTERIZE wraps them.
 
         Given:
             A query with a user-defined CTE (selected) that pre-filters
-            the source, followed by SELECT COVERAGE(...) FROM selected
+            the source, followed by SELECT RASTERIZE(...) FROM selected
         When:
-            COVERAGE is transpiled and executed
+            RASTERIZE is transpiled and executed
         Then:
             The user CTE should be preserved alongside __giql_bins and
             the query should execute without "table not found" errors
@@ -1042,7 +1042,7 @@ class TestCoverageTransformer:
         # Arrange
         giql_sql = transpile(
             "WITH selected AS (SELECT chrom, start, \"end\" FROM features WHERE score > 50) "
-            "SELECT COVERAGE(interval, 1000) FROM selected",
+            "SELECT RASTERIZE(interval, 1000) FROM selected",
             tables=["features", "selected"],
         )
         conn = duckdb.connect(":memory:")
@@ -1068,14 +1068,14 @@ class TestCoverageTransformer:
             A FROM clause with a table alias (features f) and a WHERE
             qualifying a column by that alias (f.score > 10)
         When:
-            COVERAGE is transpiled and executed
+            RASTERIZE is transpiled and executed
         Then:
             The query should run without binder errors and produce all
             three bins with WHERE-filtering applied
         """
         # Arrange
         giql_sql = transpile(
-            "SELECT COVERAGE(interval, 1000) FROM features f WHERE f.score > 10",
+            "SELECT RASTERIZE(interval, 1000) FROM features f WHERE f.score > 10",
             tables=["features"],
         )
         conn = duckdb.connect(":memory:")
@@ -1101,14 +1101,14 @@ class TestCoverageTransformer:
             A DuckDB table with high-scoring intervals in bin [0,1000) and
             bin [2000,3000), plus a low-scoring interval in bin [1000,2000)
         When:
-            COVERAGE count with WHERE score > 50 is transpiled and executed
+            RASTERIZE count with WHERE score > 50 is transpiled and executed
         Then:
             All three bins should be present (the WHERE is in the ON clause
             so bins are not dropped even when no source rows match)
         """
         # Arrange
         giql_sql = transpile(
-            "SELECT COVERAGE(interval, 1000) FROM features WHERE score > 50",
+            "SELECT RASTERIZE(interval, 1000) FROM features WHERE score > 50",
             tables=["features"],
         )
         conn = duckdb.connect(":memory:")
@@ -1136,14 +1136,14 @@ class TestCoverageTransformer:
             A DuckDB table with one interval [500, 2500) that spans the
             three adjacent 1000bp bins [0, 1000), [1000, 2000), [2000, 3000)
         When:
-            COVERAGE count is transpiled and executed
+            RASTERIZE count is transpiled and executed
         Then:
             The interval should be counted once in each of the three bins,
             matching `bedtools coverage` semantics — totals do not conserve
         """
         # Arrange
         giql_sql = transpile(
-            "SELECT COVERAGE(interval, 1000) FROM features",
+            "SELECT RASTERIZE(interval, 1000) FROM features",
             tables=["features"],
         )
         conn = duckdb.connect(":memory:")
@@ -1182,7 +1182,7 @@ class TestCoverageTransformer:
         """
         # Act
         sql = transpile(
-            f"SELECT COVERAGE(interval, {resolution}) FROM features",
+            f"SELECT RASTERIZE(interval, {resolution}) FROM features",
             tables=["features"],
         )
 

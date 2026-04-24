@@ -14,7 +14,7 @@ from giql.dialect import GIQLDialect
 from giql.expressions import Contains
 from giql.expressions import GenomicRange
 from giql.expressions import GIQLCluster
-from giql.expressions import GIQLCoverage
+from giql.expressions import GIQLRasterize
 from giql.expressions import GIQLDistance
 from giql.expressions import GIQLMerge
 from giql.expressions import GIQLNearest
@@ -416,8 +416,8 @@ class TestGIQLMerge:
         assert nodes[0].args["stranded"] is not None
 
 
-class TestGIQLCoverage:
-    """Tests for GIQLCoverage expression node parsing."""
+class TestGIQLRasterize:
+    """Tests for GIQLRasterize expression node parsing."""
 
     # ------------------------------------------------------------------
     # Example-based parsing (COV-001 to COV-007)
@@ -427,64 +427,64 @@ class TestGIQLCoverage:
         """Test positional interval and resolution mapping.
 
         Given:
-            A COVERAGE expression with positional interval and resolution
+            A RASTERIZE expression with positional interval and resolution
         When:
             Parsed with GIQLDialect
         Then:
-            It should produce a GIQLCoverage node with resolution set
+            It should produce a GIQLRasterize node with resolution set
         """
         # Act
         ast = parse_one(
-            "SELECT COVERAGE(interval, 1000) FROM features",
+            "SELECT RASTERIZE(interval, 1000) FROM features",
             dialect=GIQLDialect,
         )
 
         # Assert
-        coverage = list(ast.find_all(GIQLCoverage))
-        assert len(coverage) == 1
-        assert coverage[0].args["resolution"].this == "1000"
+        rasterize = list(ast.find_all(GIQLRasterize))
+        assert len(rasterize) == 1
+        assert rasterize[0].args["resolution"].this == "1000"
 
     def test_from_arg_list_should_set_resolution_when_walrus_syntax(self):
         """Test named resolution parameter via := syntax.
 
         Given:
-            A COVERAGE expression with `resolution := 1000`
+            A RASTERIZE expression with `resolution := 1000`
         When:
             Parsed with GIQLDialect
         Then:
-            It should produce a GIQLCoverage node with resolution set via named param
+            It should produce a GIQLRasterize node with resolution set via named param
         """
         # Act
         ast = parse_one(
-            "SELECT COVERAGE(interval, resolution := 1000) FROM features",
+            "SELECT RASTERIZE(interval, resolution := 1000) FROM features",
             dialect=GIQLDialect,
         )
 
         # Assert
-        coverage = list(ast.find_all(GIQLCoverage))
-        assert len(coverage) == 1
-        assert coverage[0].args["resolution"].this == "1000"
+        rasterize = list(ast.find_all(GIQLRasterize))
+        assert len(rasterize) == 1
+        assert rasterize[0].args["resolution"].this == "1000"
 
     def test_from_arg_list_should_set_resolution_when_arrow_syntax(self):
         """Test named resolution parameter via => syntax.
 
         Given:
-            A COVERAGE expression with `resolution => 1000`
+            A RASTERIZE expression with `resolution => 1000`
         When:
             Parsed with GIQLDialect
         Then:
-            It should produce a GIQLCoverage node with resolution set via named param
+            It should produce a GIQLRasterize node with resolution set via named param
         """
         # Act
         ast = parse_one(
-            "SELECT COVERAGE(interval, resolution => 1000) FROM features",
+            "SELECT RASTERIZE(interval, resolution => 1000) FROM features",
             dialect=GIQLDialect,
         )
 
         # Assert
-        coverage = list(ast.find_all(GIQLCoverage))
-        assert len(coverage) == 1
-        assert coverage[0].args["resolution"].this == "1000"
+        rasterize = list(ast.find_all(GIQLRasterize))
+        assert len(rasterize) == 1
+        assert rasterize[0].args["resolution"].this == "1000"
 
     # ------------------------------------------------------------------
     # Property-based parsing (PBT-001 to PBT-002)
@@ -500,18 +500,18 @@ class TestGIQLCoverage:
         When:
             Parsed with GIQLDialect
         Then:
-            It should produce a GIQLCoverage node with the matching resolution
+            It should produce a GIQLRasterize node with the matching resolution
         """
         # Act
         ast = parse_one(
-            f"SELECT COVERAGE(interval, {resolution}) FROM features",
+            f"SELECT RASTERIZE(interval, {resolution}) FROM features",
             dialect=GIQLDialect,
         )
 
         # Assert
-        coverage = list(ast.find_all(GIQLCoverage))
-        assert len(coverage) == 1
-        assert coverage[0].args["resolution"].this == str(resolution)
+        rasterize = list(ast.find_all(GIQLRasterize))
+        assert len(rasterize) == 1
+        assert rasterize[0].args["resolution"].this == str(resolution)
 
     @given(
         resolution=st.integers(min_value=1, max_value=10_000_000),
@@ -528,18 +528,18 @@ class TestGIQLCoverage:
         When:
             Parsed with GIQLDialect
         Then:
-            It should produce a GIQLCoverage node with the matching resolution
+            It should produce a GIQLRasterize node with the matching resolution
         """
         # Act
         ast = parse_one(
-            f"SELECT COVERAGE(interval, resolution {syntax} {resolution}) FROM features",
+            f"SELECT RASTERIZE(interval, resolution {syntax} {resolution}) FROM features",
             dialect=GIQLDialect,
         )
 
         # Assert
-        coverage = list(ast.find_all(GIQLCoverage))
-        assert len(coverage) == 1
-        assert coverage[0].args["resolution"].this == str(resolution)
+        rasterize = list(ast.find_all(GIQLRasterize))
+        assert len(rasterize) == 1
+        assert rasterize[0].args["resolution"].this == str(resolution)
 
 
 class TestGIQLDistance:

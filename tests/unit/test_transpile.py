@@ -169,13 +169,13 @@ class TestTranspile:
         assert "MAX" in upper
         assert "GROUP BY" in upper
 
-    # ── COVERAGE transpilation ───────────────────────────────────────
+    # ── RASTERIZE transpilation ───────────────────────────────────────
 
-    def test_transpile_should_emit_bins_cte_for_coverage(self):
-        """Test COVERAGE expands to bins CTE with LEFT JOIN and COUNT.
+    def test_transpile_should_emit_bins_cte_for_rasterize(self):
+        """Test RASTERIZE expands to bins CTE with LEFT JOIN and COUNT.
 
         Given:
-            A query with COVERAGE(interval, 1000) and tables=["features"]
+            A query with RASTERIZE(interval, 1000) and tables=["features"]
         When:
             transpile is called
         Then:
@@ -183,7 +183,7 @@ class TestTranspile:
         """
         # Arrange / Act
         sql = transpile(
-            "SELECT COVERAGE(interval, 1000) FROM features",
+            "SELECT RASTERIZE(interval, 1000) FROM features",
             tables=["features"],
         )
 
@@ -195,11 +195,11 @@ class TestTranspile:
         assert "ORDER BY" in upper
         assert "1000" in sql
 
-    def test_transpile_should_use_custom_alias_for_coverage_when_provided(self):
-        """Test COVERAGE with AS cov aliases the aggregate column as "cov".
+    def test_transpile_should_use_custom_alias_for_rasterize_when_provided(self):
+        """Test RASTERIZE with AS cov aliases the aggregate column as "cov".
 
         Given:
-            A query with COVERAGE(interval, 1000) AS cov
+            A query with RASTERIZE(interval, 1000) AS cov
         When:
             transpile is called
         Then:
@@ -207,18 +207,18 @@ class TestTranspile:
         """
         # Arrange / Act
         sql = transpile(
-            "SELECT COVERAGE(interval, 1000) AS cov FROM features",
+            "SELECT RASTERIZE(interval, 1000) AS cov FROM features",
             tables=["features"],
         )
 
         # Assert
         assert "cov" in sql.lower()
 
-    def test_transpile_should_use_default_value_alias_for_bare_coverage(self):
-        """Test bare COVERAGE aliases the aggregate column as "value".
+    def test_transpile_should_use_default_value_alias_for_bare_rasterize(self):
+        """Test bare RASTERIZE aliases the aggregate column as "value".
 
         Given:
-            A query with bare COVERAGE(interval, 1000) (no alias)
+            A query with bare RASTERIZE(interval, 1000) (no alias)
         When:
             transpile is called
         Then:
@@ -226,18 +226,18 @@ class TestTranspile:
         """
         # Arrange / Act
         sql = transpile(
-            "SELECT COVERAGE(interval, 1000) FROM features",
+            "SELECT RASTERIZE(interval, 1000) FROM features",
             tables=["features"],
         )
 
         # Assert
         assert "value" in sql.lower()
 
-    def test_transpile_should_fold_where_into_join_on_for_coverage(self):
-        """Test COVERAGE folds WHERE into the JOIN ON condition.
+    def test_transpile_should_fold_where_into_join_on_for_rasterize(self):
+        """Test RASTERIZE folds WHERE into the JOIN ON condition.
 
         Given:
-            A query with COVERAGE and a WHERE clause
+            A query with RASTERIZE and a WHERE clause
         When:
             transpile is called
         Then:
@@ -245,7 +245,7 @@ class TestTranspile:
         """
         # Arrange / Act
         sql = transpile(
-            "SELECT COVERAGE(interval, 1000) FROM features WHERE chrom = 'chr1'",
+            "SELECT RASTERIZE(interval, 1000) FROM features WHERE chrom = 'chr1'",
             tables=["features"],
         )
 

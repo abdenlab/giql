@@ -15,7 +15,7 @@ from giql.constants import DEFAULT_END_COL
 from giql.constants import DEFAULT_START_COL
 from giql.constants import DEFAULT_STRAND_COL
 from giql.expressions import GIQLCluster
-from giql.expressions import GIQLCoverage
+from giql.expressions import GIQLRasterize
 from giql.expressions import GIQLMerge
 from giql.expressions import Intersects
 from giql.table import Tables
@@ -1479,13 +1479,13 @@ class IntersectsBinnedJoinTransformer:
         return [join1, join2, join3]
 
 
-class CoverageTransformer:
-    """Transform queries containing COVERAGE into binned coverage queries.
+class RasterizeTransformer:
+    """Transform queries containing RASTERIZE into binned count queries.
 
-    COVERAGE tiles the genome into fixed-width bins and aggregates overlapping
+    RASTERIZE tiles the genome into fixed-width bins and counts overlapping
     intervals per bin:
 
-        SELECT COVERAGE(interval, 1000) FROM features
+        SELECT RASTERIZE(interval, 1000) FROM features
 
     Into:
 
@@ -1517,7 +1517,7 @@ class CoverageTransformer:
         self.cluster_transformer = ClusterTransformer(tables)
 
     def transform(self, query: exp.Expression) -> exp.Expression:
-        """Transform query if it contains COVERAGE expressions.
+        """Transform query if it contains RASTERIZE expressions.
 
         :param query:
             Parsed query AST
@@ -1542,15 +1542,15 @@ class CoverageTransformer:
             for join in query.args["joins"]:
                 self._transform_subqueries_in_node(join)
 
-        # Find COVERAGE expressions in SELECT
-        coverage_exprs = self._find_coverage_expressions(query)
-        if not coverage_exprs:
+        # Find RASTERIZE expressions in SELECT
+        rasterize_exprs = self._find_rasterize_expressions(query)
+        if not rasterize_exprs:
             return query
 
-        if len(coverage_exprs) > 1:
-            raise ValueError("Multiple COVERAGE expressions not yet supported")
+        if len(rasterize_exprs) > 1:
+            raise ValueError("Multiple RASTERIZE expressions not yet supported")
 
-        return self._transform_for_coverage(query, coverage_exprs[0])
+        return self._transform_for_rasterize(query, rasterize_exprs[0])
 
     def _get_table_alias(self, query: exp.Select) -> str | None:
         """Extract table alias from query's FROM clause.
@@ -1578,37 +1578,37 @@ class CoverageTransformer:
                 transformed = self.transform(subquery.this)
                 subquery.set("this", transformed)
 
-    def _find_coverage_expressions(self, query: exp.Select) -> list[GIQLCoverage]:
-        """Find all COVERAGE expressions in query.
+    def _find_rasterize_expressions(self, query: exp.Select) -> list[GIQLRasterize]:
+        """Find all RASTERIZE expressions in query.
 
         :param query:
             Query to search
         :returns:
-            List of COVERAGE expressions
+            List of RASTERIZE expressions
         """
-        coverage_exprs = []
+        rasterize_exprs = []
         for expression in query.expressions:
-            if isinstance(expression, GIQLCoverage):
-                coverage_exprs.append(expression)
+            if isinstance(expression, GIQLRasterize):
+                rasterize_exprs.append(expression)
             elif isinstance(expression, exp.Alias):
-                if isinstance(expression.this, GIQLCoverage):
-                    coverage_exprs.append(expression.this)
-        return coverage_exprs
+                if isinstance(expression.this, GIQLRasterize):
+                    rasterize_exprs.append(expression.this)
+        return rasterize_exprs
 
-    def _transform_for_coverage(
-        self, query: exp.Select, coverage_expr: GIQLCoverage
+    def _transform_for_rasterize(
+        self, query: exp.Select, rasterize_expr: GIQLRasterize
     ) -> exp.Select:
-        """Transform query to compute COVERAGE using bins CTE + JOIN + GROUP BY.
+        """Transform query to compute RASTERIZE using bins CTE + JOIN + GROUP BY.
 
         :param query:
             Original query
-        :param coverage_expr:
-            COVERAGE expression to transform
+        :param rasterize_expr:
+            RASTERIZE expression to transform
         :returns:
             Transformed query
         """
         # Extract parameters
-        resolution_expr = coverage_expr.args.get("resolution")
+        resolution_expr = rasterize_expr.args.get("resolution")
         if isinstance(resolution_expr, exp.Literal):
             resolution = int(resolution_expr.this)
         elif (
@@ -1617,11 +1617,11 @@ class CoverageTransformer:
         ):
             resolution = -int(resolution_expr.this.this)
         else:
-            raise ValueError("COVERAGE resolution must be an integer literal")
+            raise ValueError("RASTERIZE resolution must be an integer literal")
 
         if resolution <= 0:
             raise ValueError(
-                f"COVERAGE resolution must be positive, got {resolution}"
+                f"RASTERIZE resolution must be positive, got {resolution}"
             )
 
         # Get column names and table info
@@ -1631,10 +1631,10 @@ class CoverageTransformer:
         table_name = self.cluster_transformer._get_table_name(query)
         if not table_name:
             raise ValueError(
-                "COVERAGE requires a FROM clause that references a table "
+                "RASTERIZE requires a FROM clause that references a table "
                 "or CTE by name. Inline subqueries and VALUES clauses in "
                 "FROM are not yet supported — wrap the derivation in a "
-                "WITH clause (CTE) and select COVERAGE(...) from the CTE "
+                "WITH clause (CTE) and select RASTERIZE(...) from the CTE "
                 "by name instead."
             )
         table_alias = self._get_table_alias(query)
@@ -1774,16 +1774,16 @@ class CoverageTransformer:
             copy=False,
         )
 
-        # Replace COVERAGE(...) in select list with aggregate, and add other columns
+        # Replace RASTERIZE(...) in select list with aggregate, and add other columns
         for expression in query.expressions:
-            if isinstance(expression, GIQLCoverage):
+            if isinstance(expression, GIQLRasterize):
                 final_query.select(
                     exp.alias_(agg_expr, "value", quoted=False),
                     append=True,
                     copy=False,
                 )
             elif isinstance(expression, exp.Alias) and isinstance(
-                expression.this, GIQLCoverage
+                expression.this, GIQLRasterize
             ):
                 final_query.select(
                     exp.alias_(agg_expr, expression.alias, quoted=False),

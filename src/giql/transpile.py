@@ -11,7 +11,7 @@ from giql.generators import BaseGIQLGenerator
 from giql.table import Table
 from giql.table import Tables
 from giql.transformer import ClusterTransformer
-from giql.transformer import CoverageTransformer
+from giql.transformer import RasterizeTransformer
 from giql.transformer import IntersectsBinnedJoinTransformer
 from giql.transformer import MergeTransformer
 
@@ -121,7 +121,7 @@ def transpile(
         tables_container,
         bin_size=intersects_bin_size,
     )
-    coverage_transformer = CoverageTransformer(tables_container)
+    rasterize_transformer = RasterizeTransformer(tables_container)
     merge_transformer = MergeTransformer(tables_container)
     cluster_transformer = ClusterTransformer(tables_container)
 
@@ -137,8 +137,8 @@ def transpile(
     # Apply transformations
     try:
         ast = intersects_transformer.transform(ast)
-        # COVERAGE transformation (independent)
-        ast = coverage_transformer.transform(ast)
+        # RASTERIZE transformation (independent)
+        ast = rasterize_transformer.transform(ast)
         # MERGE transformation (which may internally use CLUSTER)
         ast = merge_transformer.transform(ast)
         # CLUSTER transformation for any standalone CLUSTER expressions
