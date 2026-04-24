@@ -4,12 +4,16 @@ These tests validate that GIQL's INTERSECTS operator produces identical
 results to bedtools intersect command.
 """
 
+import pytest
+
 from giql import transpile
 
 from .utils.bedtools_wrapper import intersect
 from .utils.comparison import compare_results
 from .utils.data_models import GenomicInterval
 from .utils.duckdb_loader import load_intervals
+
+pytestmark = pytest.mark.integration
 
 
 def test_intersect_basic_overlap(duckdb_connection):

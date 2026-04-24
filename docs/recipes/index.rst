@@ -19,6 +19,10 @@ Recipe Categories
    Clustering overlapping intervals, distance-based clustering,
    merging intervals, and aggregating cluster statistics.
 
+:doc:`rasterize`
+   Rasterizing intervals onto a fixed bin grid: per-bin counts,
+   strand-specific counts, normalisation, and 5' end counting.
+
 :doc:`advanced`
    Multi-range matching, complex filtering with joins, aggregate statistics,
    window expansions, and multi-table queries.

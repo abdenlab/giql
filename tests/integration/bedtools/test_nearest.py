@@ -4,11 +4,15 @@ These tests validate that GIQL's NEAREST operator produces results
 consistent with bedtools closest command.
 """
 
+import pytest
+
 from giql import transpile
 
 from .utils.bedtools_wrapper import closest
 from .utils.data_models import GenomicInterval
 from .utils.duckdb_loader import load_intervals
+
+pytestmark = pytest.mark.integration
 
 
 def test_nearest_non_overlapping(duckdb_connection):

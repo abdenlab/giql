@@ -5,7 +5,11 @@ intervals that fall entirely within a given range. No direct bedtools
 equivalent exists, so tests validate against known expected results.
 """
 
+import pytest
+
 from .utils.data_models import GenomicInterval
+
+pytestmark = pytest.mark.integration
 
 
 def test_within_basic(giql_query):

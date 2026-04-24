@@ -4,12 +4,16 @@ These tests validate that GIQL's MERGE operator produces identical
 results to bedtools merge command.
 """
 
+import pytest
+
 from giql import transpile
 
 from .utils.bedtools_wrapper import merge
 from .utils.comparison import compare_results
 from .utils.data_models import GenomicInterval
 from .utils.duckdb_loader import load_intervals
+
+pytestmark = pytest.mark.integration
 
 
 def test_merge_adjacent_intervals(duckdb_connection):

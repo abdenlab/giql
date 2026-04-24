@@ -328,4 +328,128 @@ Related Operators
 ~~~~~~~~~~~~~~~~~
 
 - :ref:`CLUSTER <cluster-operator>` - Assign cluster IDs without merging
+- :ref:`RASTERIZE <rasterize-operator>` - Rasterize intervals onto a fixed bin grid
 - :ref:`INTERSECTS <intersects-operator>` - Test for overlap between specific pairs
+
+----
+
+.. _rasterize-operator:
+
+RASTERIZE
+---------
+
+Rasterize interval data onto a fixed-resolution bin grid, counting overlaps per bin.
+
+Description
+~~~~~~~~~~~
+
+The ``RASTERIZE`` operator tiles the genome into fixed-width bins and counts the number of intervals overlapping each bin. It generates a bin grid using ``generate_series`` and joins it against the source table to count overlapping features per bin.
+
+This is useful for:
+
+- Summarising feature density at a user-defined resolution
+- Creating fixed-resolution count tracks from interval data
+- Quick visualisation of interval pile-ups across the genome
+
+An interval that spans multiple bins is counted in each of the bins it overlaps, matching the ``bedtools coverage`` convention. As a result, the sum of bin counts is generally greater than the number of source intervals — bin counts answer "how many intervals touch this bin?", not "how are intervals partitioned across bins?".
+
+The operator works as an aggregate function, returning one row per bin with the bin coordinates and the count.
+
+.. note::
+
+   RASTERIZE depends on ``LATERAL`` plus ``generate_series`` for bin generation, which DuckDB and PostgreSQL both support. SQLite does not currently provide either primitive, so this operator is not yet available on the SQLite backend.
+
+.. note::
+
+   Only the ``count`` aggregation is supported in this release. Weighted summary statistics (mean, sum, min, max) over interval values raise non-trivial semantic questions when intervals span bin boundaries (full-value contribution vs. length-weighted vs. per-base depth) and are tracked as a follow-up.
+
+Syntax
+~~~~~~
+
+.. code-block:: sql
+
+   -- Count overlapping intervals per bin
+   SELECT RASTERIZE(interval, <bin_width>) FROM features
+
+   -- Named resolution parameter
+   SELECT RASTERIZE(interval, resolution := 500) FROM features
+
+Parameters
+~~~~~~~~~~
+
+**interval**
+   A genomic column.
+
+**resolution** *(required)*
+   Bin width in base pairs — must be a positive integer literal. Can be given as a positional or named parameter (``RASTERIZE(interval, 1000)`` or ``RASTERIZE(interval, resolution := 1000)``). Omitting it, or supplying a non-positive value, raises ``ValueError`` at transpile time.
+
+Return Value
+~~~~~~~~~~~~
+
+Returns one row per genomic bin:
+
+- ``chrom`` — Chromosome of the bin
+- ``start`` — Start position of the bin
+- ``end`` — End position of the bin
+- ``value`` — The count of intervals overlapping the bin (default alias; use ``AS`` to rename)
+
+Examples
+~~~~~~~~
+
+**Basic Count:**
+
+Count the number of features overlapping each 1 kb bin:
+
+.. code-block:: sql
+
+   SELECT RASTERIZE(interval, 1000)
+   FROM features
+
+**Named Alias:**
+
+.. code-block:: sql
+
+   SELECT RASTERIZE(interval, 1000) AS depth
+   FROM reads
+
+**With WHERE Filter:**
+
+Assuming the source table includes a ``score`` column, count high-scoring features per bin:
+
+.. code-block:: sql
+
+   SELECT RASTERIZE(interval, 1000) AS depth
+   FROM features
+   WHERE score > 10
+
+Supported FROM clauses
+~~~~~~~~~~~~~~~~~~~~~~
+
+``RASTERIZE`` requires a ``FROM`` clause that references a table or named CTE. Inline subqueries (``FROM (SELECT ...) AS sub``) and ``VALUES`` clauses are not supported — wrap the derivation in a ``WITH`` clause and select ``RASTERIZE(...)`` from the CTE by name:
+
+.. code-block:: sql
+
+   -- Not supported: inline subquery in FROM
+   SELECT RASTERIZE(interval, 1000)
+   FROM (SELECT * FROM features WHERE score > 50) AS filtered
+
+   -- Supported: same derivation wrapped in a CTE
+   WITH filtered AS (
+       SELECT * FROM features WHERE score > 50
+   )
+   SELECT RASTERIZE(interval, 1000) FROM filtered
+
+Any ``WITH`` clauses you declare are preserved alongside the internal ``__giql_bins`` CTE in the transpiled SQL.
+
+Performance Notes
+~~~~~~~~~~~~~~~~~
+
+- The operator creates one bin per chromosome per step, so smaller resolutions produce more rows
+- A ``LEFT JOIN`` ensures bins with zero coverage are included in the output
+- For very large genomes, consider restricting the query with a ``WHERE`` clause on chromosome
+
+Related Operators
+~~~~~~~~~~~~~~~~~
+
+- :ref:`MERGE <merge-operator>` - Combine overlapping intervals into single regions
+- :ref:`CLUSTER <cluster-operator>` - Assign cluster IDs to overlapping intervals

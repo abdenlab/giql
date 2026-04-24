@@ -15,8 +15,6 @@ if not shutil.which("bedtools"):
         allow_module_level=True,
     )
 
-pytestmark = pytest.mark.integration
-
 from .utils.duckdb_loader import load_intervals  # noqa: E402
 
 
