@@ -343,34 +343,33 @@ Compute binned genome coverage by tiling the genome into fixed-width bins.
 Description
 ~~~~~~~~~~~
 
-The ``COVERAGE`` operator tiles the genome into fixed-width bins and aggregates overlapping intervals per bin. It generates a bin grid using ``generate_series`` and joins it against the source table to count (or otherwise aggregate) overlapping features in each bin.
+The ``COVERAGE`` operator tiles the genome into fixed-width bins and counts the number of intervals overlapping each bin. It generates a bin grid using ``generate_series`` and joins it against the source table to count overlapping features per bin.
 
 This is useful for:
 
-- Computing read depth or signal coverage across the genome
-- Creating fixed-resolution coverage tracks from interval data
 - Summarising feature density at a user-defined resolution
+- Creating fixed-resolution count tracks from interval data
+- Quick visualisation of interval pile-ups across the genome
 
-The operator works as an aggregate function, returning one row per bin with the bin coordinates and the computed statistic.
+An interval that spans multiple bins is counted in each of the bins it overlaps, matching the ``bedtools coverage`` convention. As a result, the sum of bin counts is generally greater than the number of source intervals — bin counts answer "how many intervals touch this bin?", not "how are intervals partitioned across bins?".
+
+The operator works as an aggregate function, returning one row per bin with the bin coordinates and the count.
 
 .. note::
 
    COVERAGE depends on ``LATERAL`` plus ``generate_series`` for bin generation, which DuckDB and PostgreSQL both support. SQLite does not currently provide either primitive, so this operator is not yet available on the SQLite backend.
+
+.. note::
+
+   Only the ``count`` aggregation is supported in this release. Weighted summary statistics (mean, sum, min, max) over interval values raise non-trivial semantic questions when intervals span bin boundaries (full-value contribution vs. length-weighted vs. per-base depth) and are tracked as a follow-up.
 
 Syntax
 ~~~~~~
 
 .. code-block:: sql
 
-   -- Basic coverage (count overlapping intervals per bin)
+   -- Count overlapping intervals per bin
    SELECT COVERAGE(interval, <bin_width>) FROM features
-
-   -- With a named statistic (either := or => syntax)
-   SELECT COVERAGE(interval, 1000, stat := 'mean') FROM features
-   SELECT COVERAGE(interval, 1000, stat => 'mean') FROM features
-
-   -- Aggregate a specific column instead of interval length
-   SELECT COVERAGE(interval, 1000, stat := 'mean', target := 'score') FROM features
 
    -- Named resolution parameter
    SELECT COVERAGE(interval, resolution := 500) FROM features
@@ -384,20 +383,6 @@ Parameters
 **resolution** *(required)*
    Bin width in base pairs — must be a positive integer literal. Can be given as a positional or named parameter (``COVERAGE(interval, 1000)`` or ``COVERAGE(interval, resolution := 1000)``). Omitting it, or supplying a non-positive value, raises ``ValueError`` at transpile time.
 
-**stat** *(optional)*
-   Aggregation function applied to overlapping intervals per bin. One of:
-
-   - ``'count'`` — number of overlapping intervals (default)
-   - ``'mean'`` — average interval length of overlapping intervals
-   - ``'sum'`` — total interval length of overlapping intervals
-   - ``'min'`` — minimum interval length of overlapping intervals
-   - ``'max'`` — maximum interval length of overlapping intervals
-
-   When ``target`` is specified, the stat is applied to that column instead of interval length.
-
-**target** *(optional)*
-   Column name to aggregate. When omitted, non-count stats aggregate interval length (``end - start``). When specified, the stat is applied to the named column. For ``'count'``, specifying a target counts non-NULL values of that column instead of ``COUNT(*)``.
-
 Return Value
 ~~~~~~~~~~~~
 
@@ -406,7 +391,7 @@ Returns one row per genomic bin:
 - ``chrom`` — Chromosome of the bin
 - ``start`` — Start position of the bin
 - ``end`` — End position of the bin
-- ``value`` — The computed aggregate (default alias; use ``AS`` to rename)
+- ``value`` — The count of intervals overlapping the bin (default alias; use ``AS`` to rename)
 
 Examples
 ~~~~~~~~
@@ -420,15 +405,6 @@ Count the number of features overlapping each 1 kb bin:
    SELECT COVERAGE(interval, 1000)
    FROM features
 
-**Mean Coverage:**
-
-Compute the average interval length per 500 bp bin:
-
-.. code-block:: sql
-
-   SELECT COVERAGE(interval, 500, stat := 'mean')
-   FROM features
-
 **Named Alias:**
 
 .. code-block:: sql
@@ -438,7 +414,7 @@ Compute the average interval length per 500 bp bin:
 
 **With WHERE Filter:**
 
-Assuming the source table includes a ``score`` column, compute coverage of high-scoring features only:
+Assuming the source table includes a ``score`` column, count high-scoring features per bin:
 
 .. code-block:: sql
 

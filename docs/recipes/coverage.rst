@@ -32,7 +32,7 @@ Count the number of features overlapping each 1 kb bin across the genome:
    │ ...    │    ... │    ... │   ... │
    └────────┴────────┴────────┴───────┘
 
-Each row represents one genomic bin. Bins with no overlapping features appear with a count of zero.
+Each row represents one genomic bin. Bins with no overlapping features appear with a count of zero. An interval that spans more than one bin is counted in each bin it overlaps (the ``bedtools coverage`` convention), so the sum of bin counts is generally greater than the number of source intervals.
 
 **Use case:** Compute read depth or feature density at a fixed resolution.
 
@@ -51,64 +51,18 @@ Use a finer resolution of 100 bp:
 Named Resolution Parameter
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-For longer expressions, the resolution is easier to read when supplied by name alongside other named parameters:
+The resolution can also be supplied by name:
 
 .. code-block:: sql
 
-   SELECT COVERAGE(
-       interval,
-       resolution := 500,
-       stat := 'mean',
-       target := 'score'
-   ) AS avg_score
+   SELECT COVERAGE(interval, resolution := 500) AS depth
    FROM features
 
 Both ``:=`` and ``=>`` are accepted for named parameters.
 
-Coverage Statistics
--------------------
+.. note::
 
-Mean Interval Length per Bin
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-Compute the average length of intervals overlapping each bin:
-
-.. code-block:: sql
-
-   SELECT COVERAGE(interval, 1000, stat := 'mean') AS avg_len
-   FROM features
-
-Sum of Interval Lengths per Bin
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-Compute the total interval length in each bin:
-
-.. code-block:: sql
-
-   SELECT COVERAGE(interval, 1000, stat := 'sum') AS total_len
-   FROM features
-
-Maximum Interval Length per Bin
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-Find the longest interval overlapping each bin:
-
-.. code-block:: sql
-
-   SELECT COVERAGE(interval, 1000, stat := 'max') AS max_len
-   FROM features
-
-Aggregating a Specific Column
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-Compute the mean score of overlapping features per bin instead of summarising interval length:
-
-.. code-block:: sql
-
-   SELECT COVERAGE(interval, 1000, stat := 'mean', target := 'score') AS avg_score
-   FROM features
-
-**Use case:** Signal tracks from a numeric column (e.g. ChIP-seq score, p-value).
+   Weighted summary statistics (mean, sum, min, max over interval values, with bin-boundary-aware weighting) are not yet implemented. See the project tracker for the follow-up.
 
 Filtered Coverage
 -----------------
