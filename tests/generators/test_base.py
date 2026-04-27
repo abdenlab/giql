@@ -52,6 +52,29 @@ def tables_with_peaks_and_genes():
     return tables
 
 
+@pytest.fixture
+def tables_with_one_based_closed():
+    """Tables with a single 1-based closed table (VCF/GFF convention)."""
+    tables = Tables()
+    tables.register(
+        "vcf_variants",
+        Table("vcf_variants", coordinate_system="1based", interval_type="closed"),
+    )
+    return tables
+
+
+@pytest.fixture
+def tables_mixed_conventions():
+    """Tables with one 0-based half-open table and one 1-based closed table."""
+    tables = Tables()
+    tables.register("bed_a", Table("bed_a"))
+    tables.register(
+        "vcf_b",
+        Table("vcf_b", coordinate_system="1based", interval_type="closed"),
+    )
+    return tables
+
+
 class TestBaseGIQLGenerator:
     """Tests for BaseGIQLGenerator class."""
 
@@ -1163,3 +1186,335 @@ class TestBaseGIQLGenerator:
         # Unsigned distance has no negative sign (both ELSE branches are positive)
         # Count occurrences of "-(" - signed has 1, unsigned has 0
         assert output.count("-(") == 0
+
+    @pytest.mark.parametrize(
+        "table, expected_predicate",
+        [
+            pytest.param(
+                Table("variants", coordinate_system="0based", interval_type="half_open"),
+                '"start" < 200 AND "end" > 100',
+                id="0based-half_open",
+            ),
+            pytest.param(
+                Table("variants", coordinate_system="0based", interval_type="closed"),
+                '"start" < 200 AND ("end" + 1) > 100',
+                id="0based-closed",
+            ),
+            pytest.param(
+                Table("variants", coordinate_system="1based", interval_type="half_open"),
+                '("start" - 1) < 200 AND ("end" - 1) > 100',
+                id="1based-half_open",
+            ),
+            pytest.param(
+                Table("variants", coordinate_system="1based", interval_type="closed"),
+                '("start" - 1) < 200 AND "end" > 100',
+                id="1based-closed",
+            ),
+        ],
+    )
+    def test_intersects_should_canonicalize_table_columns_for_each_convention(
+        self, table, expected_predicate
+    ):
+        """Test INTERSECTS literal-form canonicalizes table columns per convention.
+
+        Given:
+            A table declared with one of the four (coordinate_system, interval_type)
+            combinations.
+        When:
+            INTERSECTS is called with a literal range.
+        Then:
+            It should wrap the table-side start/end (or not) per the canonical
+            0-based half-open conversion, leaving the comparison operators
+            unchanged.
+        """
+        # Arrange
+        tables = Tables()
+        tables.register(table.name, table)
+        sql = "SELECT * FROM variants WHERE interval INTERSECTS 'chr1:100-200'"
+        ast = parse_one(sql, dialect=GIQLDialect)
+        generator = BaseGIQLGenerator(tables=tables)
+
+        # Act
+        output = generator.generate(ast)
+
+        # Assert
+        expected = (
+            "SELECT * FROM variants WHERE "
+            f"(\"chrom\" = 'chr1' AND {expected_predicate})"
+        )
+        assert output == expected
+
+    @pytest.mark.parametrize(
+        "table, expected_predicate",
+        [
+            pytest.param(
+                Table("variants", coordinate_system="0based", interval_type="half_open"),
+                '"start" <= 1500 AND "end" >= 2000',
+                id="0based-half_open",
+            ),
+            pytest.param(
+                Table("variants", coordinate_system="0based", interval_type="closed"),
+                '"start" <= 1500 AND ("end" + 1) >= 2000',
+                id="0based-closed",
+            ),
+            pytest.param(
+                Table("variants", coordinate_system="1based", interval_type="half_open"),
+                '("start" - 1) <= 1500 AND ("end" - 1) >= 2000',
+                id="1based-half_open",
+            ),
+            pytest.param(
+                Table("variants", coordinate_system="1based", interval_type="closed"),
+                '("start" - 1) <= 1500 AND "end" >= 2000',
+                id="1based-closed",
+            ),
+        ],
+    )
+    def test_contains_should_canonicalize_table_columns_for_each_convention(
+        self, table, expected_predicate
+    ):
+        """Test CONTAINS literal-form canonicalizes table columns per convention.
+
+        Given:
+            A table declared with one of the four (coordinate_system, interval_type)
+            combinations.
+        When:
+            CONTAINS is called with a literal range.
+        Then:
+            It should wrap the table-side start/end (or not) per the canonical
+            0-based half-open conversion, leaving the comparison operators
+            unchanged.
+        """
+        # Arrange
+        tables = Tables()
+        tables.register(table.name, table)
+        sql = "SELECT * FROM variants WHERE interval CONTAINS 'chr1:1500-2000'"
+        ast = parse_one(sql, dialect=GIQLDialect)
+        generator = BaseGIQLGenerator(tables=tables)
+
+        # Act
+        output = generator.generate(ast)
+
+        # Assert
+        expected = (
+            "SELECT * FROM variants WHERE "
+            f"(\"chrom\" = 'chr1' AND {expected_predicate})"
+        )
+        assert output == expected
+
+    @pytest.mark.parametrize(
+        "table, expected_predicate",
+        [
+            pytest.param(
+                Table("variants", coordinate_system="0based", interval_type="half_open"),
+                '"start" >= 1000 AND "end" <= 5000',
+                id="0based-half_open",
+            ),
+            pytest.param(
+                Table("variants", coordinate_system="0based", interval_type="closed"),
+                '"start" >= 1000 AND ("end" + 1) <= 5000',
+                id="0based-closed",
+            ),
+            pytest.param(
+                Table("variants", coordinate_system="1based", interval_type="half_open"),
+                '("start" - 1) >= 1000 AND ("end" - 1) <= 5000',
+                id="1based-half_open",
+            ),
+            pytest.param(
+                Table("variants", coordinate_system="1based", interval_type="closed"),
+                '("start" - 1) >= 1000 AND "end" <= 5000',
+                id="1based-closed",
+            ),
+        ],
+    )
+    def test_within_should_canonicalize_table_columns_for_each_convention(
+        self, table, expected_predicate
+    ):
+        """Test WITHIN literal-form canonicalizes table columns per convention.
+
+        Given:
+            A table declared with one of the four (coordinate_system, interval_type)
+            combinations.
+        When:
+            WITHIN is called with a literal range.
+        Then:
+            It should wrap the table-side start/end (or not) per the canonical
+            0-based half-open conversion, leaving the comparison operators
+            unchanged.
+        """
+        # Arrange
+        tables = Tables()
+        tables.register(table.name, table)
+        sql = "SELECT * FROM variants WHERE interval WITHIN 'chr1:1000-5000'"
+        ast = parse_one(sql, dialect=GIQLDialect)
+        generator = BaseGIQLGenerator(tables=tables)
+
+        # Act
+        output = generator.generate(ast)
+
+        # Assert
+        expected = (
+            "SELECT * FROM variants WHERE "
+            f"(\"chrom\" = 'chr1' AND {expected_predicate})"
+        )
+        assert output == expected
+
+    def test_intersects_should_canonicalize_both_sides_when_conventions_differ(
+        self, tables_mixed_conventions
+    ):
+        """Test column-join INTERSECTS with mixed table conventions.
+
+        Given:
+            A 0-based half-open table joined against a 1-based closed table.
+        When:
+            INTERSECTS is called between columns from each table.
+        Then:
+            It should canonicalize each side independently — the 1-based-closed
+            side gets (start - 1), the default side stays raw.
+        """
+        # Arrange
+        sql = (
+            "SELECT * FROM bed_a AS a CROSS JOIN vcf_b AS b "
+            "WHERE a.interval INTERSECTS b.interval"
+        )
+        ast = parse_one(sql, dialect=GIQLDialect)
+        generator = BaseGIQLGenerator(tables=tables_mixed_conventions)
+
+        # Act
+        output = generator.generate(ast)
+
+        # Assert
+        expected = (
+            "SELECT * FROM bed_a AS a CROSS JOIN vcf_b AS b WHERE "
+            '(a."chrom" = b."chrom" '
+            'AND a."start" < b."end" '
+            'AND a."end" > (b."start" - 1))'
+        )
+        assert output == expected
+
+    def test_contains_should_canonicalize_both_sides_when_conventions_differ(
+        self, tables_mixed_conventions
+    ):
+        """Test column-join CONTAINS with mixed table conventions.
+
+        Given:
+            A 0-based half-open table joined against a 1-based closed table.
+        When:
+            CONTAINS is called between columns from each table.
+        Then:
+            It should canonicalize each side independently — the 1-based-closed
+            side gets (start - 1), the default side stays raw, while the
+            comparison operators (<=, >=) remain unchanged.
+        """
+        # Arrange
+        sql = (
+            "SELECT * FROM bed_a AS a CROSS JOIN vcf_b AS b "
+            "WHERE a.interval CONTAINS b.interval"
+        )
+        ast = parse_one(sql, dialect=GIQLDialect)
+        generator = BaseGIQLGenerator(tables=tables_mixed_conventions)
+
+        # Act
+        output = generator.generate(ast)
+
+        # Assert
+        expected = (
+            "SELECT * FROM bed_a AS a CROSS JOIN vcf_b AS b WHERE "
+            '(a."chrom" = b."chrom" '
+            'AND a."start" <= (b."start" - 1) '
+            'AND a."end" >= b."end")'
+        )
+        assert output == expected
+
+    def test_within_should_canonicalize_both_sides_when_conventions_differ(
+        self, tables_mixed_conventions
+    ):
+        """Test column-join WITHIN with mixed table conventions.
+
+        Given:
+            A 0-based half-open table joined against a 1-based closed table.
+        When:
+            WITHIN is called between columns from each table.
+        Then:
+            It should canonicalize each side independently — the 1-based-closed
+            side gets (start - 1), the default side stays raw, while the
+            comparison operators (>=, <=) remain unchanged.
+        """
+        # Arrange
+        sql = (
+            "SELECT * FROM bed_a AS a CROSS JOIN vcf_b AS b "
+            "WHERE a.interval WITHIN b.interval"
+        )
+        ast = parse_one(sql, dialect=GIQLDialect)
+        generator = BaseGIQLGenerator(tables=tables_mixed_conventions)
+
+        # Act
+        output = generator.generate(ast)
+
+        # Assert
+        expected = (
+            "SELECT * FROM bed_a AS a CROSS JOIN vcf_b AS b WHERE "
+            '(a."chrom" = b."chrom" '
+            'AND a."start" >= (b."start" - 1) '
+            'AND a."end" <= b."end")'
+        )
+        assert output == expected
+
+    def test_contains_point_should_shift_start_when_table_is_one_based_closed(
+        self, tables_with_one_based_closed
+    ):
+        """Test CONTAINS point-query against a 1-based closed table.
+
+        Given:
+            A table declared with coordinate_system="1based" and interval_type="closed".
+        When:
+            CONTAINS is called with a point query 'chr1:1500'.
+        Then:
+            The point-query branch fires: the table-side start is wrapped as
+            (start - 1) and end stays raw, with operators <= and > unchanged.
+        """
+        # Arrange
+        sql = "SELECT * FROM vcf_variants WHERE interval CONTAINS 'chr1:1500'"
+        ast = parse_one(sql, dialect=GIQLDialect)
+        generator = BaseGIQLGenerator(tables=tables_with_one_based_closed)
+
+        # Act
+        output = generator.generate(ast)
+
+        # Assert
+        expected = (
+            "SELECT * FROM vcf_variants WHERE "
+            '("chrom" = \'chr1\' AND ("start" - 1) <= 1500 AND "end" > 1500)'
+        )
+        assert output == expected
+
+    def test_intersects_any_should_canonicalize_disjuncts_when_table_is_one_based_closed(
+        self, tables_with_one_based_closed
+    ):
+        """Test INTERSECTS ANY routes the canonicalization fix through SpatialSetPredicate.
+
+        Given:
+            A table declared with coordinate_system="1based" and interval_type="closed".
+        When:
+            INTERSECTS ANY is called with multiple literal ranges.
+        Then:
+            Each OR-disjunct is canonicalized independently — every disjunct
+            wraps the table-side start as (start - 1) and leaves end raw.
+        """
+        # Arrange
+        sql = (
+            "SELECT * FROM vcf_variants "
+            "WHERE interval INTERSECTS ANY('chr1:100-200', 'chr1:500-600')"
+        )
+        ast = parse_one(sql, dialect=GIQLDialect)
+        generator = BaseGIQLGenerator(tables=tables_with_one_based_closed)
+
+        # Act
+        output = generator.generate(ast)
+
+        # Assert
+        expected = (
+            "SELECT * FROM vcf_variants WHERE "
+            '(("chrom" = \'chr1\' AND ("start" - 1) < 200 AND "end" > 100) '
+            'OR ("chrom" = \'chr1\' AND ("start" - 1) < 600 AND "end" > 500))'
+        )
+        assert output == expected

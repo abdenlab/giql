@@ -1,5 +1,3 @@
-from typing import Optional
-
 from sqlglot import exp
 from sqlglot.generator import Generator
 
@@ -15,6 +13,7 @@ from giql.expressions import SpatialSetPredicate
 from giql.expressions import Within
 from giql.range_parser import ParsedRange
 from giql.range_parser import RangeParser
+from giql.table import Table
 from giql.table import Tables
 
 
@@ -36,7 +35,7 @@ class BaseGIQLGenerator(Generator):
     SUPPORTS_LATERAL = True
 
     @staticmethod
-    def _extract_bool_param(param_expr: Optional[exp.Expression]) -> bool:
+    def _extract_bool_param(param_expr: exp.Expression | None) -> bool:
         """Extract boolean value from a parameter expression.
 
         Handles exp.Boolean, exp.Literal, and string representations.
@@ -48,7 +47,7 @@ class BaseGIQLGenerator(Generator):
         else:
             return str(param_expr).upper() in ("TRUE", "1", "YES")
 
-    def __init__(self, tables: Optional[Tables] = None, **kwargs):
+    def __init__(self, tables: Tables | None = None, **kwargs):
         super().__init__(**kwargs)
         self.tables = tables or Tables()
         self._current_table = None  # Track current table for column resolution
@@ -502,9 +501,12 @@ class BaseGIQLGenerator(Generator):
             SQL predicate string
         """
         # Get column references
-        chrom_col, start_col, end_col = self._get_column_refs(
+        chrom_col, raw_start_col, raw_end_col = self._get_column_refs(
             column_ref, self._current_table
         )
+        table = self._resolve_table(column_ref, self._current_table)
+        start_col = self._canonical_start(raw_start_col, table)
+        end_col = self._canonical_end(raw_end_col, table)
 
         chrom = parsed_range.chromosome
         start = parsed_range.start
@@ -558,8 +560,14 @@ class BaseGIQLGenerator(Generator):
         """
         # Get column references for both sides
         # Pass None to let _get_column_refs extract and resolve table from column ref
-        l_chrom, l_start, l_end = self._get_column_refs(left_col, None)
-        r_chrom, r_start, r_end = self._get_column_refs(right_col, None)
+        l_chrom, raw_l_start, raw_l_end = self._get_column_refs(left_col, None)
+        r_chrom, raw_r_start, raw_r_end = self._get_column_refs(right_col, None)
+        l_table = self._resolve_table(left_col)
+        r_table = self._resolve_table(right_col)
+        l_start = self._canonical_start(raw_l_start, l_table)
+        l_end = self._canonical_end(raw_l_end, l_table)
+        r_start = self._canonical_start(raw_r_start, r_table)
+        r_end = self._canonical_end(raw_r_end, r_table)
 
         if op_type == "intersects":
             # Ranges overlap if: chrom1 = chrom2 AND start1 < end2 AND end1 > start2
@@ -624,7 +632,7 @@ class BaseGIQLGenerator(Generator):
         return "(" + combinator.join(conditions) + ")"
 
     def _detect_nearest_mode(
-        self, expression: GIQLNearest, parent_expression: Optional[exp.Expression] = None
+        self, expression: GIQLNearest, parent_expression: exp.Expression | None = None
     ) -> str:
         """Detect whether NEAREST is in standalone or correlated mode.
 
@@ -650,7 +658,7 @@ class BaseGIQLGenerator(Generator):
 
     def _find_outer_table_in_lateral_join(
         self, expression: GIQLNearest
-    ) -> Optional[str]:
+    ) -> str | None:
         """Find the outer table name in a LATERAL join context.
 
         Walks up the AST to find the JOIN clause and extracts the outer table
@@ -830,14 +838,10 @@ class BaseGIQLGenerator(Generator):
         end_col = DEFAULT_END_COL
         strand_col = DEFAULT_STRAND_COL
 
-        # Extract table alias/name from column reference if present
-        table_alias = None
-        if "." in column_ref:
-            table_alias, _ = column_ref.rsplit(".", 1)
-            # If no explicit table_name provided, resolve alias to table name
-            if not table_name:
-                # Look up actual table name from alias
-                table_name = self._alias_to_table.get(table_alias, self._current_table)
+        # Alias is kept verbatim for output formatting; table name is resolved
+        # separately to look up the Table config (alias != name in joins).
+        table_alias = column_ref.rsplit(".", 1)[0] if "." in column_ref else None
+        table_name = self._resolve_table_name(column_ref, table_name)
 
         # Try to get custom column names from table config
         if table_name and self.tables:
@@ -868,3 +872,82 @@ class BaseGIQLGenerator(Generator):
             if include_strand:
                 return base_cols + (f'"{strand_col}"',)
             return base_cols
+
+    @staticmethod
+    def _canonical_start(raw_start: str, table: Table | None) -> str:
+        """Wrap a raw start column expression to yield canonical 0-based half-open start.
+
+        Conversion by ``coordinate_system``:
+
+        - 0based: ``start`` (identity)
+        - 1based: ``start - 1``
+        """
+        if table is None or table.coordinate_system == "0based":
+            return raw_start
+        return f"({raw_start} - 1)"
+
+    @staticmethod
+    def _canonical_end(raw_end: str, table: Table | None) -> str:
+        """Wrap a raw end column expression to yield canonical 0-based half-open end.
+
+        Conversion by ``(coordinate_system, interval_type)``:
+
+        - 0based / half_open: ``end`` (identity)
+        - 0based / closed:    ``end + 1``
+        - 1based / half_open: ``end - 1``
+        - 1based / closed:    ``end`` (identity)
+        """
+        if table is None:
+            return raw_end
+        key = (table.coordinate_system, table.interval_type)
+        if key == ("0based", "closed"):
+            return f"({raw_end} + 1)"
+        if key == ("1based", "half_open"):
+            return f"({raw_end} - 1)"
+        return raw_end  # 0based/half_open and 1based/closed: identity
+
+    def _resolve_table_name(
+        self, column_ref: str, table_name: str | None
+    ) -> str | None:
+        """Resolve the underlying table name for a column reference.
+
+        Precedence: explicit ``table_name`` (caller-provided context) > alias
+        map (JOIN-side resolution via ``self._alias_to_table``) >
+        ``self._current_table`` (FROM-clause fallback for unmapped dotted
+        aliases). Undotted refs return ``None`` because their caller is
+        expected to pass ``_current_table`` as the explicit ``table_name``
+        when relevant.
+
+        :param column_ref:
+            Column reference, possibly aliased (e.g. ``a.interval``)
+        :param table_name:
+            Explicit table name; takes precedence if non-empty
+        :return:
+            ``table_name`` if non-empty; otherwise the alias mapping from
+            ``self._alias_to_table`` (with ``self._current_table`` as fallback)
+            if ``column_ref`` is dotted; otherwise None
+        """
+        if table_name:
+            return table_name
+        if "." in column_ref:
+            alias = column_ref.rsplit(".", 1)[0]
+            return self._alias_to_table.get(alias, self._current_table)
+        return None
+
+    def _resolve_table(
+        self, column_ref: str, table_name: str | None = None
+    ) -> Table | None:
+        """Resolve the Table config that backs a column reference.
+
+        :param column_ref:
+            Column reference, possibly aliased (e.g. ``a.interval``)
+        :param table_name:
+            Explicit table name; if omitted, derived from ``column_ref`` alias
+            or falls back to ``self._current_table``
+        :return:
+            The Table config if registered, otherwise None
+        """
+        table_name = self._resolve_table_name(column_ref, table_name)
+        if table_name and self.tables:
+            return self.tables.get(table_name)
+        return None
