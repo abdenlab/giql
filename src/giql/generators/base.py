@@ -158,6 +158,8 @@ class BaseGIQLGenerator(Generator):
         is_stranded = self._extract_bool_param(expression.args.get("stranded"))
         is_signed = self._extract_bool_param(expression.args.get("signed"))
 
+        target_table = self.tables.get(table_name) if self.tables else None
+
         # Resolve strand columns if stranded mode
         ref_strand = None
         target_strand = None
@@ -193,19 +195,16 @@ class BaseGIQLGenerator(Generator):
                         ref_strand = f'{outer_table}."{table.strand_col}"'
 
             # Get strand column for target table
-            target_table = self.tables.get(table_name) if self.tables else None
             if target_table and target_table.strand_col:
                 target_strand = f'{table_name}."{target_table.strand_col}"'
 
-        # Determine if we should add 1 for gap distances (bedtools compatibility)
-        # This depends on the interval types of the tables involved
-        add_one = False
-        if self.tables:
-            target_table = self.tables.get(table_name)
-            if target_table:
-                # Add 1 for closed intervals (bedtools behavior)
-                if target_table.interval_type == "closed":
-                    add_one = True
+        # Distance math below assumes 0-based half-open.
+        target_start_expr = self._canonical_start(
+            f'{table_name}."{target_start}"', target_table
+        )
+        target_end_expr = self._canonical_end(
+            f'{table_name}."{target_end}"', target_table
+        )
 
         # Build distance calculation using CASE expression
         # For NEAREST: ORDER BY absolute distance, but RETURN signed distance
@@ -215,11 +214,10 @@ class BaseGIQLGenerator(Generator):
             ref_end,
             ref_strand,
             f'{table_name}."{target_chrom}"',
-            f'{table_name}."{target_start}"',
-            f'{table_name}."{target_end}"',
+            target_start_expr,
+            target_end_expr,
             target_strand,
             stranded=is_stranded,
-            add_one_for_gap=add_one,
             signed=is_signed,
         )
 
@@ -322,26 +320,13 @@ class BaseGIQLGenerator(Generator):
             # Literal range - not implemented yet
             raise ValueError("Literal range as second argument not yet supported")
 
-        # Determine if we should add 1 for gap distances (bedtools compatibility)
-        # Check interval types from table config
-        add_one = False
-        if self.tables:
-            # Extract table names from column references
-            # Column refs look like "table.column" or "alias.column"
-            table_a = interval_a_sql.split(".")[0] if "." in interval_a_sql else None
-            table_b = interval_b_sql.split(".")[0] if "." in interval_b_sql else None
-
-            # Check if either table uses closed intervals
-            for tbl_name in [table_a, table_b]:
-                if tbl_name:
-                    # Remove quotes if present
-                    tbl_name = tbl_name.strip('"')
-                    # Check if it's an alias first
-                    actual_table = self._alias_to_table.get(tbl_name, tbl_name)
-                    table = self.tables.get(actual_table)
-                    if table and table.interval_type == "closed":
-                        add_one = True
-                        break
+        # Distance math below assumes 0-based half-open.
+        table_a = self._resolve_table(interval_a_sql)
+        table_b = self._resolve_table(interval_b_sql)
+        start_a = self._canonical_start(start_a, table_a)
+        end_a = self._canonical_end(end_a, table_a)
+        start_b = self._canonical_start(start_b, table_b)
+        end_b = self._canonical_end(end_b, table_b)
 
         # Generate CASE expression
         return self._generate_distance_case(
@@ -354,7 +339,6 @@ class BaseGIQLGenerator(Generator):
             end_b,
             strand_b,
             stranded=stranded,
-            add_one_for_gap=add_one,
             signed=signed,
         )
 
@@ -369,7 +353,6 @@ class BaseGIQLGenerator(Generator):
         end_b: str,
         strand_b: str | None,
         stranded: bool = False,
-        add_one_for_gap: bool = False,
         signed: bool = False,
     ) -> str:
         """Generate SQL CASE expression for distance calculation.
@@ -392,17 +375,12 @@ class BaseGIQLGenerator(Generator):
             Strand column for interval B (None if not stranded)
         :param stranded:
             Whether to use strand-aware distance calculation
-        :param add_one_for_gap:
-            Whether to add 1 to non-overlapping distance (bedtools compatibility)
         :param signed:
             Whether to return signed distance (negative for upstream, positive for
             downstream)
         :return:
             SQL CASE expression
         """
-        # Distance adjustment for non-overlapping intervals
-        gap_adj = " + 1" if add_one_for_gap else ""
-
         if not stranded or strand_a is None or strand_b is None:
             # Basic distance calculation without strand awareness
             if signed:
@@ -411,15 +389,15 @@ class BaseGIQLGenerator(Generator):
                 return (
                     f"CASE WHEN {chrom_a} != {chrom_b} THEN NULL "
                     f"WHEN {start_a} < {end_b} AND {end_a} > {start_b} THEN 0 "
-                    f"WHEN {end_a} <= {start_b} THEN ({start_b} - {end_a}{gap_adj}) "
-                    f"ELSE -({start_a} - {end_b}{gap_adj}) END"
+                    f"WHEN {end_a} <= {start_b} THEN ({start_b} - {end_a}) "
+                    f"ELSE -({start_a} - {end_b}) END"
                 )
             # Unsigned (absolute) distance
             return (
                 f"CASE WHEN {chrom_a} != {chrom_b} THEN NULL "
                 f"WHEN {start_a} < {end_b} AND {end_a} > {start_b} THEN 0 "
-                f"WHEN {end_a} <= {start_b} THEN ({start_b} - {end_a}{gap_adj}) "
-                f"ELSE ({start_a} - {end_b}{gap_adj}) END"
+                f"WHEN {end_a} <= {start_b} THEN ({start_b} - {end_a}) "
+                f"ELSE ({start_a} - {end_b}) END"
             )
 
         # Stranded distance calculation
@@ -434,11 +412,11 @@ class BaseGIQLGenerator(Generator):
                 f"WHEN {strand_b} = '.' OR {strand_b} = '?' THEN NULL "
                 f"WHEN {start_a} < {end_b} AND {end_a} > {start_b} THEN 0 "
                 f"WHEN {end_a} <= {start_b} THEN "
-                f"CASE WHEN {strand_a} = '-' THEN -({start_b} - {end_a}{gap_adj}) "
-                f"ELSE ({start_b} - {end_a}{gap_adj}) END "
+                f"CASE WHEN {strand_a} = '-' THEN -({start_b} - {end_a}) "
+                f"ELSE ({start_b} - {end_a}) END "
                 f"ELSE "
-                f"CASE WHEN {strand_a} = '-' THEN ({start_a} - {end_b}{gap_adj}) "
-                f"ELSE -({start_a} - {end_b}{gap_adj}) END END"
+                f"CASE WHEN {strand_a} = '-' THEN ({start_a} - {end_b}) "
+                f"ELSE -({start_a} - {end_b}) END END"
             )
         # Stranded but not signed: apply strand flip only
         return (
@@ -448,11 +426,11 @@ class BaseGIQLGenerator(Generator):
             f"WHEN {strand_b} = '.' OR {strand_b} = '?' THEN NULL "
             f"WHEN {start_a} < {end_b} AND {end_a} > {start_b} THEN 0 "
             f"WHEN {end_a} <= {start_b} THEN "
-            f"CASE WHEN {strand_a} = '-' THEN -({start_b} - {end_a}{gap_adj}) "
-            f"ELSE ({start_b} - {end_a}{gap_adj}) END "
+            f"CASE WHEN {strand_a} = '-' THEN -({start_b} - {end_a}) "
+            f"ELSE ({start_b} - {end_a}) END "
             f"ELSE "
-            f"CASE WHEN {strand_a} = '-' THEN -({start_a} - {end_b}{gap_adj}) "
-            f"ELSE ({start_a} - {end_b}{gap_adj}) END END"
+            f"CASE WHEN {strand_a} = '-' THEN -({start_a} - {end_b}) "
+            f"ELSE ({start_a} - {end_b}) END END"
         )
 
     def _generate_spatial_op(self, expression: exp.Binary, op_type: str) -> str:
@@ -716,6 +694,9 @@ class BaseGIQLGenerator(Generator):
         :return:
             Tuple of (chromosome, start, end) or (chromosome, start, end, strand)
             Returns SQL expressions (column refs for correlated, literals for standalone)
+            Endpoints are canonicalized to 0-based half-open: literal references via
+            ``RangeParser.to_zero_based_half_open``, column references via
+            ``_canonical_start`` / ``_canonical_end``.
         :raises ValueError:
             If reference is missing in standalone mode or invalid format
         """
@@ -748,14 +729,18 @@ class BaseGIQLGenerator(Generator):
                         f"{range_str}. Error: {e}"
                     )
             else:
-                # Column reference - resolve via _get_column_refs
-                return self._get_column_refs(reference_sql, None)
+                # Column reference - resolve and canonicalize
+                chrom, start, end = self._get_column_refs(reference_sql, None)
+                ref_table = self._resolve_table(reference_sql)
+                return self._canonical_endpoints(chrom, start, end, ref_table)
 
         else:  # correlated mode
             if reference:
                 # Explicit reference in correlated mode (e.g., peaks.interval)
                 reference_sql = self.sql(reference)
-                return self._get_column_refs(reference_sql, None)
+                chrom, start, end = self._get_column_refs(reference_sql, None)
+                ref_table = self._resolve_table(reference_sql)
+                return self._canonical_endpoints(chrom, start, end, ref_table)
             else:
                 # Implicit reference - resolve from outer table in LATERAL join
                 outer_table = self._find_outer_table_in_lateral_join(expression)
@@ -778,7 +763,8 @@ class BaseGIQLGenerator(Generator):
 
                 # Build column references using the outer table and genomic column
                 reference_sql = f"{outer_table}.{table.genomic_col}"
-                return self._get_column_refs(reference_sql, None)
+                chrom, start, end = self._get_column_refs(reference_sql, None)
+                return self._canonical_endpoints(chrom, start, end, table)
 
     def _resolve_target_table(
         self, expression: GIQLNearest
@@ -905,6 +891,24 @@ class BaseGIQLGenerator(Generator):
         if key == ("1based", "half_open"):
             return f"({raw_end} - 1)"
         return raw_end  # 0based/half_open and 1based/closed: identity
+
+    @staticmethod
+    def _canonical_endpoints(
+        chrom: str,
+        raw_start: str,
+        raw_end: str,
+        table: Table | None,
+    ) -> tuple[str, str, str]:
+        """Canonicalize a ``(chrom, start, end)`` triple to 0-based half-open.
+
+        The chromosome expression passes through unchanged; start and end are
+        wrapped via ``_canonical_start`` / ``_canonical_end``.
+        """
+        return (
+            chrom,
+            BaseGIQLGenerator._canonical_start(raw_start, table),
+            BaseGIQLGenerator._canonical_end(raw_end, table),
+        )
 
     def _resolve_table_name(
         self, column_ref: str, table_name: str | None
