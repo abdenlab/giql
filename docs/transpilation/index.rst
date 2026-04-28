@@ -101,6 +101,11 @@ Each GIQL operator expands to specific SQL patterns.
              ELSE 0
          END
 
+DISTANCE and NEAREST canonicalize each table's ``start``/``end`` to 0-based
+half-open at SQL-emit time based on its ``coordinate_system`` and
+``interval_type``, so logically-equivalent intervals stored in different
+conventions yield the same numeric distance.
+
 **Intersection joins** expand to inequality joins:
 
 .. tab-set::

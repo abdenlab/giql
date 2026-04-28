@@ -769,33 +769,41 @@ class TestBaseGIQLGenerator:
         )
         assert output == expected
 
-    def test_giqldistance_with_closed_intervals(self, tables_with_closed_intervals):
+    def test_giqldistance_should_not_apply_gap_plus_one_for_closed_intervals(
+        self, tables_with_closed_intervals
+    ):
+        """Test DISTANCE on closed-interval tables omits "+1" gap counting.
+
+        Given:
+            Two 0-based closed-interval tables and DISTANCE.
+        When:
+            giqldistance_sql is called.
+        Then:
+            It should canonicalize each table-side end as (end + 1) but omit
+            any "+1" from the gap branches.
         """
-        GIVEN intervals from table with CLOSED interval type
-        WHEN Distance calculation is performed
-        THEN Distance includes +1 adjustment (bedtools compatibility).
-        """
-        # Add a second table with closed intervals for distance calculation
+        # Arrange
         tables_with_closed_intervals.register(
             "bed_features_b", Table("bed_features_b", interval_type="closed")
         )
-
         sql = (
             "SELECT DISTANCE(a.interval, b.interval) as dist "
             "FROM bed_features a CROSS JOIN bed_features_b b"
         )
         ast = parse_one(sql, dialect=GIQLDialect)
-
         generator = BaseGIQLGenerator(tables=tables_with_closed_intervals)
+
+        # Act
         output = generator.generate(ast)
 
+        # Assert
         expected = (
             'SELECT CASE WHEN a."chrom" != b."chrom" THEN NULL '
-            'WHEN a."start" < b."end" '
-            'AND a."end" > b."start" THEN 0 '
-            'WHEN a."end" <= b."start" '
-            'THEN (b."start" - a."end" + 1) '
-            'ELSE (a."start" - b."end" + 1) END AS dist '
+            'WHEN a."start" < (b."end" + 1) '
+            'AND (a."end" + 1) > b."start" THEN 0 '
+            'WHEN (a."end" + 1) <= b."start" '
+            'THEN (b."start" - (a."end" + 1)) '
+            'ELSE (a."start" - (b."end" + 1)) END AS dist '
             "FROM bed_features AS a CROSS JOIN bed_features_b AS b"
         )
         assert output == expected
@@ -889,25 +897,39 @@ class TestBaseGIQLGenerator:
         assert 'peaks."strand"' in output
         assert 'genes."strand"' in output
 
-    def test_giqlnearest_sql_closed_intervals(self):
+    def test_giqlnearest_should_not_apply_gap_plus_one_for_closed_intervals(
+        self,
+    ):
+        """Test NEAREST on a closed-interval target omits "+1" gap counting.
+
+        Given:
+            A 0-based closed-interval target table and NEAREST.
+        When:
+            giqlnearest_sql is called.
+        Then:
+            It should canonicalize the target end as (target."end" + 1) but
+            omit any "+1" from the gap branches.
         """
-        GIVEN a GIQLNearest with target table using CLOSED interval type
-        WHEN giqlnearest_sql is called
-        THEN Distance calculation includes +1 adjustment for bedtools compatibility.
-        """
+        # Arrange
         tables = Tables()
         tables.register("genes_closed", Table("genes_closed", interval_type="closed"))
-
         sql = (
-            "SELECT * FROM NEAREST(genes_closed, reference := 'chr1:1000-2000', k := 3)"
+            "SELECT * FROM NEAREST("
+            "genes_closed, reference := 'chr1:1000-2000', k := 3)"
         )
         ast = parse_one(sql, dialect=GIQLDialect)
-
         generator = BaseGIQLGenerator(tables=tables)
+
+        # Act
         output = generator.generate(ast)
 
-        # Should have +1 adjustment for closed intervals
-        assert "+ 1)" in output
+        # Assert — canonicalization is applied, but neither gap branch carries
+        # a trailing "+ 1".
+        assert '(genes_closed."end" + 1)' in output
+        assert 'THEN (genes_closed."start" - 2000)' in output
+        assert 'ELSE (1000 - (genes_closed."end" + 1))' in output
+        assert '(genes_closed."start" - 2000 + 1)' not in output
+        assert '(1000 - (genes_closed."end" + 1) + 1)' not in output
 
     def test_giqldistance_sql_literal_first_arg_error(self, tables_with_two_tables):
         """
@@ -1518,3 +1540,250 @@ class TestBaseGIQLGenerator:
             'OR ("chrom" = \'chr1\' AND ("start" - 1) < 600 AND "end" > 500))'
         )
         assert output == expected
+
+    @pytest.mark.parametrize(
+        "coordinate_system, interval_type, start_a, end_a, start_b, end_b",
+        [
+            pytest.param(
+                "0based", "half_open",
+                'a."start"', 'a."end"', 'b."start"', 'b."end"',
+                id="0based-half_open",
+            ),
+            pytest.param(
+                "0based", "closed",
+                'a."start"', '(a."end" + 1)', 'b."start"', '(b."end" + 1)',
+                id="0based-closed",
+            ),
+            pytest.param(
+                "1based", "half_open",
+                '(a."start" - 1)', '(a."end" - 1)',
+                '(b."start" - 1)', '(b."end" - 1)',
+                id="1based-half_open",
+            ),
+            pytest.param(
+                "1based", "closed",
+                '(a."start" - 1)', 'a."end"', '(b."start" - 1)', 'b."end"',
+                id="1based-closed",
+            ),
+        ],
+    )
+    def test_giqldistance_should_canonicalize_table_columns_for_each_convention(
+        self, coordinate_system, interval_type, start_a, end_a, start_b, end_b
+    ):
+        """Test DISTANCE canonicalizes both table columns per convention.
+
+        Given:
+            Two tables sharing one of the four (coordinate_system, interval_type)
+            combinations.
+        When:
+            DISTANCE is called between aliased columns from each table.
+        Then:
+            It should wrap each side's start/end (or not) per the canonical
+            0-based half-open conversion, leaving the comparison and gap
+            formulas otherwise unchanged.
+        """
+        # Arrange
+        tables = Tables()
+        tables.register(
+            "dist_a",
+            Table(
+                "dist_a",
+                coordinate_system=coordinate_system,
+                interval_type=interval_type,
+            ),
+        )
+        tables.register(
+            "dist_b",
+            Table(
+                "dist_b",
+                coordinate_system=coordinate_system,
+                interval_type=interval_type,
+            ),
+        )
+        sql = (
+            "SELECT DISTANCE(a.interval, b.interval) as dist "
+            "FROM dist_a a CROSS JOIN dist_b b"
+        )
+        ast = parse_one(sql, dialect=GIQLDialect)
+        generator = BaseGIQLGenerator(tables=tables)
+
+        # Act
+        output = generator.generate(ast)
+
+        # Assert
+        expected = (
+            'SELECT CASE WHEN a."chrom" != b."chrom" THEN NULL '
+            f"WHEN {start_a} < {end_b} AND {end_a} > {start_b} THEN 0 "
+            f"WHEN {end_a} <= {start_b} THEN ({start_b} - {end_a}) "
+            f"ELSE ({start_a} - {end_b}) END AS dist "
+            "FROM dist_a AS a CROSS JOIN dist_b AS b"
+        )
+        assert output == expected
+
+    def test_giqldistance_should_canonicalize_each_side_when_conventions_differ(
+        self, tables_mixed_conventions
+    ):
+        """Test DISTANCE canonicalizes each side independently with mixed conventions.
+
+        Given:
+            A 0-based half-open table (bed_a) joined against a 1-based closed
+            table (vcf_b).
+        When:
+            DISTANCE is called between aliased columns from each table.
+        Then:
+            It should leave bed_a's start/end raw and wrap vcf_b's start as
+            (start - 1) while leaving vcf_b's end raw.
+        """
+        # Arrange
+        sql = (
+            "SELECT DISTANCE(a.interval, b.interval) as dist "
+            "FROM bed_a a CROSS JOIN vcf_b b"
+        )
+        ast = parse_one(sql, dialect=GIQLDialect)
+        generator = BaseGIQLGenerator(tables=tables_mixed_conventions)
+
+        # Act
+        output = generator.generate(ast)
+
+        # Assert
+        expected = (
+            'SELECT CASE WHEN a."chrom" != b."chrom" THEN NULL '
+            'WHEN a."start" < b."end" AND a."end" > (b."start" - 1) THEN 0 '
+            'WHEN a."end" <= (b."start" - 1) '
+            'THEN ((b."start" - 1) - a."end") '
+            'ELSE (a."start" - b."end") END AS dist '
+            "FROM bed_a AS a CROSS JOIN vcf_b AS b"
+        )
+        assert output == expected
+
+    @pytest.mark.parametrize(
+        "coordinate_system, interval_type, target_start, target_end",
+        [
+            pytest.param(
+                "0based", "half_open",
+                'genes."start"', 'genes."end"',
+                id="0based-half_open",
+            ),
+            pytest.param(
+                "0based", "closed",
+                'genes."start"', '(genes."end" + 1)',
+                id="0based-closed",
+            ),
+            pytest.param(
+                "1based", "half_open",
+                '(genes."start" - 1)', '(genes."end" - 1)',
+                id="1based-half_open",
+            ),
+            pytest.param(
+                "1based", "closed",
+                '(genes."start" - 1)', 'genes."end"',
+                id="1based-closed",
+            ),
+        ],
+    )
+    def test_giqlnearest_should_canonicalize_target_columns_for_each_convention(
+        self, coordinate_system, interval_type, target_start, target_end
+    ):
+        """Test NEAREST canonicalizes target endpoints per convention.
+
+        Given:
+            A target table declared with one of the four (coordinate_system,
+            interval_type) combinations and a literal reference range.
+        When:
+            giqlnearest_sql is called.
+        Then:
+            It should wrap the target-side start/end (or not) per the
+            canonical 0-based half-open conversion in the distance CASE
+            expression.
+        """
+        # Arrange
+        tables = Tables()
+        tables.register(
+            "genes",
+            Table(
+                "genes",
+                coordinate_system=coordinate_system,
+                interval_type=interval_type,
+            ),
+        )
+        sql = "SELECT * FROM NEAREST(genes, reference := 'chr1:1000-2000', k := 1)"
+        ast = parse_one(sql, dialect=GIQLDialect)
+        generator = BaseGIQLGenerator(tables=tables)
+
+        # Act
+        output = generator.generate(ast)
+
+        # Assert — distance CASE expression uses canonicalized target endpoints
+        # against the (already-canonical) literal reference [1000, 2000).
+        assert (
+            f"WHEN 1000 < {target_end} AND 2000 > {target_start} THEN 0" in output
+        )
+        assert f"WHEN 2000 <= {target_start} THEN ({target_start} - 2000)" in output
+        assert f"ELSE (1000 - {target_end})" in output
+
+    def test_giqlnearest_should_canonicalize_reference_column_when_reference_is_one_based_closed(
+        self, tables_mixed_conventions
+    ):
+        """Test NEAREST canonicalizes a column-ref reference per its table's convention.
+
+        Given:
+            A 0-based half-open target table (bed_a) and an explicit
+            reference column from a 1-based closed table (vcf_b).
+        When:
+            giqlnearest_sql is called.
+        Then:
+            It should wrap the reference-side start as (start - 1), leave
+            its end raw, and leave the target side raw.
+        """
+        # Arrange
+        sql = (
+            "SELECT * FROM vcf_b b CROSS JOIN LATERAL "
+            "NEAREST(bed_a, reference := b.interval, k := 1)"
+        )
+        ast = parse_one(sql, dialect=GIQLDialect)
+        generator = BaseGIQLGenerator(tables=tables_mixed_conventions)
+
+        # Act
+        output = generator.generate(ast)
+
+        # Assert — reference's start canonicalized via _canonical_start
+        assert '(b."start" - 1) < bed_a."end"' in output
+        assert 'bed_a."end" <= (b."start" - 1)' not in output  # reference is left side
+        # Reference's end stays raw (1-based closed → identity for end)
+        assert 'b."end" > bed_a."start" THEN 0' in output
+
+    def test_giqlnearest_should_canonicalize_outer_table_columns_when_reference_is_implicit(
+        self, tables_mixed_conventions
+    ):
+        """Test NEAREST in correlated/implicit mode canonicalizes the outer table.
+
+        Given:
+            A 1-based closed outer table (vcf_b) and a 0-based half-open
+            target table (bed_a) joined via CROSS JOIN LATERAL with no
+            ``reference`` argument on NEAREST.
+        When:
+            giqlnearest_sql is called.
+        Then:
+            It should canonicalize the outer table's columns based on
+            vcf_b's convention — wrapping start as (vcf_b."start" - 1) and
+            leaving end raw — while leaving bed_a's target columns raw.
+        """
+        # Arrange
+        sql = (
+            "SELECT * FROM vcf_b CROSS JOIN LATERAL NEAREST(bed_a, k := 1)"
+        )
+        ast = parse_one(sql, dialect=GIQLDialect)
+        generator = BaseGIQLGenerator(tables=tables_mixed_conventions)
+
+        # Act
+        output = generator.generate(ast)
+
+        # Assert — distance CASE uses canonicalized outer-table columns and
+        # raw target-table columns.
+        assert (
+            'WHEN (vcf_b."start" - 1) < bed_a."end" '
+            'AND vcf_b."end" > bed_a."start" THEN 0'
+        ) in output
+        assert 'WHEN vcf_b."end" <= bed_a."start"' in output
+        assert 'THEN (bed_a."start" - vcf_b."end")' in output
+        assert 'ELSE ((vcf_b."start" - 1) - bed_a."end")' in output
