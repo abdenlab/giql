@@ -4,6 +4,8 @@ These tests validate that GIQL correctly handles strand-specific interval
 operations, matching bedtools behavior with -s and -S flags.
 """
 
+import pytest
+
 from giql import transpile
 
 from .utils.bedtools_wrapper import closest
@@ -12,6 +14,8 @@ from .utils.bedtools_wrapper import merge
 from .utils.comparison import compare_results
 from .utils.data_models import GenomicInterval
 from .utils.duckdb_loader import load_intervals
+
+pytestmark = pytest.mark.integration
 
 
 def test_intersect_same_strand(duckdb_connection):

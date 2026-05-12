@@ -142,6 +142,33 @@ class GIQLMerge(exp.Func):
         return cls(**kwargs)
 
 
+class GIQLRasterize(exp.Func):
+    """RASTERIZE aggregate function that projects intervals onto a fixed bin grid.
+
+    Tiles the genome into fixed-width bins and counts the number of
+    overlapping intervals per bin (bedtools-coverage convention: an
+    interval that spans multiple bins is counted in each of them).
+
+    Examples:
+        RASTERIZE(interval, 1000)
+        RASTERIZE(interval, resolution := 1000)
+    """
+
+    arg_types = {
+        "this": True,  # genomic column
+        "resolution": True,  # bin width (positional or named)
+    }
+
+    @classmethod
+    def from_arg_list(cls, args):
+        kwargs, positional_args = _split_named_and_positional(args)
+        if len(positional_args) > 0:
+            kwargs["this"] = positional_args[0]
+        if len(positional_args) > 1:
+            kwargs["resolution"] = positional_args[1]
+        return cls(**kwargs)
+
+
 class GIQLDistance(exp.Func):
     """DISTANCE function for calculating genomic distances between intervals.
 

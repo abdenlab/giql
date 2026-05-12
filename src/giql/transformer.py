@@ -15,6 +15,7 @@ from giql.constants import DEFAULT_END_COL
 from giql.constants import DEFAULT_START_COL
 from giql.constants import DEFAULT_STRAND_COL
 from giql.expressions import GIQLCluster
+from giql.expressions import GIQLRasterize
 from giql.expressions import GIQLMerge
 from giql.expressions import Intersects
 from giql.table import Tables
@@ -50,7 +51,7 @@ class ClusterTransformer:
 
         :param query:
             Query to extract table name from
-        :return:
+        :returns:
             Table name if FROM contains a simple table, None otherwise
         """
         from_clause = query.args.get("from_")
@@ -67,7 +68,7 @@ class ClusterTransformer:
 
         :param query:
             Query to extract table and column info from
-        :return:
+        :returns:
             Tuple of (chrom_col, start_col, end_col, strand_col)
         """
         table_name = self._get_table_name(query)
@@ -94,7 +95,7 @@ class ClusterTransformer:
 
         :param query:
             Parsed query AST
-        :return:
+        :returns:
             Transformed query AST
         """
         if not isinstance(query, exp.Select):
@@ -151,7 +152,7 @@ class ClusterTransformer:
 
         :param query:
             Query to search
-        :return:
+        :returns:
             List of CLUSTER expressions
         """
         cluster_exprs = []
@@ -175,7 +176,7 @@ class ClusterTransformer:
             Original query
         :param cluster_expr:
             CLUSTER expression to transform
-        :return:
+        :returns:
             Transformed query with CTEs
         """
         # Extract CLUSTER parameters
@@ -378,7 +379,7 @@ class MergeTransformer:
 
         :param query:
             Parsed query AST
-        :return:
+        :returns:
             Transformed query AST
         """
         if not isinstance(query, exp.Select):
@@ -436,7 +437,7 @@ class MergeTransformer:
 
         :param query:
             Query to search
-        :return:
+        :returns:
             List of MERGE expressions
         """
         merge_exprs = []
@@ -459,7 +460,7 @@ class MergeTransformer:
             Original query
         :param merge_expr:
             MERGE expression to transform
-        :return:
+        :returns:
             Transformed query with clustering and aggregation
         """
         # Extract MERGE parameters (same as CLUSTER)
@@ -576,6 +577,10 @@ class MergeTransformer:
         final_query.order_by(
             exp.Ordered(this=exp.column(start_col, quoted=True)), append=True, copy=False
         )
+
+        # Preserve any existing CTEs from the original query
+        if query.args.get("with_"):
+            final_query.set("with_", query.args["with_"].copy())
 
         return final_query
 
@@ -1472,3 +1477,409 @@ class IntersectsBinnedJoinTransformer:
         join3 = exp.Join(**join3_kwargs)
 
         return [join1, join2, join3]
+
+
+class RasterizeTransformer:
+    """Transform queries containing RASTERIZE into binned count queries.
+
+    RASTERIZE tiles the genome into fixed-width bins and counts overlapping
+    intervals per bin:
+
+        SELECT RASTERIZE(interval, 1000) FROM features
+
+    Into:
+
+        WITH __giql_bins AS (
+            SELECT chrom, bin_start AS start, bin_start + 1000 AS "end"
+            FROM (
+                SELECT DISTINCT chrom, MAX("end") AS __max_end
+                FROM features GROUP BY chrom
+            ) AS __giql_chroms,
+            LATERAL generate_series(0, __max_end, 1000) AS t(bin_start)
+        )
+        SELECT bins.chrom, bins.start, bins."end", COUNT(source.*)
+        FROM __giql_bins AS bins
+        LEFT JOIN features AS source
+          ON source.start < bins."end"
+          AND source."end" > bins.start
+          AND source.chrom = bins.chrom
+        GROUP BY bins.chrom, bins.start, bins."end"
+        ORDER BY bins.chrom, bins.start
+    """
+
+    def __init__(self, tables: Tables):
+        """Initialize transformer.
+
+        :param tables:
+            Table configurations for column mapping
+        """
+        self.tables = tables
+        self.cluster_transformer = ClusterTransformer(tables)
+
+    def transform(self, query: exp.Expression) -> exp.Expression:
+        """Transform query if it contains RASTERIZE expressions.
+
+        :param query:
+            Parsed query AST
+        :returns:
+            Transformed query AST
+        """
+        if not isinstance(query, exp.Select):
+            return query
+
+        # Recursively transform CTEs
+        if query.args.get("with_"):
+            cte = query.args["with_"]
+            for cte_expr in cte.expressions:
+                if isinstance(cte_expr, exp.CTE):
+                    cte_expr.set("this", self.transform(cte_expr.this))
+
+        # Recursively transform subqueries in FROM/JOIN/WHERE
+        for key in ("from_", "where"):
+            if query.args.get(key):
+                self._transform_subqueries_in_node(query.args[key])
+        if query.args.get("joins"):
+            for join in query.args["joins"]:
+                self._transform_subqueries_in_node(join)
+
+        # Find RASTERIZE expressions in SELECT
+        rasterize_exprs = self._find_rasterize_expressions(query)
+        if not rasterize_exprs:
+            return query
+
+        if len(rasterize_exprs) > 1:
+            raise ValueError("Multiple RASTERIZE expressions not yet supported")
+
+        return self._transform_for_rasterize(query, rasterize_exprs[0])
+
+    def _get_table_alias(self, query: exp.Select) -> str | None:
+        """Extract table alias from query's FROM clause.
+
+        :param query:
+            Query to extract alias from
+        :returns:
+            Table alias if present, None otherwise
+        """
+        from_clause = query.args.get("from_")
+        if not from_clause:
+            return None
+        if isinstance(from_clause.this, exp.Table):
+            return from_clause.this.alias
+        return None
+
+    def _transform_subqueries_in_node(self, node: exp.Expression):
+        """Recursively transform subqueries within an expression node.
+
+        :param node:
+            Expression node to search for subqueries
+        """
+        for subquery in node.find_all(exp.Subquery):
+            if isinstance(subquery.this, exp.Select):
+                transformed = self.transform(subquery.this)
+                subquery.set("this", transformed)
+
+    def _find_rasterize_expressions(self, query: exp.Select) -> list[GIQLRasterize]:
+        """Find all RASTERIZE expressions in query.
+
+        :param query:
+            Query to search
+        :returns:
+            List of RASTERIZE expressions
+        """
+        rasterize_exprs = []
+        for expression in query.expressions:
+            if isinstance(expression, GIQLRasterize):
+                rasterize_exprs.append(expression)
+            elif isinstance(expression, exp.Alias):
+                if isinstance(expression.this, GIQLRasterize):
+                    rasterize_exprs.append(expression.this)
+        return rasterize_exprs
+
+    def _transform_for_rasterize(
+        self, query: exp.Select, rasterize_expr: GIQLRasterize
+    ) -> exp.Select:
+        """Transform query to compute RASTERIZE using bins CTE + JOIN + GROUP BY.
+
+        :param query:
+            Original query
+        :param rasterize_expr:
+            RASTERIZE expression to transform
+        :returns:
+            Transformed query
+        """
+        # Extract parameters
+        resolution_expr = rasterize_expr.args.get("resolution")
+        if isinstance(resolution_expr, exp.Literal):
+            resolution = int(resolution_expr.this)
+        elif (
+            isinstance(resolution_expr, exp.Neg)
+            and isinstance(resolution_expr.this, exp.Literal)
+        ):
+            resolution = -int(resolution_expr.this.this)
+        else:
+            raise ValueError("RASTERIZE resolution must be an integer literal")
+
+        if resolution <= 0:
+            raise ValueError(
+                f"RASTERIZE resolution must be positive, got {resolution}"
+            )
+
+        # Get column names and table info
+        chrom_col, start_col, end_col, _ = (
+            self.cluster_transformer._get_genomic_columns(query)
+        )
+        table_name = self.cluster_transformer._get_table_name(query)
+        if not table_name:
+            raise ValueError(
+                "RASTERIZE requires a FROM clause that references a table "
+                "or CTE by name. Inline subqueries and VALUES clauses in "
+                "FROM are not yet supported — wrap the derivation in a "
+                "WITH clause (CTE) and select RASTERIZE(...) from the CTE "
+                "by name instead."
+            )
+        table_alias = self._get_table_alias(query)
+        source_ref = table_alias or table_name or "source"
+
+        # Build __giql_chroms subquery:
+        #   SELECT DISTINCT chrom, MAX("end") AS __max_end FROM <table> GROUP BY chrom
+        chroms_select = exp.Select()
+        chroms_select.select(
+            exp.column(chrom_col, quoted=True),
+            copy=False,
+        )
+        chroms_select.select(
+            exp.alias_(
+                exp.Max(this=exp.column(end_col, quoted=True)),
+                "__max_end",
+                quoted=False,
+            ),
+            append=True,
+            copy=False,
+        )
+
+        if table_name:
+            if table_alias:
+                chroms_select.from_(
+                    exp.alias_(exp.to_table(table_name), table_alias, table=True),
+                    copy=False,
+                )
+            else:
+                chroms_select.from_(exp.to_table(table_name), copy=False)
+
+        # Apply WHERE from original query to the chroms subquery too,
+        # qualifying unqualified column references with the table name
+        if query.args.get("where"):
+            chroms_where = query.args["where"].copy()
+            if table_name:
+                for col in chroms_where.find_all(exp.Column):
+                    if not col.table:
+                        col.set("table", exp.Identifier(this=table_name))
+            chroms_select.set("where", chroms_where)
+
+        chroms_select.group_by(exp.column(chrom_col, quoted=True), copy=False)
+
+        chroms_subquery = exp.Subquery(
+            this=chroms_select,
+            alias=exp.TableAlias(this=exp.Identifier(this="__giql_chroms")),
+        )
+
+        # Build bins CTE using raw SQL for generate_series + LATERAL
+        # since SQLGlot doesn't natively support generate_series
+        bins_select = exp.Select()
+        bins_select.select(
+            exp.column(chrom_col, table="__giql_chroms", quoted=True),
+            copy=False,
+        )
+        bins_select.select(
+            exp.alias_(
+                exp.column("bin_start"),
+                start_col,
+                quoted=True,
+            ),
+            append=True,
+            copy=False,
+        )
+        bins_select.select(
+            exp.alias_(
+                exp.Add(
+                    this=exp.column("bin_start"),
+                    expression=exp.Literal.number(resolution),
+                ),
+                end_col,
+                quoted=True,
+            ),
+            append=True,
+            copy=False,
+        )
+
+        # FROM __giql_chroms subquery
+        bins_select.from_(chroms_subquery, copy=False)
+
+        # CROSS JOIN LATERAL generate_series(0, __max_end - 1, resolution)
+        # AS t(bin_start) — upper bound subtracts 1 because generate_series
+        # is endpoint-inclusive and we don't want a trailing empty bin when
+        # MAX(end) lands exactly on a bin boundary.
+        lateral_join = exp.Join(
+            this=exp.Lateral(
+                this=exp.Anonymous(
+                    this="generate_series",
+                    expressions=[
+                        exp.Literal.number(0),
+                        exp.Sub(
+                            this=exp.column("__max_end"),
+                            expression=exp.Literal.number(1),
+                        ),
+                        exp.Literal.number(resolution),
+                    ],
+                ),
+                alias=exp.TableAlias(
+                    this=exp.Identifier(this="t"),
+                    columns=[exp.Identifier(this="bin_start")],
+                ),
+            ),
+            kind="CROSS",
+        )
+        bins_select.append("joins", lateral_join)
+
+        # Wrap bins_select as a CTE named __giql_bins
+        bins_cte = exp.CTE(
+            this=bins_select,
+            alias=exp.TableAlias(this=exp.Identifier(this="__giql_bins")),
+        )
+        with_clause = exp.With(expressions=[bins_cte])
+
+        # COUNT(chrom) — null-safe count of intervals overlapping the bin.
+        # Counting a non-null source column gives 0 for empty bins (LEFT JOIN
+        # produces NULLs for non-matches, which COUNT excludes).
+        agg_expr = exp.Count(
+            this=exp.column(chrom_col, table=source_ref, quoted=True),
+        )
+
+        # Build main SELECT
+        final_query = exp.Select()
+
+        # Add bin coordinate columns
+        final_query.select(
+            exp.column(chrom_col, table="bins", quoted=True),
+            copy=False,
+        )
+        final_query.select(
+            exp.column(start_col, table="bins", quoted=True),
+            append=True,
+            copy=False,
+        )
+        final_query.select(
+            exp.column(end_col, table="bins", quoted=True),
+            append=True,
+            copy=False,
+        )
+
+        # Replace RASTERIZE(...) in select list with aggregate, and add other columns
+        for expression in query.expressions:
+            if isinstance(expression, GIQLRasterize):
+                final_query.select(
+                    exp.alias_(agg_expr, "value", quoted=False),
+                    append=True,
+                    copy=False,
+                )
+            elif isinstance(expression, exp.Alias) and isinstance(
+                expression.this, GIQLRasterize
+            ):
+                final_query.select(
+                    exp.alias_(agg_expr, expression.alias, quoted=False),
+                    append=True,
+                    copy=False,
+                )
+            else:
+                final_query.select(expression, append=True, copy=False)
+
+        # FROM __giql_bins AS bins
+        final_query.from_(
+            exp.Table(
+                this=exp.Identifier(this="__giql_bins"),
+                alias=exp.TableAlias(this=exp.Identifier(this="bins")),
+            ),
+            copy=False,
+        )
+
+        # LEFT JOIN source ON overlap conditions
+        source_table = exp.to_table(table_name)
+        if table_alias:
+            source_table.set(
+                "alias", exp.TableAlias(this=exp.Identifier(this=source_ref))
+            )
+
+        join_condition = exp.And(
+            this=exp.And(
+                this=exp.LT(
+                    this=exp.column(start_col, table=source_ref, quoted=True),
+                    expression=exp.column(end_col, table="bins", quoted=True),
+                ),
+                expression=exp.GT(
+                    this=exp.column(end_col, table=source_ref, quoted=True),
+                    expression=exp.column(start_col, table="bins", quoted=True),
+                ),
+            ),
+            expression=exp.EQ(
+                this=exp.column(chrom_col, table=source_ref, quoted=True),
+                expression=exp.column(chrom_col, table="bins", quoted=True),
+            ),
+        )
+
+        # Merge original WHERE into the JOIN ON condition so that
+        # LEFT JOIN still produces zero-coverage bins (WHERE would filter
+        # them out because source columns are NULL for non-matching bins)
+        if query.args.get("where"):
+            where_condition = query.args["where"].this.copy()
+            # Qualify unqualified column references with source_ref
+            for col in where_condition.find_all(exp.Column):
+                if not col.table:
+                    col.set("table", exp.Identifier(this=source_ref))
+            join_condition = exp.And(
+                this=join_condition,
+                expression=where_condition,
+            )
+
+        left_join = exp.Join(
+            this=source_table,
+            on=join_condition,
+            kind="LEFT",
+        )
+        final_query.append("joins", left_join)
+
+        # GROUP BY bins.chrom, bins.start, bins.end
+        final_query.group_by(
+            exp.column(chrom_col, table="bins", quoted=True),
+            copy=False,
+        )
+        final_query.group_by(
+            exp.column(start_col, table="bins", quoted=True),
+            append=True,
+            copy=False,
+        )
+        final_query.group_by(
+            exp.column(end_col, table="bins", quoted=True),
+            append=True,
+            copy=False,
+        )
+
+        # ORDER BY bins.chrom, bins.start
+        final_query.order_by(
+            exp.Ordered(this=exp.column(chrom_col, table="bins", quoted=True)),
+            copy=False,
+        )
+        final_query.order_by(
+            exp.Ordered(this=exp.column(start_col, table="bins", quoted=True)),
+            append=True,
+            copy=False,
+        )
+
+        # Attach the WITH clause, preserving any user CTEs from the input query
+        existing_with = query.args.get("with_")
+        if existing_with:
+            merged_ctes = [cte.copy() for cte in existing_with.expressions] + [bins_cte]
+            final_query.set("with_", exp.With(expressions=merged_ctes))
+        else:
+            final_query.set("with_", with_clause)
+
+        return final_query

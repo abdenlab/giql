@@ -57,6 +57,9 @@ path = "build-hooks/metadata.py"
 
 [tool.pytest.ini_options]
 addopts = "--cov --cov-config=.coveragerc"
+markers = [
+    "integration: tests exercising real bedtools subprocesses and DuckDB I/O",
+]
 
 [tool.ruff]
 line-length = 89
