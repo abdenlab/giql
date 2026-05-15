@@ -62,6 +62,7 @@ See the following :doc:`recipes <recipes/index>` to learn how to use GIQL effect
    recipes/intersect
    recipes/distance
    recipes/clustering
+   recipes/disjoin
    recipes/advanced
    recipes/bedtools-migration
 
