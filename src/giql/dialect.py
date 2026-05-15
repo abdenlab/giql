@@ -13,6 +13,7 @@ from sqlglot.tokens import TokenType
 
 from giql.expressions import Contains
 from giql.expressions import GIQLCluster
+from giql.expressions import GIQLDisjoin
 from giql.expressions import GIQLDistance
 from giql.expressions import GIQLMerge
 from giql.expressions import GIQLNearest
@@ -57,6 +58,7 @@ class GIQLDialect(Dialect):
             "MERGE": GIQLMerge.from_arg_list,
             "DISTANCE": GIQLDistance.from_arg_list,
             "NEAREST": GIQLNearest.from_arg_list,
+            "DISJOIN": GIQLDisjoin.from_arg_list,
         }
 
         def _parse_comparison(self):

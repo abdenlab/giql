@@ -201,3 +201,33 @@ class GIQLNearest(exp.Func):
         if len(positional_args) >= 1:
             kwargs["this"] = positional_args[0]
         return cls(**kwargs)
+
+
+class GIQLDisjoin(exp.Func):
+    """DISJOIN table function for splitting intervals at reference breakpoints.
+
+    Generates SQL that cuts each target interval at every reference breakpoint
+    strictly interior to it, so each resulting sub-interval is fully contained
+    by every reference interval it overlaps. The target row passes through
+    intact and the sub-interval is appended as ``disjoin_chrom`` /
+    ``disjoin_start`` / ``disjoin_end``. When ``reference`` is omitted it
+    defaults to the target set.
+
+    Examples:
+        DISJOIN(features)
+        DISJOIN(features, reference := other)
+        DISJOIN(features, reference => other)
+        DISJOIN(features, reference := (SELECT ...))
+    """
+
+    arg_types = {
+        "this": True,  # Required: target table name
+        "reference": False,  # Optional: reference table/CTE name or subquery
+    }
+
+    @classmethod
+    def from_arg_list(cls, args):
+        kwargs, positional_args = _split_named_and_positional(args)
+        if len(positional_args) >= 1:
+            kwargs["this"] = positional_args[0]
+        return cls(**kwargs)
