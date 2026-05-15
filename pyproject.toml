@@ -57,6 +57,9 @@ path = "build-hooks/metadata.py"
 
 [tool.pytest.ini_options]
 addopts = "--cov --cov-config=.coveragerc"
+markers = [
+    "integration: end-to-end tests that execute generated SQL against a real database",
+]
 
 [tool.ruff]
 line-length = 89
