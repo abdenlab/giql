@@ -4,8 +4,10 @@ Tests verify that the GIQL parser recognizes DISJOIN table-function calls
 and maps positional and named arguments onto the GIQLDisjoin AST node.
 """
 
+import pytest
 from sqlglot import exp
 from sqlglot import parse_one
+from sqlglot.errors import ParseError
 
 from giql.dialect import GIQLDialect
 from giql.expressions import GIQLDisjoin
@@ -69,23 +71,37 @@ class TestDisjoinParsing:
         # Assert
         assert node.args.get("reference") is None
 
-    def test_from_arg_list_should_ignore_extra_positional_argument(self):
-        """Test that a bare second positional argument is not bound.
+    def test_from_arg_list_should_reject_extra_positional_argument(self):
+        """Test that a bare second positional argument is rejected.
 
         Given:
-            A GIQL query with DISJOIN(features, refs) using a bare second
-            positional argument.
+            A GIQL query with DISJOIN(features, refs) passing the reference
+            set as a bare second positional argument.
         When:
             Parsing the query.
         Then:
-            It should bind `this` to features and leave `reference` unset.
+            It should raise a ParseError naming the positional-argument limit.
         """
-        # Arrange & act
-        node = _disjoin_node("SELECT * FROM DISJOIN(features, refs)")
+        # Arrange, act, & assert
+        with pytest.raises(ParseError, match="at most one positional"):
+            parse_one("SELECT * FROM DISJOIN(features, refs)", dialect=GIQLDialect)
 
-        # Assert
-        assert node.this.name == "features"
-        assert node.args.get("reference") is None
+    def test_from_arg_list_should_reject_unknown_named_argument(self):
+        """Test that an unrecognized named argument is rejected.
+
+        Given:
+            A GIQL query with DISJOIN(features, mask := refs) naming an
+            argument that is not part of the DISJOIN schema.
+        When:
+            Parsing the query.
+        Then:
+            It should raise a ParseError naming the unexpected argument.
+        """
+        # Arrange, act, & assert
+        with pytest.raises(ParseError, match="unexpected named argument"):
+            parse_one(
+                "SELECT * FROM DISJOIN(features, mask := refs)", dialect=GIQLDialect
+            )
 
     def test_from_arg_list_should_map_reference_when_named_with_walrus(self):
         """Test that a walrus-named reference argument is carried.

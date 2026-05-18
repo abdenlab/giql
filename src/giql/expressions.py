@@ -4,6 +4,7 @@ This module defines custom SQLGlot expression nodes for GIQL spatial operators.
 """
 
 from sqlglot import exp
+from sqlglot.errors import ParseError
 
 
 class GenomicRange(exp.Expression):
@@ -228,6 +229,18 @@ class GIQLDisjoin(exp.Func):
     @classmethod
     def from_arg_list(cls, args):
         kwargs, positional_args = _split_named_and_positional(args)
+        unknown = set(kwargs) - set(cls.arg_types)
+        if unknown:
+            raise ParseError(
+                f"DISJOIN got unexpected named argument(s): "
+                f"{', '.join(sorted(unknown))}. Valid arguments: reference."
+            )
+        if len(positional_args) > 1:
+            raise ParseError(
+                "DISJOIN accepts at most one positional argument (the target "
+                f"table); got {len(positional_args)}. Pass the reference set "
+                "as 'reference := ...'."
+            )
         if len(positional_args) >= 1:
             kwargs["this"] = positional_args[0]
         return cls(**kwargs)
