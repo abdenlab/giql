@@ -5,6 +5,8 @@ shape and that target/reference resolution and coordinate-system
 canonicalization are reflected in the generated SQL.
 """
 
+import pytest
+
 from giql import transpile
 from giql.table import Table
 
@@ -125,3 +127,71 @@ class TestDisjoinTranspilation:
         )
 
         assert "AS __giql_dj_rs" in sql
+
+    def test_giqldisjoin_sql_should_resolve_in_query_cte_reference(self):
+        """
+        GIVEN a DISJOIN reference naming a CTE defined in the outer query
+        WHEN transpiling to SQL
+        THEN the reference CTE should select from that CTE name
+        """
+        sql = transpile(
+            "WITH bins AS (SELECT 1) "
+            "SELECT * FROM DISJOIN(features, reference := bins)",
+            tables=["features"],
+        )
+
+        assert "__giql_dj_ref AS (SELECT * FROM bins)" in sql
+
+    def test_giqldisjoin_sql_should_let_cte_shadow_registered_table(self):
+        """
+        GIVEN a reference name shared by a registered 1-based table and a CTE
+        WHEN transpiling to SQL
+        THEN the CTE should shadow the table and canonical columns stay unshifted
+        """
+        sql = transpile(
+            "WITH refs AS (SELECT 1) "
+            "SELECT * FROM DISJOIN(features, reference := refs)",
+            tables=[
+                "features",
+                Table("refs", coordinate_system="1based", interval_type="closed"),
+            ],
+        )
+
+        assert "__giql_dj_ref AS (SELECT * FROM refs)" in sql
+        assert '("start" - 1)' not in sql
+
+    def test_giqldisjoin_sql_should_reject_literal_range_reference(self):
+        """
+        GIVEN a DISJOIN call whose reference is a literal genomic range
+        WHEN transpiling to SQL
+        THEN transpilation should raise an error rejecting the reference form
+        """
+        with pytest.raises(ValueError, match="DISJOIN reference must be"):
+            transpile(
+                "SELECT * FROM DISJOIN(features, reference := 'chr1:1-9')",
+                tables=["features"],
+            )
+
+    def test_giqldisjoin_sql_should_reject_reserved_prefix_reference(self):
+        """
+        GIVEN a DISJOIN reference name using the reserved __giql_dj_ prefix
+        WHEN transpiling to SQL
+        THEN transpilation should raise an error naming the reserved prefix
+        """
+        with pytest.raises(ValueError, match="reserved"):
+            transpile(
+                "SELECT * FROM DISJOIN(features, reference := __giql_dj_ref)",
+                tables=["features"],
+            )
+
+    def test_giqldisjoin_sql_should_reject_unknown_reference_name(self):
+        """
+        GIVEN a DISJOIN reference that is neither a registered table nor a CTE
+        WHEN transpiling to SQL
+        THEN transpilation should raise an error rejecting the unknown name
+        """
+        with pytest.raises(ValueError, match="neither a registered table"):
+            transpile(
+                "SELECT * FROM DISJOIN(features, reference := missing)",
+                tables=["features"],
+            )
