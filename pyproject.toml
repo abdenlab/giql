@@ -44,6 +44,7 @@ dev = [
     "pytest>=7.0.0",
     "ruff>=0.1.0",
     "datafusion>=52.3.0",
+    "pytest-manifest>=1.0",
 ]
 docs = [
     "sphinx>=7.0",
@@ -59,6 +60,7 @@ path = "build-hooks/metadata.py"
 addopts = "--cov --cov-config=.coveragerc"
 markers = [
     "integration: end-to-end tests that execute generated SQL against a real database",
+    "usage: the canonical query-usage pattern (giql.tests usage_patterns) a test exercises",
 ]
 
 [tool.ruff]
