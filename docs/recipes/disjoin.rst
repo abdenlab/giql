@@ -20,9 +20,10 @@ sub-intervals defined by its own breakpoints:
    FROM DISJOIN(features)
    ORDER BY disjoin_chrom, disjoin_start
 
-**Use case:** Produce a non-overlapping segment track -- the equivalent of
-Bioconductor's ``disjoin()`` -- that downstream queries can aggregate without
-double-counting overlaps.
+**Use case:** Given ChIP-seq peak calls pooled from several samples, produce a
+non-overlapping segment track -- the equivalent of Bioconductor's ``disjoin()``
+-- so downstream signal or count aggregates never double-count a base covered
+by two overlapping sample peaks.
 
 Track Each Segment's Parent
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -52,8 +53,9 @@ the pieces the mask covers:
    SELECT name, disjoin_start, disjoin_end
    FROM DISJOIN(features, reference := mask)
 
-**Use case:** Restrict features to mask regions while splitting them at mask
-boundaries so no piece straddles a mask edge.
+**Use case:** Restrict ATAC-seq or gene features to a set of callable (or
+otherwise interesting) mask regions, splitting them at the mask boundaries so
+no reported piece straddles a mask edge.
 
 Re-tile Against a Uniform Grid
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -68,8 +70,15 @@ Pass a generated set of fixed-width bins as the reference:
    )
    SELECT * FROM DISJOIN(features, reference := bins)
 
-**Use case:** Break features onto a uniform coordinate grid so each piece
-falls within a single bin.
+**Use case:** Break features onto a uniform coordinate grid -- for example to
+build a fixed-width binned coverage matrix -- so each piece falls within a
+single bin.
+
+.. note::
+
+   ``range()`` is DuckDB-specific syntax for generating the bin grid; other
+   engines need their own generator. The grid must also span every chromosome
+   present in ``features``, or features on an uncovered chromosome are dropped.
 
 Coming from Bedtools?
 ---------------------
