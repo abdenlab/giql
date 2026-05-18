@@ -136,7 +136,7 @@ OPERATORS: dict[str, dict[str, Any]] = {
         ],
         "returns": "Each target row with the sub-interval appended (disjoin_chrom, disjoin_start, disjoin_end)",
         "example": "SELECT * FROM DISJOIN(features, reference := mask)",
-        "doc_file": "dialect/aggregation-operators.rst",
+        "doc_file": "dialect/set-operators.rst",
     },
     "ANY": {
         "category": "quantifier",
@@ -221,6 +221,7 @@ DOC_PATHS: dict[str, str] = {
     "dialect/spatial-operators": "dialect/spatial-operators.rst",
     "dialect/distance-operators": "dialect/distance-operators.rst",
     "dialect/aggregation-operators": "dialect/aggregation-operators.rst",
+    "dialect/set-operators": "dialect/set-operators.rst",
     "dialect/quantifiers": "dialect/quantifiers.rst",
     "transpilation/index": "transpilation/index.rst",
     "transpilation/api-reference": "transpilation/api-reference.rst",
@@ -303,7 +304,7 @@ def get_documentation(path: str) -> str:
     Available paths:
     - index, quickstart
     - dialect/index, dialect/spatial-operators, dialect/distance-operators,
-      dialect/aggregation-operators, dialect/quantifiers
+      dialect/aggregation-operators, dialect/set-operators, dialect/quantifiers
     - transpilation/index, transpilation/api-reference,
       transpilation/execution, transpilation/performance,
       transpilation/schema-mapping

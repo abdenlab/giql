@@ -29,6 +29,7 @@ See the :doc:`GIQL dialect <dialect/index>` docs.
    dialect/spatial-operators
    dialect/distance-operators
    dialect/aggregation-operators
+   dialect/set-operators
    dialect/quantifiers
 
 Transpilation
