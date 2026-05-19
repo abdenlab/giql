@@ -592,7 +592,6 @@ def rendered_cases(usage: OperatorUsage) -> list:
     return cases
 
 
-# ---------------------------------------------------------------------------
 # Canonical fixture tables.
 #
 # The intervals are chosen so each pattern produces a non-trivial,
@@ -601,7 +600,6 @@ def rendered_cases(usage: OperatorUsage) -> list:
 # transform some rows. The CANONICAL profile reuses these unchanged so its
 # snapshot rows stay semantically identical to the originally committed
 # manifests.
-# ---------------------------------------------------------------------------
 _FEATURES = TableFixture(
     "features",
     (("chr1", 0, 100, "a"), ("chr1", 60, 180, "b"), ("chr2", 10, 40, "c")),
@@ -626,7 +624,7 @@ def _features_like(name: str, rows: tuple[tuple, ...]) -> TableFixture:
 # JOINED, SELF_JOIN_OVERLAP, and set-operation patterns.
 def _annotations(rows: tuple[tuple, ...] = _ANNOTATIONS.rows) -> TableFixture:
     """Build an ``annotations`` fixture (canonical layout) with the given rows."""
-    return TableFixture("annotations", rows)
+    return _features_like("annotations", rows)
 
 
 def _table_function_profile(
@@ -669,14 +667,12 @@ def _table_function_profile(
     )
 
 
-# ---------------------------------------------------------------------------
 # DISJOIN semantic profiles.
 #
 # Each profile is a TableFunctionUsage exercising one DISJOIN edge case. The
 # functional suite parametrises every usage pattern over every profile and
 # snapshots one manifest per (profile, mode). CANONICAL reuses the original
 # self / reference fixtures so its rows match the first committed manifests.
-# ---------------------------------------------------------------------------
 
 # CANONICAL -- the original benign data profile, self-mode and reference-mode.
 DISJOIN_USAGE = TableFunctionUsage(

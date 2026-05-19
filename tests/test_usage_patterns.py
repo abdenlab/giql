@@ -17,6 +17,7 @@ machinery: :class:`TestTableFixture`, :class:`TestRenderTableFunction`, and
 :class:`TestDisjoinProfiles`.
 """
 
+import duckdb
 import pytest
 
 from giql import transpile
@@ -60,8 +61,6 @@ def _run_duckdb(fixtures: tuple[TableFixture, ...], sql: str) -> list:
     TABLE`, so a fixture carrying a custom `Table` config is materialized with
     its own physical column names and types.
     """
-    import duckdb
-
     conn = duckdb.connect(":memory:")
     try:
         for fixture in fixtures:
