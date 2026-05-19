@@ -100,6 +100,18 @@ GIQL includes an [MCP](https://modelcontextprotocol.io/) server that gives LLM-p
 pip install giql[mcp]
 ```
 
+Or spawn a server directly with `uvx`:
+
+```sh
+uvx --from "giql[mcp]" giql-mcp
+```
+
+To add the GIQL MCP server to a specific project in Claude Code:
+
+```sh
+claude mcp add --scope project giql-mcp -- uvx --from "giql[mcp]" giql-mcp
+```
+
 See [`src/giql/mcp/README.md`](src/giql/mcp/README.md) for configuration and usage details.
 
 ## Development
