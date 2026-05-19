@@ -6,10 +6,10 @@ GIQL's ``DISJOIN`` operator -- partitioning a set into non-overlapping
 segments and re-tiling features against a reference grid.
 
 Partition a Set of Intervals
------------------------------
+----------------------------
 
 Build a Disjoint Partition
-~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Split a set of intervals into the maximal set of non-overlapping
 sub-intervals defined by its own breakpoints:
@@ -83,8 +83,6 @@ single bin.
 Coming from Bedtools?
 ---------------------
 
-``DISJOIN`` has no single bedtools equivalent. The self-mode partition is
-closest to the breakpoints implied by ``bedtools merge`` re-split at every
-input boundary; splitting against a reference is closest to ``bedtools
-intersect`` combined with the reference's boundaries. See the
-:doc:`bedtools-migration` guide for related operations.
+``DISJOIN`` has no direct bedtools equivalent -- no single bedtools command
+splits intervals at breakpoints. See the :doc:`bedtools-migration` guide for
+the GIQL operators that do map onto bedtools commands.

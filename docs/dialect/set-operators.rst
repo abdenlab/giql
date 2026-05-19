@@ -88,6 +88,15 @@ nothing is dropped. In reference mode a target interval that overlaps no
 reference interval at all yields no output rows -- ``DISJOIN`` can drop a
 target entirely, not merely trim it.
 
+.. note::
+
+   ``disjoin_chrom`` / ``disjoin_start`` / ``disjoin_end`` are reserved output
+   column names. If the target table already carries a column with one of
+   those names, the output will contain two columns of that name; DuckDB
+   silently renames the second, so ``SELECT disjoin_start`` then resolves to
+   the passed-through parent column rather than the computed sub-interval.
+   Rename the conflicting target column before the call.
+
 Examples
 ~~~~~~~~
 
