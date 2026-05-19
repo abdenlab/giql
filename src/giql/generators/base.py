@@ -333,42 +333,50 @@ class BaseGIQLGenerator(Generator):
         out_start = self._decanonical_start("s.seg_start", target_table)
         out_end = self._decanonical_end("s.seg_end", target_table)
 
-        # The `seg_end > seg_start` guard in the final WHERE is belt-and-
-        # suspenders: UNION already dedupes cut positions, so LEAD cannot
-        # produce a zero-length segment unless that UNION becomes UNION ALL.
+        # Build the WITH clause one named fragment per __giql_dj_* CTE so each
+        # block reads on its own. The `seg_end > seg_start` guard in the final
+        # WHERE is belt-and-suspenders: UNION already dedupes cut positions, so
+        # LEAD cannot produce a zero-length segment unless it becomes UNION ALL.
+        ref_cte = f"__giql_dj_ref AS (SELECT * FROM {ref_from})"
+        tgt_cte = f"__giql_dj_tgt AS (SELECT * FROM {target_name})"
+        bp_cte = (
+            "__giql_dj_bp AS ("
+            f'SELECT "{ref_chrom}" AS chrom, {bp_start} AS pos FROM __giql_dj_ref '
+            "UNION "
+            f'SELECT "{ref_chrom}" AS chrom, {bp_end} AS pos FROM __giql_dj_ref)'
+        )
+        cuts_cte = (
+            "__giql_dj_cuts AS ("
+            f'SELECT t."{target_chrom}" AS kc, t."{target_start}" AS ks, '
+            f't."{target_end}" AS ke, {t_start} AS pos FROM __giql_dj_tgt AS t '
+            "UNION "
+            f'SELECT t."{target_chrom}", t."{target_start}", t."{target_end}", '
+            f"{t_end} FROM __giql_dj_tgt AS t "
+            "UNION "
+            f'SELECT t."{target_chrom}", t."{target_start}", t."{target_end}", '
+            "bp.pos FROM __giql_dj_tgt AS t JOIN __giql_dj_bp AS bp "
+            f"ON bp.chrom = {t_chrom} AND bp.pos > {t_start} "
+            f"AND bp.pos < {t_end})"
+        )
+        segs_cte = (
+            "__giql_dj_segs AS ("
+            "SELECT kc, ks, ke, pos AS seg_start, "
+            "LEAD(pos) OVER (PARTITION BY kc, ks, ke ORDER BY pos) AS seg_end "
+            "FROM __giql_dj_cuts)"
+        )
+        final_select = (
+            f"SELECT t.*, s.kc AS disjoin_chrom, {out_start} AS disjoin_start, "
+            f"{out_end} AS disjoin_end FROM __giql_dj_tgt AS t "
+            f'JOIN __giql_dj_segs AS s ON t."{target_chrom}" = s.kc '
+            f'AND t."{target_start}" = s.ks AND t."{target_end}" = s.ke '
+            "WHERE s.seg_end IS NOT NULL AND s.seg_end > s.seg_start "
+            "AND EXISTS (SELECT 1 FROM __giql_dj_ref AS r "
+            f'WHERE r."{ref_chrom}" = s.kc AND {r_start} <= s.seg_start '
+            f"AND {r_end} > s.seg_start)"
+        )
         return (
-            "(WITH __giql_dj_ref AS ("
-            f"SELECT * FROM {ref_from}"
-            "), __giql_dj_tgt AS ("
-            f"SELECT * FROM {target_name}"
-            "), __giql_dj_bp AS ("
-            f'SELECT "{ref_chrom}" AS chrom, {bp_start} AS pos FROM __giql_dj_ref'
-            " UNION "
-            f'SELECT "{ref_chrom}" AS chrom, {bp_end} AS pos FROM __giql_dj_ref'
-            "), __giql_dj_cuts AS ("
-            f'SELECT t."{target_chrom}" AS kc, t."{target_start}" AS ks,'
-            f' t."{target_end}" AS ke, {t_start} AS pos FROM __giql_dj_tgt AS t'
-            " UNION "
-            f'SELECT t."{target_chrom}", t."{target_start}", t."{target_end}",'
-            f" {t_end} FROM __giql_dj_tgt AS t"
-            " UNION "
-            f'SELECT t."{target_chrom}", t."{target_start}", t."{target_end}",'
-            " bp.pos FROM __giql_dj_tgt AS t JOIN __giql_dj_bp AS bp"
-            f" ON bp.chrom = {t_chrom} AND bp.pos > {t_start}"
-            f" AND bp.pos < {t_end}"
-            "), __giql_dj_segs AS ("
-            "SELECT kc, ks, ke, pos AS seg_start,"
-            " LEAD(pos) OVER (PARTITION BY kc, ks, ke ORDER BY pos) AS seg_end"
-            " FROM __giql_dj_cuts"
-            ") SELECT t.*, s.kc AS disjoin_chrom,"
-            f" {out_start} AS disjoin_start, {out_end} AS disjoin_end"
-            " FROM __giql_dj_tgt AS t JOIN __giql_dj_segs AS s"
-            f' ON t."{target_chrom}" = s.kc AND t."{target_start}" = s.ks'
-            f' AND t."{target_end}" = s.ke'
-            " WHERE s.seg_end IS NOT NULL AND s.seg_end > s.seg_start"
-            " AND EXISTS (SELECT 1 FROM __giql_dj_ref AS r WHERE"
-            f' r."{ref_chrom}" = s.kc AND {r_start} <= s.seg_start'
-            f" AND {r_end} > s.seg_start))"
+            f"(WITH {ref_cte}, {tgt_cte}, {bp_cte}, "
+            f"{cuts_cte}, {segs_cte} {final_select})"
         )
 
     def giqldistance_sql(self, expression: GIQLDistance) -> str:
