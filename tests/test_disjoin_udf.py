@@ -61,11 +61,16 @@ class TestDisjoinExecution:
     """End-to-end DISJOIN correctness on every supported backend."""
 
     def test_disjoin_should_split_intervals_at_breakpoints(self, run):
+        """Test that DISJOIN splits intervals at interior breakpoints.
+
+        Given:
+            Two overlapping target intervals A=[0,20) and B=[10,30).
+        When:
+            DISJOIN runs in self-mode.
+        Then:
+            It should split each interval at the other's interior breakpoint.
         """
-        GIVEN two overlapping target intervals A=[0,20) and B=[10,30)
-        WHEN DISJOIN runs in self-mode
-        THEN each interval should be split at the other's interior breakpoint
-        """
+        # Arrange & act
         result = run(
             "SELECT name, disjoin_start, disjoin_end FROM DISJOIN(features) "
             "ORDER BY name, disjoin_start",
@@ -73,6 +78,7 @@ class TestDisjoinExecution:
             features=[("chr1", 0, 20, "A"), ("chr1", 10, 30, "B")],
         )
 
+        # Assert
         assert result == [
             ("A", 0, 10),
             ("A", 10, 20),
@@ -81,11 +87,16 @@ class TestDisjoinExecution:
         ]
 
     def test_disjoin_should_yield_bioconductor_partition_when_distinct(self, run):
+        """Test that DISTINCT sub-intervals yield the Bioconductor partition.
+
+        Given:
+            Overlapping target intervals in self-mode.
+        When:
+            Selecting DISTINCT sub-intervals from DISJOIN.
+        Then:
+            It should yield the globally non-overlapping partition.
         """
-        GIVEN overlapping target intervals in self-mode
-        WHEN selecting DISTINCT sub-intervals from DISJOIN
-        THEN the result should be the globally non-overlapping partition
-        """
+        # Arrange & act
         result = run(
             "SELECT DISTINCT disjoin_chrom, disjoin_start, disjoin_end "
             "FROM DISJOIN(features) ORDER BY disjoin_start",
@@ -93,14 +104,20 @@ class TestDisjoinExecution:
             features=[("chr1", 0, 20, "A"), ("chr1", 10, 30, "B")],
         )
 
+        # Assert
         assert result == [("chr1", 0, 10), ("chr1", 10, 20), ("chr1", 20, 30)]
 
     def test_disjoin_should_split_against_explicit_reference(self, run):
+        """Test that DISJOIN cuts the target at an explicit reference.
+
+        Given:
+            A target interval and a separate reference set.
+        When:
+            DISJOIN runs with an explicit reference.
+        Then:
+            It should cut the target at the reference breakpoints.
         """
-        GIVEN a target interval and a separate reference set
-        WHEN DISJOIN runs with an explicit reference
-        THEN the target should be cut at the reference breakpoints
-        """
+        # Arrange & act
         result = run(
             "SELECT disjoin_start, disjoin_end "
             "FROM DISJOIN(features, reference := refs) ORDER BY disjoin_start",
@@ -109,14 +126,20 @@ class TestDisjoinExecution:
             refs=[("chr1", 0, 10, "a"), ("chr1", 10, 30, "b")],
         )
 
+        # Assert
         assert result == [(0, 10), (10, 30)]
 
     def test_disjoin_should_drop_pieces_overlapping_no_reference(self, run):
+        """Test that sub-intervals overlapping no reference are dropped.
+
+        Given:
+            A target spanning a gap in the reference coverage.
+        When:
+            DISJOIN runs with an explicit reference.
+        Then:
+            It should drop sub-intervals overlapping no reference interval.
         """
-        GIVEN a target spanning a gap in the reference coverage
-        WHEN DISJOIN runs with an explicit reference
-        THEN sub-intervals overlapping no reference interval should be dropped
-        """
+        # Arrange & act
         result = run(
             "SELECT disjoin_start, disjoin_end "
             "FROM DISJOIN(features, reference := refs) ORDER BY disjoin_start",
@@ -125,28 +148,40 @@ class TestDisjoinExecution:
             refs=[("chr1", 0, 10, "a"), ("chr1", 20, 30, "b")],
         )
 
+        # Assert
         assert result == [(0, 10), (20, 30)]
 
     def test_disjoin_should_yield_no_rows_when_target_is_a_point(self, run):
+        """Test that a zero-length target produces no rows.
+
+        Given:
+            A zero-length target interval.
+        When:
+            DISJOIN runs.
+        Then:
+            It should produce no output rows.
         """
-        GIVEN a zero-length target interval
-        WHEN DISJOIN runs
-        THEN it should produce no output rows
-        """
+        # Arrange & act
         result = run(
             "SELECT * FROM DISJOIN(features)",
             tables=["features"],
             features=[("chr1", 5, 5, "P")],
         )
 
+        # Assert
         assert result == []
 
     def test_disjoin_should_split_duplicate_targets_independently(self, run):
+        """Test that duplicate target rows are split independently.
+
+        Given:
+            Two target rows with identical geometry.
+        When:
+            DISJOIN runs with a reference that cuts them.
+        Then:
+            It should split each duplicate row independently.
         """
-        GIVEN two target rows with identical geometry
-        WHEN DISJOIN runs with a reference that cuts them
-        THEN each duplicate row should be split independently
-        """
+        # Arrange & act
         result = run(
             "SELECT name, disjoin_start, disjoin_end "
             "FROM DISJOIN(features, reference := refs) ORDER BY name, disjoin_start",
@@ -155,14 +190,21 @@ class TestDisjoinExecution:
             refs=[("chr1", 0, 5, "a"), ("chr1", 5, 10, "b")],
         )
 
+        # Assert
         assert result == [("X", 0, 5), ("X", 5, 10), ("Y", 0, 5), ("Y", 5, 10)]
 
     def test_disjoin_should_not_cross_chromosome_boundaries(self, run):
+        """Test that sub-intervals never cross a chromosome boundary.
+
+        Given:
+            Target intervals on different chromosomes.
+        When:
+            DISJOIN runs in self-mode.
+        Then:
+            It should never produce a sub-interval spanning a chromosome
+            boundary.
         """
-        GIVEN target intervals on different chromosomes
-        WHEN DISJOIN runs in self-mode
-        THEN sub-intervals should never span a chromosome boundary
-        """
+        # Arrange & act
         result = run(
             "SELECT disjoin_chrom, disjoin_start, disjoin_end FROM DISJOIN(features) "
             "ORDER BY disjoin_chrom, disjoin_start",
@@ -170,15 +212,21 @@ class TestDisjoinExecution:
             features=[("chr1", 0, 20, "A"), ("chr2", 5, 25, "B")],
         )
 
+        # Assert
         assert result == [("chr1", 0, 20), ("chr2", 5, 25)]
 
     def test_disjoin_should_pass_through_non_interval_columns(self, run):
+        """Test that non-interval columns pass through unchanged.
+
+        Given:
+            A target table carrying a non-interval column.
+        When:
+            DISJOIN runs.
+        Then:
+            It should carry the intact parent row on every output row
+            alongside its sub-interval.
         """
-        GIVEN a target table carrying a non-interval column
-        WHEN DISJOIN runs
-        THEN every output row should carry the intact parent row alongside
-            its sub-interval
-        """
+        # Arrange & act
         result = run(
             'SELECT name, chrom, "start", "end", disjoin_start, disjoin_end '
             "FROM DISJOIN(features) ORDER BY disjoin_start, name",
@@ -186,6 +234,7 @@ class TestDisjoinExecution:
             features=[("chr1", 0, 20, "A"), ("chr1", 10, 30, "B")],
         )
 
+        # Assert
         assert result == [
             ("A", "chr1", 0, 20, 0, 10),
             ("A", "chr1", 0, 20, 10, 20),
@@ -194,11 +243,16 @@ class TestDisjoinExecution:
         ]
 
     def test_disjoin_should_accept_a_cte_as_reference(self, run):
+        """Test that a CTE can be used as the reference.
+
+        Given:
+            A reference supplied as a CTE defined in the outer query.
+        When:
+            DISJOIN runs against that CTE.
+        Then:
+            It should split the target at the CTE's breakpoints.
         """
-        GIVEN a reference supplied as a CTE defined in the outer query
-        WHEN DISJOIN runs against that CTE
-        THEN the target should be split at the CTE's breakpoints
-        """
+        # Arrange & act
         result = run(
             "WITH bins AS ("
             "  SELECT 'chr1' AS chrom, 0 AS \"start\", 10 AS \"end\" "
@@ -210,14 +264,20 @@ class TestDisjoinExecution:
             features=[("chr1", 0, 20, "T")],
         )
 
+        # Assert
         assert result == [(0, 10), (10, 20)]
 
     def test_disjoin_should_not_cut_at_breakpoint_on_target_boundary(self, run):
+        """Test that a breakpoint on a target boundary does not split it.
+
+        Given:
+            A reference breakpoint coinciding with a target boundary.
+        When:
+            DISJOIN runs.
+        Then:
+            It should not split the target at that boundary.
         """
-        GIVEN a reference breakpoint coinciding with a target boundary
-        WHEN DISJOIN runs
-        THEN the target should not be split at that boundary
-        """
+        # Arrange & act
         result = run(
             "SELECT disjoin_start, disjoin_end "
             "FROM DISJOIN(features, reference := refs)",
@@ -226,4 +286,5 @@ class TestDisjoinExecution:
             refs=[("chr1", 10, 20, "r")],
         )
 
+        # Assert
         assert result == [(10, 20)]
