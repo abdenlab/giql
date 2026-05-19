@@ -296,6 +296,15 @@ class BaseGIQLGenerator(Generator):
         )
         target_table = self.tables.get(target_name)
 
+        # The __giql_dj_ prefix names the operator's internal CTEs; a target
+        # table using it would collide with them.
+        if target_name.startswith("__giql_dj_"):
+            raise ValueError(
+                f"DISJOIN target {target_name!r} uses the reserved "
+                "'__giql_dj_' prefix, which names the operator's internal "
+                "CTEs. Rename the table."
+            )
+
         # Resolve the reference relation (defaults to the target set).
         ref_from, ref_chrom, ref_start, ref_end, ref_table = (
             self._resolve_disjoin_reference(
