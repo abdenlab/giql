@@ -58,7 +58,7 @@ def transpile(
     ----------
     giql : str
         The GIQL query string containing genomic extensions like
-        INTERSECTS, CONTAINS, WITHIN, CLUSTER, MERGE, or NEAREST.
+        INTERSECTS, CONTAINS, WITHIN, CLUSTER, MERGE, NEAREST, or DISJOIN.
     tables : list[str | Table] | None
         Table configurations. Strings use default column mappings
         (chrom, start, end, strand). Table objects provide custom

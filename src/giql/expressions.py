@@ -4,6 +4,7 @@ This module defines custom SQLGlot expression nodes for GIQL spatial operators.
 """
 
 from sqlglot import exp
+from sqlglot.errors import ParseError
 
 
 class GenomicRange(exp.Expression):
@@ -111,6 +112,11 @@ class GIQLCluster(exp.Func):
             kwargs["this"] = positional_args[0]
         if len(positional_args) > 1:
             kwargs["distance"] = positional_args[1]
+        if "this" not in kwargs:
+            raise ParseError(
+                "CLUSTER requires a genomic interval column as its first "
+                "argument."
+            )
         return cls(**kwargs)
 
 
@@ -139,6 +145,11 @@ class GIQLMerge(exp.Func):
             kwargs["this"] = positional_args[0]
         if len(positional_args) > 1:
             kwargs["distance"] = positional_args[1]
+        if "this" not in kwargs:
+            raise ParseError(
+                "MERGE requires a genomic interval column as its first "
+                "argument."
+            )
         return cls(**kwargs)
 
 
@@ -200,4 +211,54 @@ class GIQLNearest(exp.Func):
         kwargs, positional_args = _split_named_and_positional(args)
         if len(positional_args) >= 1:
             kwargs["this"] = positional_args[0]
+        if "this" not in kwargs:
+            raise ParseError(
+                "NEAREST requires a target table as its first argument."
+            )
+        return cls(**kwargs)
+
+
+class GIQLDisjoin(exp.Func):
+    """DISJOIN table function for splitting intervals at reference breakpoints.
+
+    Generates SQL that cuts each target interval at every reference breakpoint
+    strictly interior to it, so each resulting sub-interval is fully contained
+    by every reference interval it overlaps. The target row passes through
+    intact and the sub-interval is appended as ``disjoin_chrom`` /
+    ``disjoin_start`` / ``disjoin_end``. When ``reference`` is omitted it
+    defaults to the target set.
+
+    Examples:
+        DISJOIN(features)
+        DISJOIN(features, reference := other)
+        DISJOIN(features, reference => other)
+        DISJOIN(features, reference := (SELECT ...))
+    """
+
+    arg_types = {
+        "this": True,  # Required: target table name
+        "reference": False,  # Optional: reference table/CTE name or subquery
+    }
+
+    @classmethod
+    def from_arg_list(cls, args):
+        kwargs, positional_args = _split_named_and_positional(args)
+        unknown = set(kwargs) - set(cls.arg_types)
+        if unknown:
+            raise ParseError(
+                f"DISJOIN got unexpected named argument(s): "
+                f"{', '.join(sorted(unknown))}. Valid arguments: reference."
+            )
+        if len(positional_args) > 1:
+            raise ParseError(
+                "DISJOIN accepts at most one positional argument (the target "
+                f"table); got {len(positional_args)}. Pass the reference set "
+                "as 'reference := ...'."
+            )
+        if len(positional_args) >= 1:
+            kwargs["this"] = positional_args[0]
+        if "this" not in kwargs:
+            raise ParseError(
+                "DISJOIN requires a target table as its first argument."
+            )
         return cls(**kwargs)

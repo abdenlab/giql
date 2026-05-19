@@ -5,7 +5,9 @@ CLUSTER function calls with various argument patterns, and that
 only := and => are accepted for named parameter binding.
 """
 
+import pytest
 from sqlglot import parse_one
+from sqlglot.errors import ParseError
 
 from giql.dialect import GIQLDialect
 from giql.expressions import GIQLCluster
@@ -75,3 +77,21 @@ class TestClusterParsing:
         assert cluster_expr.args.get("stranded") is not None, (
             "Missing stranded parameter with => syntax"
         )
+
+    def test_from_arg_list_should_reject_missing_target(self):
+        """Test that a CLUSTER call with no interval argument is rejected.
+
+        Given:
+            A GIQL query with CLUSTER(stranded := true) supplying only a
+            named argument and no positional genomic interval column.
+        When:
+            Parsing the query.
+        Then:
+            It should raise a ParseError naming the required column argument.
+        """
+        # Arrange, act, & assert
+        with pytest.raises(ParseError, match="requires a genomic interval"):
+            parse_one(
+                "SELECT CLUSTER(stranded := true) AS cluster_id FROM peaks",
+                dialect=GIQLDialect,
+            )

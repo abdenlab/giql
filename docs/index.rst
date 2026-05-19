@@ -29,6 +29,7 @@ See the :doc:`GIQL dialect <dialect/index>` docs.
    dialect/spatial-operators
    dialect/distance-operators
    dialect/aggregation-operators
+   dialect/set-operators
    dialect/quantifiers
 
 Transpilation
@@ -62,6 +63,7 @@ See the following :doc:`recipes <recipes/index>` to learn how to use GIQL effect
    recipes/intersect
    recipes/distance
    recipes/clustering
+   recipes/disjoin
    recipes/advanced
    recipes/bedtools-migration
 

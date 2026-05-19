@@ -123,6 +123,21 @@ OPERATORS: dict[str, dict[str, Any]] = {
         "example": "SELECT MERGE(interval), COUNT(*) FROM features",
         "doc_file": "dialect/aggregation-operators.rst",
     },
+    "DISJOIN": {
+        "category": "set-operation",
+        "description": "Split genomic intervals into sub-intervals at reference breakpoints",
+        "syntax": "SELECT * FROM DISJOIN(target, reference := refs)",
+        "parameters": [
+            {"name": "target", "description": "Table of intervals to split"},
+            {
+                "name": "reference",
+                "description": "Table, CTE, or subquery supplying breakpoints (defaults to target)",
+            },
+        ],
+        "returns": "Each target row with the sub-interval appended (disjoin_chrom, disjoin_start, disjoin_end)",
+        "example": "SELECT * FROM DISJOIN(features, reference := mask)",
+        "doc_file": "dialect/set-operators.rst",
+    },
     "ANY": {
         "category": "quantifier",
         "description": "Match if condition holds for any of the specified ranges",
@@ -206,6 +221,7 @@ DOC_PATHS: dict[str, str] = {
     "dialect/spatial-operators": "dialect/spatial-operators.rst",
     "dialect/distance-operators": "dialect/distance-operators.rst",
     "dialect/aggregation-operators": "dialect/aggregation-operators.rst",
+    "dialect/set-operators": "dialect/set-operators.rst",
     "dialect/quantifiers": "dialect/quantifiers.rst",
     "transpilation/index": "transpilation/index.rst",
     "transpilation/api-reference": "transpilation/api-reference.rst",
@@ -216,6 +232,7 @@ DOC_PATHS: dict[str, str] = {
     "recipes/intersect": "recipes/intersect.rst",
     "recipes/distance": "recipes/distance.rst",
     "recipes/clustering": "recipes/clustering.rst",
+    "recipes/disjoin": "recipes/disjoin.rst",
     "recipes/bedtools-migration": "recipes/bedtools-migration.rst",
     "recipes/advanced": "recipes/advanced.rst",
 }
@@ -287,12 +304,13 @@ def get_documentation(path: str) -> str:
     Available paths:
     - index, quickstart
     - dialect/index, dialect/spatial-operators, dialect/distance-operators,
-      dialect/aggregation-operators, dialect/quantifiers
+      dialect/aggregation-operators, dialect/set-operators, dialect/quantifiers
     - transpilation/index, transpilation/api-reference,
       transpilation/execution, transpilation/performance,
       transpilation/schema-mapping
     - recipes/index, recipes/intersect, recipes/distance,
-      recipes/clustering, recipes/bedtools-migration, recipes/advanced
+      recipes/clustering, recipes/disjoin, recipes/bedtools-migration,
+      recipes/advanced
     """
     if path not in DOC_PATHS:
         available = ", ".join(sorted(DOC_PATHS.keys()))
@@ -318,6 +336,7 @@ def list_operators() -> list[dict[str, str]]:
     - Spatial: INTERSECTS, CONTAINS, WITHIN
     - Distance: DISTANCE, NEAREST
     - Aggregation: CLUSTER, MERGE
+    - Set operations: DISJOIN
     - Quantifiers: ANY, ALL
     """
     result = []
@@ -340,7 +359,7 @@ def explain_operator(name: str) -> dict[str, Any]:
     Args:
         name: Operator name (case-insensitive). One of:
               INTERSECTS, CONTAINS, WITHIN, DISTANCE, NEAREST,
-              CLUSTER, MERGE, ANY, ALL
+              CLUSTER, MERGE, DISJOIN, ANY, ALL
     """
     name_upper = name.upper().strip()
 
@@ -429,6 +448,11 @@ CLUSTER - Assign cluster IDs
 
 MERGE - Combine overlapping intervals
   SELECT MERGE(interval) FROM table
+
+Set Operations
+--------------
+DISJOIN - Split intervals at reference breakpoints
+  SELECT * FROM DISJOIN(target, reference := refs)
 
 Set Quantifiers
 ---------------

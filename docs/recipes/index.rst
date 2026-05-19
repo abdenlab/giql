@@ -19,6 +19,10 @@ Recipe Categories
    Clustering overlapping intervals, distance-based clustering,
    merging intervals, and aggregating cluster statistics.
 
+:doc:`disjoin`
+   Splitting intervals at breakpoints, partitioning a set into
+   non-overlapping segments, and re-tiling features against a reference grid.
+
 :doc:`advanced`
    Multi-range matching, complex filtering with joins, aggregate statistics,
    window expansions, and multi-table queries.

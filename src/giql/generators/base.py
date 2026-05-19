@@ -6,6 +6,7 @@ from giql.constants import DEFAULT_END_COL
 from giql.constants import DEFAULT_START_COL
 from giql.constants import DEFAULT_STRAND_COL
 from giql.expressions import Contains
+from giql.expressions import GIQLDisjoin
 from giql.expressions import GIQLDistance
 from giql.expressions import GIQLNearest
 from giql.expressions import Intersects
@@ -273,6 +274,110 @@ class BaseGIQLGenerator(Generator):
             )"""
 
         return sql.strip()
+
+    def giqldisjoin_sql(self, expression: GIQLDisjoin) -> str:
+        """Generate SQL for the DISJOIN table function.
+
+        DISJOIN splits each target interval at every reference breakpoint
+        strictly interior to it. The full target row passes through unchanged;
+        the sub-interval is appended as ``disjoin_chrom`` / ``disjoin_start`` /
+        ``disjoin_end`` in the target table's coordinate system. A coverage
+        filter drops sub-intervals overlapping no reference interval. When no
+        ``reference`` is given it defaults to the target set.
+
+        :param expression:
+            GIQLDisjoin expression node
+        :return:
+            SQL string (a parenthesized WITH-CTE subquery) for the DISJOIN table
+        """
+        # Resolve the target table and its genomic columns.
+        target_name, (target_chrom, target_start, target_end) = (
+            self._resolve_target_table(expression)
+        )
+        target_table = self.tables.get(target_name)
+
+        # The __giql_dj_ prefix names the operator's internal CTEs; a target
+        # table using it would collide with them.
+        if target_name.startswith("__giql_dj_"):
+            raise ValueError(
+                f"DISJOIN target {target_name!r} uses the reserved "
+                "'__giql_dj_' prefix, which names the operator's internal "
+                "CTEs. Rename the table."
+            )
+
+        # Resolve the reference relation (defaults to the target set).
+        ref_from, ref_chrom, ref_start, ref_end, ref_table = (
+            self._resolve_disjoin_reference(
+                expression,
+                target_name,
+                (target_chrom, target_start, target_end),
+                target_table,
+            )
+        )
+
+        # Canonical target endpoints, qualified by the __giql_dj_tgt alias.
+        t_chrom = f't."{target_chrom}"'
+        t_start = self._canonical_start(f't."{target_start}"', target_table)
+        t_end = self._canonical_end(f't."{target_end}"', target_table)
+
+        # Canonical reference endpoints: unqualified for the breakpoint CTE,
+        # qualified by 'r' for the coverage EXISTS filter.
+        bp_start = self._canonical_start(f'"{ref_start}"', ref_table)
+        bp_end = self._canonical_end(f'"{ref_end}"', ref_table)
+        r_start = self._canonical_start(f'r."{ref_start}"', ref_table)
+        r_end = self._canonical_end(f'r."{ref_end}"', ref_table)
+
+        # disjoin_start / disjoin_end are emitted in the target table's
+        # coordinate system so an output row carries one convention; the cut
+        # math above stays canonical internally.
+        out_start = self._decanonical_start("s.seg_start", target_table)
+        out_end = self._decanonical_end("s.seg_end", target_table)
+
+        # Build the WITH clause one named fragment per __giql_dj_* CTE so each
+        # block reads on its own. The `seg_end > seg_start` guard in the final
+        # WHERE is belt-and-suspenders: UNION already dedupes cut positions, so
+        # LEAD cannot produce a zero-length segment unless it becomes UNION ALL.
+        ref_cte = f"__giql_dj_ref AS (SELECT * FROM {ref_from})"
+        tgt_cte = f"__giql_dj_tgt AS (SELECT * FROM {target_name})"
+        bp_cte = (
+            "__giql_dj_bp AS ("
+            f'SELECT "{ref_chrom}" AS chrom, {bp_start} AS pos FROM __giql_dj_ref '
+            "UNION "
+            f'SELECT "{ref_chrom}" AS chrom, {bp_end} AS pos FROM __giql_dj_ref)'
+        )
+        cuts_cte = (
+            "__giql_dj_cuts AS ("
+            f'SELECT t."{target_chrom}" AS kc, t."{target_start}" AS ks, '
+            f't."{target_end}" AS ke, {t_start} AS pos FROM __giql_dj_tgt AS t '
+            "UNION "
+            f'SELECT t."{target_chrom}", t."{target_start}", t."{target_end}", '
+            f"{t_end} FROM __giql_dj_tgt AS t "
+            "UNION "
+            f'SELECT t."{target_chrom}", t."{target_start}", t."{target_end}", '
+            "bp.pos FROM __giql_dj_tgt AS t JOIN __giql_dj_bp AS bp "
+            f"ON bp.chrom = {t_chrom} AND bp.pos > {t_start} "
+            f"AND bp.pos < {t_end})"
+        )
+        segs_cte = (
+            "__giql_dj_segs AS ("
+            "SELECT kc, ks, ke, pos AS seg_start, "
+            "LEAD(pos) OVER (PARTITION BY kc, ks, ke ORDER BY pos) AS seg_end "
+            "FROM __giql_dj_cuts)"
+        )
+        final_select = (
+            f"SELECT t.*, s.kc AS disjoin_chrom, {out_start} AS disjoin_start, "
+            f"{out_end} AS disjoin_end FROM __giql_dj_tgt AS t "
+            f'JOIN __giql_dj_segs AS s ON t."{target_chrom}" = s.kc '
+            f'AND t."{target_start}" = s.ks AND t."{target_end}" = s.ke '
+            "WHERE s.seg_end IS NOT NULL AND s.seg_end > s.seg_start "
+            "AND EXISTS (SELECT 1 FROM __giql_dj_ref AS r "
+            f'WHERE r."{ref_chrom}" = s.kc AND {r_start} <= s.seg_start '
+            f"AND {r_end} > s.seg_start)"
+        )
+        return (
+            f"(WITH {ref_cte}, {tgt_cte}, {bp_cte}, "
+            f"{cuts_cte}, {segs_cte} {final_select})"
+        )
 
     def giqldistance_sql(self, expression: GIQLDistance) -> str:
         """Generate SQL CASE expression for DISTANCE function.
@@ -767,12 +872,12 @@ class BaseGIQLGenerator(Generator):
                 return self._canonical_endpoints(chrom, start, end, table)
 
     def _resolve_target_table(
-        self, expression: GIQLNearest
+        self, expression: GIQLNearest | GIQLDisjoin
     ) -> tuple[str, tuple[str, str, str]]:
         """Resolve the target table name and its genomic column references.
 
         :param expression:
-            GIQLNearest expression node
+            GIQLNearest or GIQLDisjoin expression node
         :return:
             Tuple of (table_name, (chromosome_col, start_col, end_col))
         :raises ValueError:
@@ -799,6 +904,125 @@ class BaseGIQLGenerator(Generator):
 
         # Get physical column names from table config
         return table_name, (table.chrom_col, table.start_col, table.end_col)
+
+    def _resolve_disjoin_reference(
+        self,
+        expression: GIQLDisjoin,
+        target_name: str,
+        target_cols: tuple[str, str, str],
+        target_table: Table | None,
+    ) -> tuple[str, str, str, str, Table | None]:
+        """Resolve the reference relation for a DISJOIN query.
+
+        The reference contributes the breakpoints at which target intervals are
+        cut. When ``reference`` is omitted it defaults to the target set.
+
+        A bare reference name is resolved against the query's CTEs first: a
+        name defined by an enclosing ``WITH`` clause shadows a registered table
+        of the same name (matching SQL scoping) and is assumed to expose
+        canonical 0-based half-open ``chrom`` / ``start`` / ``end`` columns. A
+        name with no such CTE but a registered table contributes that table's
+        column names and coordinate system. A name that is neither is an error.
+
+        :param expression:
+            GIQLDisjoin expression node
+        :param target_name:
+            Resolved target table name (the default reference)
+        :param target_cols:
+            ``(chrom, start, end)`` column names of the target table
+        :param target_table:
+            Table config of the target (the default reference config)
+        :return:
+            Tuple of ``(from_clause, chrom_col, start_col, end_col, table)``
+            where ``from_clause`` is the text following ``FROM`` inside the
+            ``__giql_dj_ref`` CTE. A subquery or CTE reference is assumed to
+            expose canonical 0-based half-open ``chrom`` / ``start`` / ``end``
+            columns, so ``table`` is ``None`` for those.
+        :raises ValueError:
+            If the reference is not a table name, a CTE, or a subquery, or if
+            a bare name resolves to neither a registered table nor a CTE.
+        """
+        reference = expression.args.get("reference")
+        tc, ts, te = target_cols
+
+        # No reference: default to the target set (single-mode).
+        if reference is None:
+            return target_name, tc, ts, te, target_table
+
+        # Subquery reference: inline it as an aliased derived table.
+        if isinstance(reference, (exp.Subquery, exp.Select, exp.Union)):
+            from_clause = f"{self.sql(reference)} AS __giql_dj_rs"
+            return (
+                from_clause,
+                DEFAULT_CHROM_COL,
+                DEFAULT_START_COL,
+                DEFAULT_END_COL,
+                None,
+            )
+
+        # Anything that is not a bare table/CTE name is unsupported.
+        if not isinstance(reference, (exp.Table, exp.Column, exp.Identifier)):
+            raise ValueError(
+                "DISJOIN reference must be a table name, a CTE, or a "
+                f"(SELECT ...) subquery; got {type(reference).__name__}: "
+                f"{reference}"
+            )
+
+        ref_name = reference.name
+
+        # The __giql_dj_ prefix names the operator's internal CTEs.
+        if ref_name.startswith("__giql_dj_"):
+            raise ValueError(
+                f"DISJOIN reference {ref_name!r} uses the reserved "
+                "'__giql_dj_' prefix, which names the operator's internal "
+                "CTEs. Rename the reference relation."
+            )
+
+        # A CTE from an enclosing WITH shadows a registered table of the same
+        # name; it is assumed to expose canonical default columns.
+        if ref_name in self._enclosing_cte_names(expression):
+            return (
+                ref_name,
+                DEFAULT_CHROM_COL,
+                DEFAULT_START_COL,
+                DEFAULT_END_COL,
+                None,
+            )
+
+        ref_table = self.tables.get(ref_name)
+        if ref_table:
+            return (
+                ref_name,
+                ref_table.chrom_col,
+                ref_table.start_col,
+                ref_table.end_col,
+                ref_table,
+            )
+        raise ValueError(
+            f"DISJOIN reference {ref_name!r} is neither a registered table "
+            "nor a CTE defined in this query. Register the table or define "
+            "the CTE before transpiling."
+        )
+
+    @staticmethod
+    def _enclosing_cte_names(expression: exp.Expression) -> set[str]:
+        """Collect CTE names visible to an expression from enclosing WITH clauses.
+
+        Walks the ancestor chain and gathers the aliases of every ``WITH``-clause
+        CTE, so a DISJOIN reference can be recognized as an in-query CTE rather
+        than a registered table.
+        """
+        names: set[str] = set()
+        node: exp.Expression | None = expression
+        while node is not None:
+            if isinstance(node, exp.Select):
+                with_clause = node.args.get("with_") or node.args.get("with")
+                if with_clause is not None:
+                    for cte in with_clause.expressions:
+                        if cte.alias:
+                            names.add(cte.alias)
+            node = node.parent
+        return names
 
     def _get_column_refs(
         self,
@@ -891,6 +1115,40 @@ class BaseGIQLGenerator(Generator):
         if key == ("1based", "half_open"):
             return f"({raw_end} - 1)"
         return raw_end  # 0based/half_open and 1based/closed: identity
+
+    @staticmethod
+    def _decanonical_start(canonical_start: str, table: Table | None) -> str:
+        """Convert a canonical 0-based half-open start to the table's encoding.
+
+        Inverse of ``_canonical_start``. Conversion by ``coordinate_system``:
+
+        - 0based: ``start`` (identity)
+        - 1based: ``start + 1``
+        """
+        if table is None or table.coordinate_system == "0based":
+            return canonical_start
+        return f"({canonical_start} + 1)"
+
+    @staticmethod
+    def _decanonical_end(canonical_end: str, table: Table | None) -> str:
+        """Convert a canonical 0-based half-open end to the table's encoding.
+
+        Inverse of ``_canonical_end``. Conversion by ``(coordinate_system,
+        interval_type)``:
+
+        - 0based / half_open: ``end`` (identity)
+        - 0based / closed:    ``end - 1``
+        - 1based / half_open: ``end + 1``
+        - 1based / closed:    ``end`` (identity)
+        """
+        if table is None:
+            return canonical_end
+        key = (table.coordinate_system, table.interval_type)
+        if key == ("0based", "closed"):
+            return f"({canonical_end} - 1)"
+        if key == ("1based", "half_open"):
+            return f"({canonical_end} + 1)"
+        return canonical_end  # 0based/half_open and 1based/closed: identity
 
     @staticmethod
     def _canonical_endpoints(
