@@ -4,7 +4,9 @@ Tests verify that the GIQL parser correctly recognizes and parses
 NEAREST function calls with various argument patterns.
 """
 
+import pytest
 from sqlglot import parse_one
+from sqlglot.errors import ParseError
 
 from giql.dialect import GIQLDialect
 from giql.expressions import GIQLNearest
@@ -244,3 +246,18 @@ class TestNearestParsing:
         assert nearest_expr.args.get("k") is not None, (
             "Missing k parameter with => syntax"
         )
+
+    def test_from_arg_list_should_reject_missing_target(self):
+        """Test that a NEAREST call with no target argument is rejected.
+
+        Given:
+            A GIQL query with NEAREST(k := 3) supplying only named arguments
+            and no positional target table.
+        When:
+            Parsing the query.
+        Then:
+            It should raise a ParseError naming the required target argument.
+        """
+        # Arrange, act, & assert
+        with pytest.raises(ParseError, match="requires a target table"):
+            parse_one("SELECT * FROM NEAREST(k := 3)", dialect=GIQLDialect)

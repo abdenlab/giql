@@ -112,6 +112,11 @@ class GIQLCluster(exp.Func):
             kwargs["this"] = positional_args[0]
         if len(positional_args) > 1:
             kwargs["distance"] = positional_args[1]
+        if "this" not in kwargs:
+            raise ParseError(
+                "CLUSTER requires a genomic interval column as its first "
+                "argument."
+            )
         return cls(**kwargs)
 
 
@@ -140,6 +145,11 @@ class GIQLMerge(exp.Func):
             kwargs["this"] = positional_args[0]
         if len(positional_args) > 1:
             kwargs["distance"] = positional_args[1]
+        if "this" not in kwargs:
+            raise ParseError(
+                "MERGE requires a genomic interval column as its first "
+                "argument."
+            )
         return cls(**kwargs)
 
 
@@ -201,6 +211,10 @@ class GIQLNearest(exp.Func):
         kwargs, positional_args = _split_named_and_positional(args)
         if len(positional_args) >= 1:
             kwargs["this"] = positional_args[0]
+        if "this" not in kwargs:
+            raise ParseError(
+                "NEAREST requires a target table as its first argument."
+            )
         return cls(**kwargs)
 
 
@@ -243,4 +257,8 @@ class GIQLDisjoin(exp.Func):
             )
         if len(positional_args) >= 1:
             kwargs["this"] = positional_args[0]
+        if "this" not in kwargs:
+            raise ParseError(
+                "DISJOIN requires a target table as its first argument."
+            )
         return cls(**kwargs)

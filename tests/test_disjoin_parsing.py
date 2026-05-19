@@ -103,6 +103,23 @@ class TestDisjoinParsing:
                 "SELECT * FROM DISJOIN(features, mask := refs)", dialect=GIQLDialect
             )
 
+    def test_from_arg_list_should_reject_missing_target(self):
+        """Test that a DISJOIN call with no target argument is rejected.
+
+        Given:
+            A GIQL query with DISJOIN(reference := refs) supplying only a
+            named reference and no positional target.
+        When:
+            Parsing the query.
+        Then:
+            It should raise a ParseError naming the required target argument.
+        """
+        # Arrange, act, & assert
+        with pytest.raises(ParseError, match="requires a target table"):
+            parse_one(
+                "SELECT * FROM DISJOIN(reference := refs)", dialect=GIQLDialect
+            )
+
     def test_from_arg_list_should_map_reference_when_named_with_walrus(self):
         """Test that a walrus-named reference argument is carried.
 
