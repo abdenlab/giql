@@ -94,3 +94,8 @@ pandas = ">=2.0.0"
 sqlglot = ">=20.0.0,<30"
 pip = "*"
 hypothesis = ">=6.148.2,<7"
+
+[tool.pixi.pypi-dependencies]
+# pytest-manifest has no conda-forge package; the test suite's snapshot
+# fixtures need it, so install it from PyPI into the pixi environment.
+pytest-manifest = ">=1.0"
