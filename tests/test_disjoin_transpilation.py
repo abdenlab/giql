@@ -22,7 +22,7 @@ class TestDisjoinTranspilation:
         When:
             Transpiling to SQL.
         Then:
-            It should be a WITH-CTE subquery using UNION, LEAD, and EXISTS.
+            It should be a WITH-CTE subquery using UNION and LEAD.
         """
         # Arrange & act
         sql = transpile("SELECT * FROM DISJOIN(features)", tables=["features"]).upper()
@@ -31,7 +31,6 @@ class TestDisjoinTranspilation:
         assert "WITH __GIQL_DJ_REF" in sql
         assert "UNION" in sql
         assert "LEAD(" in sql
-        assert "EXISTS (" in sql
 
     def test_giqldisjoin_sql_should_emit_disjoin_columns(self):
         """Test that DISJOIN appends the sub-interval columns.
@@ -189,8 +188,7 @@ class TestDisjoinTranspilation:
         """
         # Arrange & act
         sql = transpile(
-            "WITH bins AS (SELECT 1) "
-            "SELECT * FROM DISJOIN(features, reference := bins)",
+            "WITH bins AS (SELECT 1) SELECT * FROM DISJOIN(features, reference := bins)",
             tables=["features"],
         )
 
@@ -210,8 +208,7 @@ class TestDisjoinTranspilation:
         """
         # Arrange & act
         sql = transpile(
-            "WITH refs AS (SELECT 1) "
-            "SELECT * FROM DISJOIN(features, reference := refs)",
+            "WITH refs AS (SELECT 1) SELECT * FROM DISJOIN(features, reference := refs)",
             tables=[
                 "features",
                 Table("refs", coordinate_system="1based", interval_type="closed"),
@@ -290,3 +287,108 @@ class TestDisjoinTranspilation:
                 "SELECT * FROM DISJOIN(features, reference := missing)",
                 tables=["features"],
             )
+
+    def test_giqldisjoin_sql_should_skip_exists_clause_when_reference_omitted(self):
+        """Test that an omitted reference suppresses the coverage EXISTS clause.
+
+        Given:
+            A DISJOIN call with no reference argument (self-mode).
+        When:
+            Transpiling to SQL.
+        Then:
+            It should omit the coverage EXISTS subquery, which is provably
+            always true when the reference equals the target set.
+        """
+        # Arrange & act
+        sql = transpile("SELECT * FROM DISJOIN(features)", tables=["features"])
+
+        # Assert
+        assert "EXISTS (" not in sql
+
+    def test_giqldisjoin_sql_should_skip_exists_clause_when_reference_resolves_to_target(
+        self,
+    ):
+        """Test that a reference naming the target table suppresses EXISTS.
+
+        Given:
+            A DISJOIN call whose explicit reference is the target table name.
+        When:
+            Transpiling to SQL.
+        Then:
+            It should omit the coverage EXISTS subquery, since the reference
+            resolves to the same registered relation as the target.
+        """
+        # Arrange & act
+        sql = transpile(
+            "SELECT * FROM DISJOIN(features, reference := features)",
+            tables=["features"],
+        )
+
+        # Assert
+        assert "EXISTS (" not in sql
+
+    def test_giqldisjoin_sql_should_emit_exists_clause_when_reference_is_different_table(
+        self,
+    ):
+        """Test that an explicit distinct reference keeps the EXISTS clause.
+
+        Given:
+            A DISJOIN call with an explicit reference table distinct from the
+            target.
+        When:
+            Transpiling to SQL.
+        Then:
+            It should emit the coverage EXISTS subquery against the reference
+            CTE.
+        """
+        # Arrange & act
+        sql = transpile(
+            "SELECT * FROM DISJOIN(features, reference := refs)",
+            tables=["features", "refs"],
+        )
+
+        # Assert
+        assert "EXISTS (" in sql
+
+    def test_giqldisjoin_sql_should_emit_exists_clause_when_cte_shadows_target_name(
+        self,
+    ):
+        """Test that a CTE shadowing the target name keeps the EXISTS clause.
+
+        Given:
+            A reference name shared by the target table and an in-query CTE.
+        When:
+            Transpiling to SQL.
+        Then:
+            It should emit the coverage EXISTS subquery, since the CTE may
+            contain rows distinct from the registered target table.
+        """
+        # Arrange & act
+        sql = transpile(
+            "WITH features AS (SELECT 1) "
+            "SELECT * FROM DISJOIN(features, reference := features)",
+            tables=["features"],
+        )
+
+        # Assert
+        assert "EXISTS (" in sql
+
+    def test_giqldisjoin_sql_should_emit_exists_clause_when_reference_is_subquery(self):
+        """Test that a subquery reference keeps the EXISTS clause.
+
+        Given:
+            A DISJOIN call whose reference is a subquery.
+        When:
+            Transpiling to SQL.
+        Then:
+            It should emit the coverage EXISTS subquery, since a subquery is
+            conservatively treated as a relation distinct from the target.
+        """
+        # Arrange & act
+        sql = transpile(
+            "SELECT * FROM DISJOIN(features, reference := (SELECT * FROM features))",
+            tables=["features"],
+        )
+
+        # Assert
+        assert "EXISTS (" in sql
