@@ -30,7 +30,7 @@ class TestDisjoinCoordinateSpace:
         CONVENTIONS,
         ids=lambda v: str(v),
     )
-    def test_disjoin_should_yield_the_partition_in_the_target_encoding(
+    def test_disjoin_yields_the_partition_in_the_target_encoding(
         self, giql_query, coordinate_system, interval_type
     ):
         """Test DISJOIN self-mode yields the partition in the target's encoding.
@@ -71,7 +71,7 @@ class TestDisjoinCoordinateSpace:
         CONVENTIONS,
         ids=lambda v: str(v),
     )
-    def test_disjoin_should_yield_target_encoded_subintervals_when_reference_differs(
+    def test_disjoin_yields_target_encoded_subintervals_when_reference_differs(
         self, giql_query, coordinate_system, interval_type
     ):
         """Test DISJOIN emits target-encoded sub-intervals across mixed encodings.

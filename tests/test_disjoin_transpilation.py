@@ -531,4 +531,4 @@ class TestDisjoinTranspilation:
         )
 
         # Assert
-        assert "EXISTS (" in sql
+        assert sql.count("EXISTS (") == 1
