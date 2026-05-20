@@ -367,23 +367,22 @@ class BaseGIQLGenerator(Generator):
         # In self-reference mode the coverage EXISTS is provably always true:
         # every emitted segment lies inside its parent target row, and that
         # row is itself a member of the reference set. Skip the clause so the
-        # planner does not waste work on a no-op semi-join.
-        exists_clause = (
-            ""
-            if is_self_reference
-            else (
-                " AND EXISTS (SELECT 1 FROM __giql_dj_ref AS r "
-                f'WHERE r."{ref_chrom}" = s.kc AND {r_start} <= s.seg_start '
-                f"AND {r_end} > s.seg_start)"
+        # planner does not waste work on a no-op semi-join. The __giql_dj_ref
+        # CTE itself stays live because __giql_dj_bp still draws breakpoints
+        # from it.
+        where_clauses = ["s.seg_end IS NOT NULL", "s.seg_end > s.seg_start"]
+        if not is_self_reference:
+            where_clauses.append(
+                f'EXISTS (SELECT 1 FROM __giql_dj_ref AS r WHERE r."{ref_chrom}" = s.kc '
+                f"AND {r_start} <= s.seg_start AND {r_end} > s.seg_start)"
             )
-        )
+        where_sql = " AND ".join(where_clauses)
         final_select = (
             f"SELECT t.*, s.kc AS disjoin_chrom, {out_start} AS disjoin_start, "
             f"{out_end} AS disjoin_end FROM __giql_dj_tgt AS t "
             f'JOIN __giql_dj_segs AS s ON t."{target_chrom}" = s.kc '
             f'AND t."{target_start}" = s.ks AND t."{target_end}" = s.ke '
-            "WHERE s.seg_end IS NOT NULL AND s.seg_end > s.seg_start"
-            f"{exists_clause}"
+            f"WHERE {where_sql}"
         )
         return (
             f"(WITH {ref_cte}, {tgt_cte}, {bp_cte}, "
@@ -951,7 +950,9 @@ class BaseGIQLGenerator(Generator):
             reference provably resolves to the same registered relation as the
             target (omitted reference, or a bare name equal to the target name
             that is not shadowed by an enclosing CTE and maps to the same
-            registered table).
+            registered table). It is ``False`` in all other cases, including
+            subquery and CTE references that may textually duplicate the
+            target.
         :raises ValueError:
             If the reference is not a table name, a CTE, or a subquery, or if
             a bare name resolves to neither a registered table nor a CTE.
