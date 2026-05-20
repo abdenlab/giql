@@ -392,3 +392,143 @@ class TestDisjoinTranspilation:
 
         # Assert
         assert "EXISTS (" in sql
+
+    def test_giqldisjoin_sql_should_skip_exists_clause_when_target_uses_one_based_closed_encoding(
+        self,
+    ):
+        """Test that self-mode skips EXISTS even with non-default coordinates.
+
+        Given:
+            A self-mode DISJOIN against a target registered as 1-based closed.
+        When:
+            Transpiling to SQL.
+        Then:
+            It should omit the coverage EXISTS subquery and still emit the
+            canonical 0-based shift on the target endpoints.
+        """
+        # Arrange & act
+        sql = transpile(
+            "SELECT * FROM DISJOIN(features)",
+            tables=[
+                Table(
+                    "features",
+                    coordinate_system="1based",
+                    interval_type="closed",
+                )
+            ],
+        )
+
+        # Assert
+        assert "EXISTS (" not in sql
+        assert '(t."start" - 1)' in sql
+
+    def test_giqldisjoin_sql_should_skip_exists_clause_when_target_uses_custom_column_names(
+        self,
+    ):
+        """Test that self-mode skips EXISTS cleanly under custom column names.
+
+        Given:
+            A self-mode DISJOIN against a target with custom genomic column
+            names.
+        When:
+            Transpiling to SQL.
+        Then:
+            It should omit the coverage EXISTS subquery and leave no dangling
+            reference-side qualifier (no ``r."seqid"`` / ``r."lo"`` /
+            ``r."hi"``).
+        """
+        # Arrange & act
+        sql = transpile(
+            "SELECT * FROM DISJOIN(feats)",
+            tables=[Table("feats", chrom_col="seqid", start_col="lo", end_col="hi")],
+        )
+
+        # Assert
+        assert "EXISTS (" not in sql
+        assert 'r."seqid"' not in sql
+        assert 'r."lo"' not in sql
+        assert 'r."hi"' not in sql
+
+    def test_giqldisjoin_sql_should_skip_exists_clause_when_explicit_self_reference_uses_one_based_closed_encoding(
+        self,
+    ):
+        """Test that explicit self-reference skips EXISTS under non-default config.
+
+        Given:
+            A DISJOIN call with an explicit ``reference := features`` where
+            ``features`` is registered as 1-based closed.
+        When:
+            Transpiling to SQL.
+        Then:
+            It should omit the coverage EXISTS subquery and still emit the
+            canonical 0-based shift on the breakpoint CTE endpoints.
+        """
+        # Arrange & act
+        sql = transpile(
+            "SELECT * FROM DISJOIN(features, reference := features)",
+            tables=[
+                Table(
+                    "features",
+                    coordinate_system="1based",
+                    interval_type="closed",
+                )
+            ],
+        )
+
+        # Assert
+        assert "EXISTS (" not in sql
+        assert '("start" - 1)' in sql
+
+    def test_giqldisjoin_sql_should_emit_one_exists_clause_when_query_mixes_self_and_distinct_reference_disjoins(
+        self,
+    ):
+        """Test that the EXISTS skip is decided per DISJOIN call.
+
+        Given:
+            A query containing one self-mode DISJOIN and one distinct-reference
+            DISJOIN in the same SELECT.
+        When:
+            Transpiling to SQL.
+        Then:
+            It should produce SQL containing exactly one ``EXISTS (``
+            occurrence — only the distinct-reference call retains the
+            coverage filter.
+        """
+        # Arrange & act
+        sql = transpile(
+            "SELECT * FROM DISJOIN(features) "
+            "UNION ALL "
+            "SELECT * FROM DISJOIN(features, reference := refs)",
+            tables=["features", "refs"],
+        )
+
+        # Assert
+        assert sql.count("EXISTS (") == 1
+
+    def test_giqldisjoin_sql_should_emit_exists_clause_when_enclosing_cte_shadows_target_from_outer_scope(
+        self,
+    ):
+        """Test that a CTE shadowing the target name from an outer scope keeps EXISTS.
+
+        Given:
+            A nested query where the outer WITH defines a CTE named ``features``
+            and an inner subquery contains
+            ``DISJOIN(features, reference := features)``, with ``features``
+            also a registered table.
+        When:
+            Transpiling to SQL.
+        Then:
+            It should emit the coverage EXISTS subquery — the enclosing-CTE
+            check follows the ancestor chain past the immediate WITH.
+        """
+        # Arrange & act
+        sql = transpile(
+            "WITH features AS (SELECT 1) "
+            "SELECT * FROM ("
+            "SELECT * FROM DISJOIN(features, reference := features)"
+            ") AS sub",
+            tables=["features"],
+        )
+
+        # Assert
+        assert "EXISTS (" in sql
