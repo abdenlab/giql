@@ -306,7 +306,7 @@ class BaseGIQLGenerator(Generator):
             )
 
         # Resolve the reference relation (defaults to the target set).
-        ref_from, ref_chrom, ref_start, ref_end, ref_table = (
+        ref_from, ref_chrom, ref_start, ref_end, ref_table, is_self_reference = (
             self._resolve_disjoin_reference(
                 expression,
                 target_name,
@@ -364,15 +364,25 @@ class BaseGIQLGenerator(Generator):
             "LEAD(pos) OVER (PARTITION BY kc, ks, ke ORDER BY pos) AS seg_end "
             "FROM __giql_dj_cuts)"
         )
+        # In self-reference mode the coverage EXISTS is provably always true:
+        # every emitted segment lies inside its parent target row, and that
+        # row is itself a member of the reference set. Skip the clause so the
+        # planner does not waste work on a no-op semi-join. The __giql_dj_ref
+        # CTE itself stays live because __giql_dj_bp still draws breakpoints
+        # from it.
+        where_clauses = ["s.seg_end IS NOT NULL", "s.seg_end > s.seg_start"]
+        if not is_self_reference:
+            where_clauses.append(
+                f'EXISTS (SELECT 1 FROM __giql_dj_ref AS r WHERE r."{ref_chrom}" = s.kc '
+                f"AND {r_start} <= s.seg_start AND {r_end} > s.seg_start)"
+            )
+        where_sql = " AND ".join(where_clauses)
         final_select = (
             f"SELECT t.*, s.kc AS disjoin_chrom, {out_start} AS disjoin_start, "
             f"{out_end} AS disjoin_end FROM __giql_dj_tgt AS t "
             f'JOIN __giql_dj_segs AS s ON t."{target_chrom}" = s.kc '
             f'AND t."{target_start}" = s.ks AND t."{target_end}" = s.ke '
-            "WHERE s.seg_end IS NOT NULL AND s.seg_end > s.seg_start "
-            "AND EXISTS (SELECT 1 FROM __giql_dj_ref AS r "
-            f'WHERE r."{ref_chrom}" = s.kc AND {r_start} <= s.seg_start '
-            f"AND {r_end} > s.seg_start)"
+            f"WHERE {where_sql}"
         )
         return (
             f"(WITH {ref_cte}, {tgt_cte}, {bp_cte}, "
@@ -739,9 +749,7 @@ class BaseGIQLGenerator(Generator):
         # (validation will catch missing reference errors later)
         return "correlated"
 
-    def _find_outer_table_in_lateral_join(
-        self, expression: GIQLNearest
-    ) -> str | None:
+    def _find_outer_table_in_lateral_join(self, expression: GIQLNearest) -> str | None:
         """Find the outer table name in a LATERAL join context.
 
         Walks up the AST to find the JOIN clause and extracts the outer table
@@ -911,7 +919,7 @@ class BaseGIQLGenerator(Generator):
         target_name: str,
         target_cols: tuple[str, str, str],
         target_table: Table | None,
-    ) -> tuple[str, str, str, str, Table | None]:
+    ) -> tuple[str, str, str, str, Table | None, bool]:
         """Resolve the reference relation for a DISJOIN query.
 
         The reference contributes the breakpoints at which target intervals are
@@ -933,11 +941,18 @@ class BaseGIQLGenerator(Generator):
         :param target_table:
             Table config of the target (the default reference config)
         :return:
-            Tuple of ``(from_clause, chrom_col, start_col, end_col, table)``
-            where ``from_clause`` is the text following ``FROM`` inside the
-            ``__giql_dj_ref`` CTE. A subquery or CTE reference is assumed to
-            expose canonical 0-based half-open ``chrom`` / ``start`` / ``end``
-            columns, so ``table`` is ``None`` for those.
+            Tuple of ``(from_clause, chrom_col, start_col, end_col, table,
+            is_self_reference)`` where ``from_clause`` is the text following
+            ``FROM`` inside the ``__giql_dj_ref`` CTE. A subquery or CTE
+            reference is assumed to expose canonical 0-based half-open
+            ``chrom`` / ``start`` / ``end`` columns, so ``table`` is ``None``
+            for those. ``is_self_reference`` is ``True`` only when the
+            reference provably resolves to the same registered relation as the
+            target (omitted reference, or a bare name equal to the target name
+            that is not shadowed by an enclosing CTE and maps to the same
+            registered table). It is ``False`` in all other cases, including
+            subquery and CTE references that may textually duplicate the
+            target.
         :raises ValueError:
             If the reference is not a table name, a CTE, or a subquery, or if
             a bare name resolves to neither a registered table nor a CTE.
@@ -947,9 +962,11 @@ class BaseGIQLGenerator(Generator):
 
         # No reference: default to the target set (single-mode).
         if reference is None:
-            return target_name, tc, ts, te, target_table
+            return target_name, tc, ts, te, target_table, True
 
-        # Subquery reference: inline it as an aliased derived table.
+        # Subquery reference: inline it as an aliased derived table. The
+        # subquery may textually duplicate the target, but proving equivalence
+        # is out of scope, so treat it as a distinct relation.
         if isinstance(reference, (exp.Subquery, exp.Select, exp.Union)):
             from_clause = f"{self.sql(reference)} AS __giql_dj_rs"
             return (
@@ -958,6 +975,7 @@ class BaseGIQLGenerator(Generator):
                 DEFAULT_START_COL,
                 DEFAULT_END_COL,
                 None,
+                False,
             )
 
         # Anything that is not a bare table/CTE name is unsupported.
@@ -979,7 +997,9 @@ class BaseGIQLGenerator(Generator):
             )
 
         # A CTE from an enclosing WITH shadows a registered table of the same
-        # name; it is assumed to expose canonical default columns.
+        # name; it is assumed to expose canonical default columns. A CTE may
+        # contain rows distinct from any same-named registered table, so it is
+        # never treated as a self-reference.
         if ref_name in self._enclosing_cte_names(expression):
             return (
                 ref_name,
@@ -987,6 +1007,7 @@ class BaseGIQLGenerator(Generator):
                 DEFAULT_START_COL,
                 DEFAULT_END_COL,
                 None,
+                False,
             )
 
         ref_table = self.tables.get(ref_name)
@@ -997,6 +1018,7 @@ class BaseGIQLGenerator(Generator):
                 ref_table.start_col,
                 ref_table.end_col,
                 ref_table,
+                ref_name == target_name and ref_table is target_table,
             )
         raise ValueError(
             f"DISJOIN reference {ref_name!r} is neither a registered table "
@@ -1168,9 +1190,7 @@ class BaseGIQLGenerator(Generator):
             BaseGIQLGenerator._canonical_end(raw_end, table),
         )
 
-    def _resolve_table_name(
-        self, column_ref: str, table_name: str | None
-    ) -> str | None:
+    def _resolve_table_name(self, column_ref: str, table_name: str | None) -> str | None:
         """Resolve the underlying table name for a column reference.
 
         Precedence: explicit ``table_name`` (caller-provided context) > alias
