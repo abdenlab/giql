@@ -71,6 +71,8 @@ print(sql)
 
 The transpiled SQL can be executed with fast genome-unaware databases or in-memory analytic engines like DuckDB.
 
+For column-to-column `INTERSECTS` joins (INNER, SEMI, or ANTI) targeting DuckDB, pass `dialect="duckdb"` to opt into a per-chromosome IEJoin plan that avoids the row inflation of the default binned equi-join. See [DuckDB IEJoin Dialect](https://giql.readthedocs.io/en/latest/transpilation/performance.html#duckdb-iejoin-dialect) for the supported shapes and fallback rules.
+
 You can also use [oxbow](https://oxbow.readthedocs.io) to efficiently stream specialized genomics formats into DuckDB. 
 
 ```python

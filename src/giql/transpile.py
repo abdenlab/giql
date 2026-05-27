@@ -4,6 +4,11 @@ This module provides the main entry point for transpiling GIQL queries
 to standard SQL.
 """
 
+from contextlib import contextmanager
+from typing import Iterator
+from typing import Literal
+from typing import overload
+
 from sqlglot import parse_one
 
 from giql.dialect import GIQLDialect
@@ -12,41 +17,35 @@ from giql.table import Table
 from giql.table import Tables
 from giql.transformer import ClusterTransformer
 from giql.transformer import IntersectsBinnedJoinTransformer
+from giql.transformer import IntersectsDuckDBIEJoinTransformer
 from giql.transformer import MergeTransformer
 
 
-def _build_tables(tables: list[str | Table] | None) -> Tables:
-    """Build a Tables container from table specifications.
+@overload
+def transpile(
+    giql: str,
+    tables: list[str | Table] | None = None,
+    *,
+    dialect: None = None,
+    intersects_bin_size: int | None = None,
+) -> str: ...
 
-    Parameters
-    ----------
-    tables : list[str | Table] | None
-        Table specifications. Strings use default column mappings.
-        Table objects provide custom column mappings.
 
-    Returns
-    -------
-    Tables
-        Container with all tables registered.
-    """
-    container = Tables()
-
-    if tables is None:
-        return container
-
-    for item in tables:
-        if isinstance(item, str):
-            container.register(item, Table(item))
-        else:
-            container.register(item.name, item)
-
-    return container
+@overload
+def transpile(
+    giql: str,
+    tables: list[str | Table] | None = None,
+    *,
+    dialect: Literal["duckdb"],
+    intersects_bin_size: None = None,
+) -> str: ...
 
 
 def transpile(
     giql: str,
     tables: list[str | Table] | None = None,
     *,
+    dialect: Literal["duckdb"] | None = None,
     intersects_bin_size: int | None = None,
 ) -> str:
     """Transpile a GIQL query to SQL.
@@ -59,15 +58,26 @@ def transpile(
     giql : str
         The GIQL query string containing genomic extensions like
         INTERSECTS, CONTAINS, WITHIN, CLUSTER, MERGE, NEAREST, or DISJOIN.
-    tables : list[str | Table] | None
+    tables : list[str | :class:`Table`] | None
         Table configurations. Strings use default column mappings
-        (chrom, start, end, strand). Table objects provide custom
-        column name mappings.
+        (chrom, start, end, strand). :class:`Table` objects provide
+        custom column name mappings.
+    dialect : Literal["duckdb"] | None
+        Optional target dialect. When set to ``"duckdb"``, column-to-column
+        ``INTERSECTS`` joins (INNER, SEMI, or ANTI) are transpiled into a
+        per-chromosome dynamic-SQL pattern (``SET VARIABLE`` +
+        ``query(getvariable(...))``) that DuckDB plans through its
+        range-join family (``IE_JOIN`` / ``PIECEWISE_MERGE_JOIN``).
+        Mutually exclusive with ``intersects_bin_size``. Defaults to
+        ``None`` (the generic binned equi-join path). Hard-error projection
+        shapes raise ``ValueError`` at transpile time; see the performance
+        guide for the full enumeration.
     intersects_bin_size : int | None
         Bin size for INTERSECTS equi-join optimization. When a query
         contains a full-table column-to-column INTERSECTS join, the
         transpiler rewrites it as a binned equi-join for performance.
-        Defaults to 10,000 if not specified.
+        Defaults to 10,000 if not specified. Cannot be combined with
+        ``dialect="duckdb"``.
 
     Returns
     -------
@@ -77,7 +87,9 @@ def transpile(
     Raises
     ------
     ValueError
-        If the query cannot be parsed or transpiled.
+        If the query cannot be parsed or transpiled, if ``dialect`` is
+        unknown, or if ``dialect="duckdb"`` and ``intersects_bin_size``
+        are both set.
 
     Examples
     --------
@@ -88,7 +100,7 @@ def transpile(
             tables=["peaks"],
         )
 
-    Custom table configuration::
+    Custom :class:`Table` configuration::
 
         sql = transpile(
             "SELECT * FROM peaks WHERE interval INTERSECTS 'chr1:1000-2000'",
@@ -111,41 +123,105 @@ def transpile(
             tables=["peaks", "genes"],
             intersects_bin_size=100000,
         )
+
+    DuckDB IEJoin dialect (column-to-column INNER/SEMI/ANTI JOIN only;
+    projections must be qualified)::
+
+        sql = transpile(
+            "SELECT a.chrom, a.start, b.start "
+            "FROM peaks a JOIN genes b ON a.interval INTERSECTS b.interval",
+            tables=["peaks", "genes"],
+            dialect="duckdb",
+        )
     """
-    # Build tables container
+    if dialect is not None and dialect != "duckdb":
+        raise ValueError(f"Unknown dialect: {dialect!r}. Supported: 'duckdb' or None.")
+    if dialect == "duckdb" and intersects_bin_size is not None:
+        raise ValueError(
+            "intersects_bin_size has no effect with dialect='duckdb'; "
+            "the DuckDB dialect uses an IEJoin per-partition plan instead "
+            "of the binned equi-join. Pass one or the other, not both."
+        )
+
     tables_container = _build_tables(tables)
 
-    # Initialize transformers with table configurations
+    with _reraise_as_value_error("Parse error", query=giql):
+        ast = parse_one(giql, dialect=GIQLDialect)
+
+    # Falls back to the binned plan for unsupported shapes — see
+    # IntersectsDuckDBIEJoinTransformer.transform_to_sql for the complete
+    # fallback set.
+    if dialect == "duckdb":
+        duckdb_transformer = IntersectsDuckDBIEJoinTransformer(tables_container)
+        with _reraise_as_value_error("Transformation error"):
+            duckdb_sql = duckdb_transformer.transform_to_sql(ast)
+        if duckdb_sql is not None:
+            return duckdb_sql
+
     intersects_transformer = IntersectsBinnedJoinTransformer(
         tables_container,
         bin_size=intersects_bin_size,
     )
     merge_transformer = MergeTransformer(tables_container)
     cluster_transformer = ClusterTransformer(tables_container)
-
-    # Initialize generator with table configurations
     generator = BaseGIQLGenerator(tables=tables_container)
 
-    # Parse GIQL query
-    try:
-        ast = parse_one(giql, dialect=GIQLDialect)
-    except Exception as e:
-        raise ValueError(f"Parse error: {e}\nQuery: {giql}") from e
-
-    # Apply transformations
-    try:
+    with _reraise_as_value_error("Transformation error"):
         ast = intersects_transformer.transform(ast)
-        # MERGE transformation (which may internally use CLUSTER)
         ast = merge_transformer.transform(ast)
-        # CLUSTER transformation for any standalone CLUSTER expressions
         ast = cluster_transformer.transform(ast)
-    except Exception as e:
-        raise ValueError(f"Transformation error: {e}") from e
 
-    # Generate SQL
-    try:
+    with _reraise_as_value_error("Transpilation error"):
         sql = generator.generate(ast)
-    except Exception as e:
-        raise ValueError(f"Transpilation error: {e}") from e
 
     return sql
+
+
+def _build_tables(tables: list[str | Table] | None) -> Tables:
+    """Build a :class:`Tables` container from table specifications.
+
+    Parameters
+    ----------
+    tables : list[str | :class:`Table`] | None
+        Table specifications. Strings use default column mappings.
+        :class:`Table` objects provide custom column mappings.
+
+    Returns
+    -------
+    Tables
+        Container with all tables registered.
+    """
+    container = Tables()
+
+    if tables is None:
+        return container
+
+    for item in tables:
+        if isinstance(item, str):
+            container.register(item, Table(item))
+        else:
+            container.register(item.name, item)
+
+    return container
+
+
+@contextmanager
+def _reraise_as_value_error(prefix: str, query: str | None = None) -> Iterator[None]:
+    """Re-raise non-:class:`ValueError` exceptions as :class:`ValueError` with *prefix*.
+
+    Lets user-facing :class:`ValueError`\\s from the parser, transformer chain,
+    and generator propagate verbatim (so the dialect's targeted error messages
+    survive the boundary) while wrapping unexpected exceptions in a uniform
+    :class:`ValueError` prefixed with the stage name. When *query* is supplied,
+    the original input is appended to the message so parse errors retain the
+    offending text.
+    """
+    try:
+        yield
+    except ValueError:
+        raise
+    except Exception as e:
+        msg = f"{prefix}: {e}"
+        if query is not None:
+            msg += f"\nQuery: {query}"
+        raise ValueError(msg) from e

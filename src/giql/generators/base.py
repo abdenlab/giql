@@ -1,6 +1,10 @@
 from sqlglot import exp
 from sqlglot.generator import Generator
 
+from giql.canonical import canonical_end
+from giql.canonical import canonical_start
+from giql.canonical import decanonical_end
+from giql.canonical import decanonical_start
 from giql.constants import DEFAULT_CHROM_COL
 from giql.constants import DEFAULT_END_COL
 from giql.constants import DEFAULT_START_COL
@@ -34,19 +38,6 @@ class BaseGIQLGenerator(Generator):
     # Most databases support LATERAL joins (PostgreSQL 9.3+, DuckDB 0.7.0+)
     # SQLite does not support LATERAL, so it overrides this to False
     SUPPORTS_LATERAL = True
-
-    @staticmethod
-    def _extract_bool_param(param_expr: exp.Expression | None) -> bool:
-        """Extract boolean value from a parameter expression.
-
-        Handles exp.Boolean, exp.Literal, and string representations.
-        """
-        if not param_expr:
-            return False
-        elif isinstance(param_expr, exp.Boolean):
-            return param_expr.this
-        else:
-            return str(param_expr).upper() in ("TRUE", "1", "YES")
 
     def __init__(self, tables: Tables | None = None, **kwargs):
         super().__init__(**kwargs)
@@ -200,12 +191,10 @@ class BaseGIQLGenerator(Generator):
                 target_strand = f'{table_name}."{target_table.strand_col}"'
 
         # Distance math below assumes 0-based half-open.
-        target_start_expr = self._canonical_start(
+        target_start_expr = canonical_start(
             f'{table_name}."{target_start}"', target_table
         )
-        target_end_expr = self._canonical_end(
-            f'{table_name}."{target_end}"', target_table
-        )
+        target_end_expr = canonical_end(f'{table_name}."{target_end}"', target_table)
 
         # Build distance calculation using CASE expression
         # For NEAREST: ORDER BY absolute distance, but RETURN signed distance
@@ -285,6 +274,10 @@ class BaseGIQLGenerator(Generator):
         filter drops sub-intervals overlapping no reference interval. When no
         ``reference`` is given it defaults to the target set.
 
+        Coordinate-system round-tripping is handled by
+        :func:`giql.canonical.decanonical_start` /
+        :func:`giql.canonical.decanonical_end`.
+
         :param expression:
             GIQLDisjoin expression node
         :return:
@@ -317,21 +310,21 @@ class BaseGIQLGenerator(Generator):
 
         # Canonical target endpoints, qualified by the __giql_dj_tgt alias.
         t_chrom = f't."{target_chrom}"'
-        t_start = self._canonical_start(f't."{target_start}"', target_table)
-        t_end = self._canonical_end(f't."{target_end}"', target_table)
+        t_start = canonical_start(f't."{target_start}"', target_table)
+        t_end = canonical_end(f't."{target_end}"', target_table)
 
         # Canonical reference endpoints: unqualified for the breakpoint CTE,
         # qualified by 'r' for the coverage EXISTS filter.
-        bp_start = self._canonical_start(f'"{ref_start}"', ref_table)
-        bp_end = self._canonical_end(f'"{ref_end}"', ref_table)
-        r_start = self._canonical_start(f'r."{ref_start}"', ref_table)
-        r_end = self._canonical_end(f'r."{ref_end}"', ref_table)
+        bp_start = canonical_start(f'"{ref_start}"', ref_table)
+        bp_end = canonical_end(f'"{ref_end}"', ref_table)
+        r_start = canonical_start(f'r."{ref_start}"', ref_table)
+        r_end = canonical_end(f'r."{ref_end}"', ref_table)
 
         # disjoin_start / disjoin_end are emitted in the target table's
         # coordinate system so an output row carries one convention; the cut
         # math above stays canonical internally.
-        out_start = self._decanonical_start("s.seg_start", target_table)
-        out_end = self._decanonical_end("s.seg_end", target_table)
+        out_start = decanonical_start("s.seg_start", target_table)
+        out_end = decanonical_end("s.seg_end", target_table)
 
         # Build the WITH clause one named fragment per __giql_dj_* CTE so each
         # block reads on its own. The `seg_end > seg_start` guard in the final
@@ -438,10 +431,10 @@ class BaseGIQLGenerator(Generator):
         # Distance math below assumes 0-based half-open.
         table_a = self._resolve_table(interval_a_sql)
         table_b = self._resolve_table(interval_b_sql)
-        start_a = self._canonical_start(start_a, table_a)
-        end_a = self._canonical_end(end_a, table_a)
-        start_b = self._canonical_start(start_b, table_b)
-        end_b = self._canonical_end(end_b, table_b)
+        start_a = canonical_start(start_a, table_a)
+        end_a = canonical_end(end_a, table_a)
+        start_b = canonical_start(start_b, table_b)
+        end_b = canonical_end(end_b, table_b)
 
         # Generate CASE expression
         return self._generate_distance_case(
@@ -598,8 +591,8 @@ class BaseGIQLGenerator(Generator):
             column_ref, self._current_table
         )
         table = self._resolve_table(column_ref, self._current_table)
-        start_col = self._canonical_start(raw_start_col, table)
-        end_col = self._canonical_end(raw_end_col, table)
+        start_col = canonical_start(raw_start_col, table)
+        end_col = canonical_end(raw_end_col, table)
 
         chrom = parsed_range.chromosome
         start = parsed_range.start
@@ -657,10 +650,10 @@ class BaseGIQLGenerator(Generator):
         r_chrom, raw_r_start, raw_r_end = self._get_column_refs(right_col, None)
         l_table = self._resolve_table(left_col)
         r_table = self._resolve_table(right_col)
-        l_start = self._canonical_start(raw_l_start, l_table)
-        l_end = self._canonical_end(raw_l_end, l_table)
-        r_start = self._canonical_start(raw_r_start, r_table)
-        r_end = self._canonical_end(raw_r_end, r_table)
+        l_start = canonical_start(raw_l_start, l_table)
+        l_end = canonical_end(raw_l_end, l_table)
+        r_start = canonical_start(raw_r_start, r_table)
+        r_end = canonical_end(raw_r_end, r_table)
 
         if op_type == "intersects":
             # Ranges overlap if: chrom1 = chrom2 AND start1 < end2 AND end1 > start2
@@ -808,8 +801,9 @@ class BaseGIQLGenerator(Generator):
             Tuple of (chromosome, start, end) or (chromosome, start, end, strand)
             Returns SQL expressions (column refs for correlated, literals for standalone)
             Endpoints are canonicalized to 0-based half-open: literal references via
-            ``RangeParser.to_zero_based_half_open``, column references via
-            ``_canonical_start`` / ``_canonical_end``.
+            :meth:`~giql.range_parser.RangeParser.to_zero_based_half_open`, column
+            references via :func:`giql.canonical.canonical_start` /
+            :func:`giql.canonical.canonical_end`.
         :raises ValueError:
             If reference is missing in standalone mode or invalid format
         """
@@ -845,7 +839,11 @@ class BaseGIQLGenerator(Generator):
                 # Column reference - resolve and canonicalize
                 chrom, start, end = self._get_column_refs(reference_sql, None)
                 ref_table = self._resolve_table(reference_sql)
-                return self._canonical_endpoints(chrom, start, end, ref_table)
+                return (
+                    chrom,
+                    canonical_start(start, ref_table),
+                    canonical_end(end, ref_table),
+                )
 
         else:  # correlated mode
             if reference:
@@ -853,7 +851,11 @@ class BaseGIQLGenerator(Generator):
                 reference_sql = self.sql(reference)
                 chrom, start, end = self._get_column_refs(reference_sql, None)
                 ref_table = self._resolve_table(reference_sql)
-                return self._canonical_endpoints(chrom, start, end, ref_table)
+                return (
+                    chrom,
+                    canonical_start(start, ref_table),
+                    canonical_end(end, ref_table),
+                )
             else:
                 # Implicit reference - resolve from outer table in LATERAL join
                 outer_table = self._find_outer_table_in_lateral_join(expression)
@@ -877,7 +879,11 @@ class BaseGIQLGenerator(Generator):
                 # Build column references using the outer table and genomic column
                 reference_sql = f"{outer_table}.{table.genomic_col}"
                 chrom, start, end = self._get_column_refs(reference_sql, None)
-                return self._canonical_endpoints(chrom, start, end, table)
+                return (
+                    chrom,
+                    canonical_start(start, table),
+                    canonical_end(end, table),
+                )
 
     def _resolve_target_table(
         self, expression: GIQLNearest | GIQLDisjoin
@@ -1027,6 +1033,20 @@ class BaseGIQLGenerator(Generator):
         )
 
     @staticmethod
+    def _extract_bool_param(param_expr: exp.Expression | None) -> bool:
+        """Extract boolean value from a parameter expression.
+
+        Handles :class:`exp.Boolean`, :class:`exp.Literal`, and string
+        representations.
+        """
+        if not param_expr:
+            return False
+        elif isinstance(param_expr, exp.Boolean):
+            return param_expr.this
+        else:
+            return str(param_expr).upper() in ("TRUE", "1", "YES")
+
+    @staticmethod
     def _enclosing_cte_names(expression: exp.Expression) -> set[str]:
         """Collect CTE names visible to an expression from enclosing WITH clauses.
 
@@ -1104,91 +1124,6 @@ class BaseGIQLGenerator(Generator):
             if include_strand:
                 return base_cols + (f'"{strand_col}"',)
             return base_cols
-
-    @staticmethod
-    def _canonical_start(raw_start: str, table: Table | None) -> str:
-        """Wrap a raw start column expression to yield canonical 0-based half-open start.
-
-        Conversion by ``coordinate_system``:
-
-        - 0based: ``start`` (identity)
-        - 1based: ``start - 1``
-        """
-        if table is None or table.coordinate_system == "0based":
-            return raw_start
-        return f"({raw_start} - 1)"
-
-    @staticmethod
-    def _canonical_end(raw_end: str, table: Table | None) -> str:
-        """Wrap a raw end column expression to yield canonical 0-based half-open end.
-
-        Conversion by ``(coordinate_system, interval_type)``:
-
-        - 0based / half_open: ``end`` (identity)
-        - 0based / closed:    ``end + 1``
-        - 1based / half_open: ``end - 1``
-        - 1based / closed:    ``end`` (identity)
-        """
-        if table is None:
-            return raw_end
-        key = (table.coordinate_system, table.interval_type)
-        if key == ("0based", "closed"):
-            return f"({raw_end} + 1)"
-        if key == ("1based", "half_open"):
-            return f"({raw_end} - 1)"
-        return raw_end  # 0based/half_open and 1based/closed: identity
-
-    @staticmethod
-    def _decanonical_start(canonical_start: str, table: Table | None) -> str:
-        """Convert a canonical 0-based half-open start to the table's encoding.
-
-        Inverse of ``_canonical_start``. Conversion by ``coordinate_system``:
-
-        - 0based: ``start`` (identity)
-        - 1based: ``start + 1``
-        """
-        if table is None or table.coordinate_system == "0based":
-            return canonical_start
-        return f"({canonical_start} + 1)"
-
-    @staticmethod
-    def _decanonical_end(canonical_end: str, table: Table | None) -> str:
-        """Convert a canonical 0-based half-open end to the table's encoding.
-
-        Inverse of ``_canonical_end``. Conversion by ``(coordinate_system,
-        interval_type)``:
-
-        - 0based / half_open: ``end`` (identity)
-        - 0based / closed:    ``end - 1``
-        - 1based / half_open: ``end + 1``
-        - 1based / closed:    ``end`` (identity)
-        """
-        if table is None:
-            return canonical_end
-        key = (table.coordinate_system, table.interval_type)
-        if key == ("0based", "closed"):
-            return f"({canonical_end} - 1)"
-        if key == ("1based", "half_open"):
-            return f"({canonical_end} + 1)"
-        return canonical_end  # 0based/half_open and 1based/closed: identity
-
-    @staticmethod
-    def _canonical_endpoints(
-        chrom: str,
-        raw_start: str,
-        raw_end: str,
-        table: Table | None,
-    ) -> tuple[str, str, str]:
-        """Canonicalize a ``(chrom, start, end)`` triple to 0-based half-open.
-
-        The chromosome expression passes through unchanged; start and end are
-        wrapped via ``_canonical_start`` / ``_canonical_end``.
-        """
-        return (
-            chrom,
-            BaseGIQLGenerator._canonical_start(raw_start, table),
-            BaseGIQLGenerator._canonical_end(raw_end, table),
-        )
 
     def _resolve_table_name(self, column_ref: str, table_name: str | None) -> str | None:
         """Resolve the underlying table name for a column reference.
