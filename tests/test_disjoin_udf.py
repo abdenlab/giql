@@ -15,23 +15,51 @@ from giql import transpile
 _TABLE_COLUMNS = '(chrom VARCHAR, "start" INTEGER, "end" INTEGER, name VARCHAR)'
 
 
-def _run_duckdb(query: str, tables: list[str], **table_data):
-    """Transpile a DISJOIN query and execute it against in-memory DuckDB."""
+def _create_and_insert(conn, name: str, rows, schema_ddl: str) -> None:
+    """Create a table with ``schema_ddl`` and bulk-insert ``rows``."""
+    conn.execute(f"CREATE TABLE {name}{schema_ddl}")
+    if not rows:
+        return
+    placeholders = ", ".join("?" for _ in rows[0])
+    conn.executemany(f"INSERT INTO {name} VALUES ({placeholders})", rows)
+
+
+def _run_duckdb(
+    query: str,
+    tables: list,
+    schemas: dict[str, str] | None = None,
+    **table_data,
+):
+    """Transpile a DISJOIN query and execute it against in-memory DuckDB.
+
+    ``schemas`` maps a table name to a CREATE-TABLE column list (including the
+    enclosing parentheses) for tables whose physical layout deviates from the
+    canonical ``(chrom, start, end, name)`` schema. Tables not present in
+    ``schemas`` use the canonical schema.
+    """
+    schemas = schemas or {}
     conn = duckdb.connect(":memory:")
     for name, rows in table_data.items():
-        conn.execute(f"CREATE TABLE {name}{_TABLE_COLUMNS}")
-        conn.executemany(f"INSERT INTO {name} VALUES (?, ?, ?, ?)", rows)
+        _create_and_insert(conn, name, rows, schemas.get(name, _TABLE_COLUMNS))
     result = conn.execute(transpile(query, tables=tables)).fetchall()
     conn.close()
     return result
 
 
-def _run_sqlite(query: str, tables: list[str], **table_data):
-    """Transpile a DISJOIN query and execute it against in-memory SQLite."""
+def _run_sqlite(
+    query: str,
+    tables: list,
+    schemas: dict[str, str] | None = None,
+    **table_data,
+):
+    """Transpile a DISJOIN query and execute it against in-memory SQLite.
+
+    ``schemas`` behaves identically to :func:`_run_duckdb`.
+    """
+    schemas = schemas or {}
     conn = sqlite3.connect(":memory:")
     for name, rows in table_data.items():
-        conn.execute(f"CREATE TABLE {name}{_TABLE_COLUMNS}")
-        conn.executemany(f"INSERT INTO {name} VALUES (?, ?, ?, ?)", rows)
+        _create_and_insert(conn, name, rows, schemas.get(name, _TABLE_COLUMNS))
     result = conn.execute(transpile(query, tables=tables)).fetchall()
     conn.close()
     return result
@@ -255,7 +283,7 @@ class TestDisjoinExecution:
         # Arrange & act
         result = run(
             "WITH bins AS ("
-            "  SELECT 'chr1' AS chrom, 0 AS \"start\", 10 AS \"end\" "
+            '  SELECT \'chr1\' AS chrom, 0 AS "start", 10 AS "end" '
             "  UNION ALL SELECT 'chr1', 10, 20"
             ") "
             "SELECT disjoin_start, disjoin_end "
