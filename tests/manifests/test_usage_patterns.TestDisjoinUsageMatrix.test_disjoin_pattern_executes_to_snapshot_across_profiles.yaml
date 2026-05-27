@@ -34,6 +34,13 @@ ADJACENT_INTERVALS-reference-duckdb-CHAINED_REFERENCE:
     - chr1
     - 60
     - 90
+ADJACENT_INTERVALS-reference-duckdb-CTE_INPUT:
+-   - chr1
+    - 0
+    - 90
+    - chr1
+    - 0
+    - 90
 ADJACENT_INTERVALS-reference-duckdb-DERIVED_SUBQUERY:
 -   - chr1
     - 0
@@ -285,6 +292,25 @@ ADJACENT_INTERVALS-self-duckdb-CHAINED_REFERENCE:
     - 60
     - 90
     - c
+    - chr1
+    - 60
+    - 90
+ADJACENT_INTERVALS-self-duckdb-CTE_INPUT:
+-   - chr1
+    - 0
+    - 30
+    - chr1
+    - 0
+    - 30
+-   - chr1
+    - 30
+    - 60
+    - chr1
+    - 30
+    - 60
+-   - chr1
+    - 60
+    - 90
     - chr1
     - 60
     - 90
@@ -565,6 +591,37 @@ CANONICAL-reference-duckdb-CHAINED_REFERENCE:
     - 10
     - 40
     - c
+    - chr2
+    - 10
+    - 40
+CANONICAL-reference-duckdb-CTE_INPUT:
+-   - chr1
+    - 0
+    - 100
+    - chr1
+    - 0
+    - 60
+-   - chr1
+    - 0
+    - 100
+    - chr1
+    - 60
+    - 100
+-   - chr1
+    - 60
+    - 180
+    - chr1
+    - 100
+    - 180
+-   - chr1
+    - 60
+    - 180
+    - chr1
+    - 60
+    - 100
+-   - chr2
+    - 10
+    - 40
     - chr2
     - 10
     - 40
@@ -985,6 +1042,37 @@ CANONICAL-self-duckdb-CHAINED_REFERENCE:
     - chr2
     - 10
     - 40
+CANONICAL-self-duckdb-CTE_INPUT:
+-   - chr1
+    - 0
+    - 100
+    - chr1
+    - 0
+    - 60
+-   - chr1
+    - 0
+    - 100
+    - chr1
+    - 60
+    - 100
+-   - chr1
+    - 60
+    - 180
+    - chr1
+    - 100
+    - 180
+-   - chr1
+    - 60
+    - 180
+    - chr1
+    - 60
+    - 100
+-   - chr2
+    - 10
+    - 40
+    - chr2
+    - 10
+    - 40
 CANONICAL-self-duckdb-DERIVED_SUBQUERY:
 -   - chr1
     - 0
@@ -1390,6 +1478,37 @@ CUSTOM_COLUMNS-reference-duckdb-CHAINED_REFERENCE:
     - 10
     - 40
     - c
+    - chr2
+    - 10
+    - 40
+CUSTOM_COLUMNS-reference-duckdb-CTE_INPUT:
+-   - chr1
+    - 0
+    - 100
+    - chr1
+    - 0
+    - 60
+-   - chr1
+    - 0
+    - 100
+    - chr1
+    - 60
+    - 100
+-   - chr1
+    - 60
+    - 180
+    - chr1
+    - 100
+    - 180
+-   - chr1
+    - 60
+    - 180
+    - chr1
+    - 60
+    - 100
+-   - chr2
+    - 10
+    - 40
     - chr2
     - 10
     - 40
@@ -1810,6 +1929,37 @@ CUSTOM_COLUMNS-self-duckdb-CHAINED_REFERENCE:
     - chr2
     - 10
     - 40
+CUSTOM_COLUMNS-self-duckdb-CTE_INPUT:
+-   - chr1
+    - 0
+    - 100
+    - chr1
+    - 0
+    - 60
+-   - chr1
+    - 0
+    - 100
+    - chr1
+    - 60
+    - 100
+-   - chr1
+    - 60
+    - 180
+    - chr1
+    - 100
+    - 180
+-   - chr1
+    - 60
+    - 180
+    - chr1
+    - 60
+    - 100
+-   - chr2
+    - 10
+    - 40
+    - chr2
+    - 10
+    - 40
 CUSTOM_COLUMNS-self-duckdb-DERIVED_SUBQUERY:
 -   - chr1
     - 0
@@ -2198,6 +2348,25 @@ DUPLICATE_TARGETS-reference-duckdb-CHAINED_REFERENCE:
     - chr1
     - 40
     - 60
+DUPLICATE_TARGETS-reference-duckdb-CTE_INPUT:
+-   - chr1
+    - 0
+    - 100
+    - chr1
+    - 0
+    - 100
+-   - chr1
+    - 0
+    - 100
+    - chr1
+    - 0
+    - 100
+-   - chr1
+    - 0
+    - 100
+    - chr1
+    - 0
+    - 100
 DUPLICATE_TARGETS-reference-duckdb-DERIVED_SUBQUERY:
 -   - chr1
     - 0
@@ -2564,6 +2733,67 @@ DUPLICATE_TARGETS-self-duckdb-CHAINED_REFERENCE:
     - 40
     - 60
     - cut
+    - chr1
+    - 40
+    - 60
+DUPLICATE_TARGETS-self-duckdb-CTE_INPUT:
+-   - chr1
+    - 0
+    - 100
+    - chr1
+    - 0
+    - 40
+-   - chr1
+    - 0
+    - 100
+    - chr1
+    - 0
+    - 40
+-   - chr1
+    - 0
+    - 100
+    - chr1
+    - 0
+    - 40
+-   - chr1
+    - 0
+    - 100
+    - chr1
+    - 40
+    - 60
+-   - chr1
+    - 0
+    - 100
+    - chr1
+    - 40
+    - 60
+-   - chr1
+    - 0
+    - 100
+    - chr1
+    - 40
+    - 60
+-   - chr1
+    - 0
+    - 100
+    - chr1
+    - 60
+    - 100
+-   - chr1
+    - 0
+    - 100
+    - chr1
+    - 60
+    - 100
+-   - chr1
+    - 0
+    - 100
+    - chr1
+    - 60
+    - 100
+-   - chr1
+    - 40
+    - 60
     - chr1
     - 40
     - 60
@@ -3292,6 +3522,31 @@ EMPTY_REFERENCE-reference-duckdb-AGGREGATED_INTERVAL: []
 EMPTY_REFERENCE-reference-duckdb-ALIASED_PROJECTION: []
 EMPTY_REFERENCE-reference-duckdb-CHAINED_COOCCURRING: []
 EMPTY_REFERENCE-reference-duckdb-CHAINED_REFERENCE: []
+EMPTY_REFERENCE-reference-duckdb-CTE_INPUT:
+-   - chr1
+    - 0
+    - 100
+    - chr1
+    - 0
+    - 50
+-   - chr1
+    - 0
+    - 100
+    - chr1
+    - 50
+    - 100
+-   - chr1
+    - 50
+    - 150
+    - chr1
+    - 100
+    - 150
+-   - chr1
+    - 50
+    - 150
+    - chr1
+    - 50
+    - 100
 EMPTY_REFERENCE-reference-duckdb-DERIVED_SUBQUERY: []
 EMPTY_REFERENCE-reference-duckdb-JOINED: []
 EMPTY_REFERENCE-reference-duckdb-NESTED_AGGREGATE:
@@ -3320,6 +3575,7 @@ EMPTY_REFERENCE-self-duckdb-AGGREGATED_INTERVAL: []
 EMPTY_REFERENCE-self-duckdb-ALIASED_PROJECTION: []
 EMPTY_REFERENCE-self-duckdb-CHAINED_COOCCURRING: []
 EMPTY_REFERENCE-self-duckdb-CHAINED_REFERENCE: []
+EMPTY_REFERENCE-self-duckdb-CTE_INPUT: []
 EMPTY_REFERENCE-self-duckdb-DERIVED_SUBQUERY: []
 EMPTY_REFERENCE-self-duckdb-JOINED: []
 EMPTY_REFERENCE-self-duckdb-NESTED_AGGREGATE:
@@ -3348,6 +3604,7 @@ EMPTY_TARGET-reference-duckdb-AGGREGATED_INTERVAL: []
 EMPTY_TARGET-reference-duckdb-ALIASED_PROJECTION: []
 EMPTY_TARGET-reference-duckdb-CHAINED_COOCCURRING: []
 EMPTY_TARGET-reference-duckdb-CHAINED_REFERENCE: []
+EMPTY_TARGET-reference-duckdb-CTE_INPUT: []
 EMPTY_TARGET-reference-duckdb-DERIVED_SUBQUERY: []
 EMPTY_TARGET-reference-duckdb-JOINED: []
 EMPTY_TARGET-reference-duckdb-NESTED_AGGREGATE:
@@ -3376,6 +3633,7 @@ EMPTY_TARGET-self-duckdb-AGGREGATED_INTERVAL: []
 EMPTY_TARGET-self-duckdb-ALIASED_PROJECTION: []
 EMPTY_TARGET-self-duckdb-CHAINED_COOCCURRING: []
 EMPTY_TARGET-self-duckdb-CHAINED_REFERENCE: []
+EMPTY_TARGET-self-duckdb-CTE_INPUT: []
 EMPTY_TARGET-self-duckdb-DERIVED_SUBQUERY: []
 EMPTY_TARGET-self-duckdb-JOINED: []
 EMPTY_TARGET-self-duckdb-NESTED_AGGREGATE:
@@ -3427,6 +3685,19 @@ IDENTICAL_INTERVALS-reference-duckdb-CHAINED_REFERENCE:
     - x2
     - chr1
     - 20
+    - 50
+IDENTICAL_INTERVALS-reference-duckdb-CTE_INPUT:
+-   - chr1
+    - 0
+    - 50
+    - chr1
+    - 0
+    - 50
+-   - chr1
+    - 0
+    - 50
+    - chr1
+    - 0
     - 50
 IDENTICAL_INTERVALS-reference-duckdb-DERIVED_SUBQUERY:
 -   - chr1
@@ -3671,6 +3942,43 @@ IDENTICAL_INTERVALS-self-duckdb-CHAINED_REFERENCE:
     - 20
     - 80
     - y
+    - chr1
+    - 50
+    - 80
+IDENTICAL_INTERVALS-self-duckdb-CTE_INPUT:
+-   - chr1
+    - 0
+    - 50
+    - chr1
+    - 0
+    - 20
+-   - chr1
+    - 0
+    - 50
+    - chr1
+    - 0
+    - 20
+-   - chr1
+    - 0
+    - 50
+    - chr1
+    - 20
+    - 50
+-   - chr1
+    - 0
+    - 50
+    - chr1
+    - 20
+    - 50
+-   - chr1
+    - 20
+    - 80
+    - chr1
+    - 20
+    - 50
+-   - chr1
+    - 20
+    - 80
     - chr1
     - 50
     - 80
@@ -4155,6 +4463,31 @@ MANY_CHROMOSOMES-reference-duckdb-CHAINED_REFERENCE:
     - chrX
     - 5
     - 25
+MANY_CHROMOSOMES-reference-duckdb-CTE_INPUT:
+-   - chr1
+    - 0
+    - 100
+    - chr1
+    - 0
+    - 100
+-   - chr2
+    - 0
+    - 60
+    - chr2
+    - 0
+    - 60
+-   - chr3
+    - 10
+    - 40
+    - chr3
+    - 10
+    - 40
+-   - chrX
+    - 5
+    - 25
+    - chrX
+    - 5
+    - 25
 MANY_CHROMOSOMES-reference-duckdb-DERIVED_SUBQUERY:
 -   - chr1
     - 0
@@ -4552,6 +4885,67 @@ MANY_CHROMOSOMES-self-duckdb-CHAINED_REFERENCE:
     - 5
     - 25
     - f
+    - chrX
+    - 5
+    - 25
+MANY_CHROMOSOMES-self-duckdb-CTE_INPUT:
+-   - chr1
+    - 0
+    - 100
+    - chr1
+    - 0
+    - 50
+-   - chr1
+    - 0
+    - 100
+    - chr1
+    - 50
+    - 100
+-   - chr1
+    - 50
+    - 150
+    - chr1
+    - 100
+    - 150
+-   - chr1
+    - 50
+    - 150
+    - chr1
+    - 50
+    - 100
+-   - chr2
+    - 0
+    - 60
+    - chr2
+    - 0
+    - 30
+-   - chr2
+    - 0
+    - 60
+    - chr2
+    - 30
+    - 60
+-   - chr2
+    - 30
+    - 90
+    - chr2
+    - 30
+    - 60
+-   - chr2
+    - 30
+    - 90
+    - chr2
+    - 60
+    - 90
+-   - chr3
+    - 10
+    - 40
+    - chr3
+    - 10
+    - 40
+-   - chrX
+    - 5
+    - 25
     - chrX
     - 5
     - 25
@@ -5297,6 +5691,37 @@ MIXED_ENCODING-reference-duckdb-CHAINED_REFERENCE:
     - chr2
     - 10
     - 40
+MIXED_ENCODING-reference-duckdb-CTE_INPUT:
+-   - chr1
+    - 0
+    - 100
+    - chr1
+    - 0
+    - 60
+-   - chr1
+    - 0
+    - 100
+    - chr1
+    - 60
+    - 100
+-   - chr1
+    - 60
+    - 180
+    - chr1
+    - 100
+    - 180
+-   - chr1
+    - 60
+    - 180
+    - chr1
+    - 60
+    - 100
+-   - chr2
+    - 10
+    - 40
+    - chr2
+    - 10
+    - 40
 MIXED_ENCODING-reference-duckdb-DERIVED_SUBQUERY:
 -   - chr1
     - 0
@@ -5714,6 +6139,37 @@ MIXED_ENCODING-self-duckdb-CHAINED_REFERENCE:
     - chr2
     - 10
     - 40
+MIXED_ENCODING-self-duckdb-CTE_INPUT:
+-   - chr1
+    - 0
+    - 100
+    - chr1
+    - 0
+    - 60
+-   - chr1
+    - 0
+    - 100
+    - chr1
+    - 60
+    - 100
+-   - chr1
+    - 60
+    - 180
+    - chr1
+    - 100
+    - 180
+-   - chr1
+    - 60
+    - 180
+    - chr1
+    - 60
+    - 100
+-   - chr2
+    - 10
+    - 40
+    - chr2
+    - 10
+    - 40
 MIXED_ENCODING-self-duckdb-DERIVED_SUBQUERY:
 -   - chr1
     - 0
@@ -6096,6 +6552,13 @@ NESTED_INTERVALS-reference-duckdb-CHAINED_REFERENCE:
     - chr1
     - 50
     - 60
+NESTED_INTERVALS-reference-duckdb-CTE_INPUT:
+-   - chr1
+    - 0
+    - 100
+    - chr1
+    - 0
+    - 100
 NESTED_INTERVALS-reference-duckdb-DERIVED_SUBQUERY:
 -   - chr1
     - 0
@@ -6413,6 +6876,61 @@ NESTED_INTERVALS-self-duckdb-CHAINED_REFERENCE:
     - 40
     - 50
     - innermost
+    - chr1
+    - 40
+    - 50
+NESTED_INTERVALS-self-duckdb-CTE_INPUT:
+-   - chr1
+    - 0
+    - 100
+    - chr1
+    - 0
+    - 30
+-   - chr1
+    - 0
+    - 100
+    - chr1
+    - 30
+    - 40
+-   - chr1
+    - 0
+    - 100
+    - chr1
+    - 40
+    - 50
+-   - chr1
+    - 0
+    - 100
+    - chr1
+    - 50
+    - 60
+-   - chr1
+    - 0
+    - 100
+    - chr1
+    - 60
+    - 100
+-   - chr1
+    - 30
+    - 60
+    - chr1
+    - 30
+    - 40
+-   - chr1
+    - 30
+    - 60
+    - chr1
+    - 40
+    - 50
+-   - chr1
+    - 30
+    - 60
+    - chr1
+    - 50
+    - 60
+-   - chr1
+    - 40
+    - 50
     - chr1
     - 40
     - 50
@@ -7082,6 +7600,37 @@ ONE_BASED_CLOSED_TARGET-reference-duckdb-CHAINED_REFERENCE:
     - chr2
     - 11
     - 40
+ONE_BASED_CLOSED_TARGET-reference-duckdb-CTE_INPUT:
+-   - chr1
+    - 1
+    - 100
+    - chr1
+    - 1
+    - 61
+-   - chr1
+    - 1
+    - 100
+    - chr1
+    - 61
+    - 100
+-   - chr1
+    - 61
+    - 180
+    - chr1
+    - 100
+    - 180
+-   - chr1
+    - 61
+    - 180
+    - chr1
+    - 61
+    - 100
+-   - chr2
+    - 11
+    - 40
+    - chr2
+    - 11
+    - 40
 ONE_BASED_CLOSED_TARGET-reference-duckdb-DERIVED_SUBQUERY:
 -   - chr1
     - 1
@@ -7499,6 +8048,37 @@ ONE_BASED_CLOSED_TARGET-self-duckdb-CHAINED_REFERENCE:
     - chr2
     - 12
     - 40
+ONE_BASED_CLOSED_TARGET-self-duckdb-CTE_INPUT:
+-   - chr1
+    - 1
+    - 100
+    - chr1
+    - 1
+    - 61
+-   - chr1
+    - 1
+    - 100
+    - chr1
+    - 61
+    - 100
+-   - chr1
+    - 61
+    - 180
+    - chr1
+    - 100
+    - 180
+-   - chr1
+    - 61
+    - 180
+    - chr1
+    - 61
+    - 100
+-   - chr2
+    - 11
+    - 40
+    - chr2
+    - 11
+    - 40
 ONE_BASED_CLOSED_TARGET-self-duckdb-DERIVED_SUBQUERY:
 -   - chr1
     - 1
@@ -7856,6 +8436,7 @@ POINT_INTERVALS-reference-duckdb-AGGREGATED_INTERVAL: []
 POINT_INTERVALS-reference-duckdb-ALIASED_PROJECTION: []
 POINT_INTERVALS-reference-duckdb-CHAINED_COOCCURRING: []
 POINT_INTERVALS-reference-duckdb-CHAINED_REFERENCE: []
+POINT_INTERVALS-reference-duckdb-CTE_INPUT: []
 POINT_INTERVALS-reference-duckdb-DERIVED_SUBQUERY: []
 POINT_INTERVALS-reference-duckdb-JOINED: []
 POINT_INTERVALS-reference-duckdb-NESTED_AGGREGATE:
@@ -7884,6 +8465,7 @@ POINT_INTERVALS-self-duckdb-AGGREGATED_INTERVAL: []
 POINT_INTERVALS-self-duckdb-ALIASED_PROJECTION: []
 POINT_INTERVALS-self-duckdb-CHAINED_COOCCURRING: []
 POINT_INTERVALS-self-duckdb-CHAINED_REFERENCE: []
+POINT_INTERVALS-self-duckdb-CTE_INPUT: []
 POINT_INTERVALS-self-duckdb-DERIVED_SUBQUERY: []
 POINT_INTERVALS-self-duckdb-JOINED: []
 POINT_INTERVALS-self-duckdb-NESTED_AGGREGATE:
@@ -7933,6 +8515,13 @@ REFERENCE_GAP-reference-duckdb-CHAINED_REFERENCE:
     - t
     - chr1
     - 60
+    - 100
+REFERENCE_GAP-reference-duckdb-CTE_INPUT:
+-   - chr1
+    - 0
+    - 100
+    - chr1
+    - 0
     - 100
 REFERENCE_GAP-reference-duckdb-DERIVED_SUBQUERY:
 -   - chr1
@@ -8147,6 +8736,37 @@ REFERENCE_GAP-self-duckdb-CHAINED_REFERENCE:
     - 60
     - 100
     - b
+    - chr1
+    - 60
+    - 100
+REFERENCE_GAP-self-duckdb-CTE_INPUT:
+-   - chr1
+    - 0
+    - 100
+    - chr1
+    - 0
+    - 40
+-   - chr1
+    - 0
+    - 100
+    - chr1
+    - 40
+    - 60
+-   - chr1
+    - 0
+    - 100
+    - chr1
+    - 60
+    - 100
+-   - chr1
+    - 0
+    - 40
+    - chr1
+    - 0
+    - 40
+-   - chr1
+    - 60
+    - 100
     - chr1
     - 60
     - 100
@@ -8515,6 +9135,13 @@ REFERENCE_SUPERSET-reference-duckdb-CHAINED_REFERENCE:
     - chr1
     - 40
     - 60
+REFERENCE_SUPERSET-reference-duckdb-CTE_INPUT:
+-   - chr1
+    - 40
+    - 60
+    - chr1
+    - 40
+    - 60
 REFERENCE_SUPERSET-reference-duckdb-DERIVED_SUBQUERY:
 -   - chr1
     - 40
@@ -8658,6 +9285,31 @@ REFERENCE_SUPERSET-self-duckdb-CHAINED_REFERENCE:
     - 20
     - 80
     - a
+    - chr1
+    - 20
+    - 80
+REFERENCE_SUPERSET-self-duckdb-CTE_INPUT:
+-   - chr1
+    - 0
+    - 200
+    - chr1
+    - 0
+    - 20
+-   - chr1
+    - 0
+    - 200
+    - chr1
+    - 20
+    - 80
+-   - chr1
+    - 0
+    - 200
+    - chr1
+    - 80
+    - 200
+-   - chr1
+    - 20
+    - 80
     - chr1
     - 20
     - 80
@@ -8997,6 +9649,13 @@ SINGLE_CHROMOSOME-reference-duckdb-CHAINED_REFERENCE:
     - chr1
     - 60
     - 100
+SINGLE_CHROMOSOME-reference-duckdb-CTE_INPUT:
+-   - chr1
+    - 0
+    - 120
+    - chr1
+    - 0
+    - 120
 SINGLE_CHROMOSOME-reference-duckdb-DERIVED_SUBQUERY:
 -   - chr1
     - 0
@@ -9259,6 +9918,61 @@ SINGLE_CHROMOSOME-self-duckdb-CHAINED_REFERENCE:
     - 40
     - 120
     - c
+    - chr1
+    - 80
+    - 100
+SINGLE_CHROMOSOME-self-duckdb-CTE_INPUT:
+-   - chr1
+    - 0
+    - 80
+    - chr1
+    - 0
+    - 20
+-   - chr1
+    - 0
+    - 80
+    - chr1
+    - 20
+    - 40
+-   - chr1
+    - 0
+    - 80
+    - chr1
+    - 40
+    - 80
+-   - chr1
+    - 20
+    - 100
+    - chr1
+    - 20
+    - 40
+-   - chr1
+    - 20
+    - 100
+    - chr1
+    - 40
+    - 80
+-   - chr1
+    - 20
+    - 100
+    - chr1
+    - 80
+    - 100
+-   - chr1
+    - 40
+    - 120
+    - chr1
+    - 100
+    - 120
+-   - chr1
+    - 40
+    - 120
+    - chr1
+    - 40
+    - 80
+-   - chr1
+    - 40
+    - 120
     - chr1
     - 80
     - 100
