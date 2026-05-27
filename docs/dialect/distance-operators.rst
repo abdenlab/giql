@@ -156,7 +156,10 @@ Parameters
 ~~~~~~~~~~
 
 **target_table**
-   The table to search for nearest features.
+   The table to search for nearest features. ``NEAREST`` requires the target
+   to be a registered table; a name resolving to a CTE defined in an
+   enclosing ``WITH`` is rejected at transpile time. (See ``DISJOIN`` if you
+   need to operate on a CTE.)
 
 **reference**
    The reference position to measure distances from. Can be a column reference
