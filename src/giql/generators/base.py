@@ -35,19 +35,6 @@ class BaseGIQLGenerator(Generator):
     # SQLite does not support LATERAL, so it overrides this to False
     SUPPORTS_LATERAL = True
 
-    @staticmethod
-    def _extract_bool_param(param_expr: exp.Expression | None) -> bool:
-        """Extract boolean value from a parameter expression.
-
-        Handles exp.Boolean, exp.Literal, and string representations.
-        """
-        if not param_expr:
-            return False
-        elif isinstance(param_expr, exp.Boolean):
-            return param_expr.this
-        else:
-            return str(param_expr).upper() in ("TRUE", "1", "YES")
-
     def __init__(self, tables: Tables | None = None, **kwargs):
         super().__init__(**kwargs)
         self.tables = tables or Tables()
@@ -1025,6 +1012,20 @@ class BaseGIQLGenerator(Generator):
             "nor a CTE defined in this query. Register the table or define "
             "the CTE before transpiling."
         )
+
+    @staticmethod
+    def _extract_bool_param(param_expr: exp.Expression | None) -> bool:
+        """Extract boolean value from a parameter expression.
+
+        Handles :class:`exp.Boolean`, :class:`exp.Literal`, and string
+        representations.
+        """
+        if not param_expr:
+            return False
+        elif isinstance(param_expr, exp.Boolean):
+            return param_expr.this
+        else:
+            return str(param_expr).upper() in ("TRUE", "1", "YES")
 
     @staticmethod
     def _enclosing_cte_names(expression: exp.Expression) -> set[str]:
