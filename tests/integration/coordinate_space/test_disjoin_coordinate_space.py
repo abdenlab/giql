@@ -311,3 +311,61 @@ class TestDisjoinCoordinateSpace:
 
         # Assert
         assert result == [(20, 50)]
+
+    @pytest.mark.parametrize(
+        ("coordinate_system", "interval_type"),
+        CONVENTIONS,
+        ids=lambda v: str(v),
+    )
+    def test_user_canonicalized_cte_target_yields_canonical_partition(
+        self, giql_query, coordinate_system, interval_type
+    ):
+        """Test that a user-canonicalized CTE target yields the canonical partition.
+
+        Given:
+            A registered ``features`` table re-encoded under one convention.
+        When:
+            A WITH clause projects user-canonicalized 0-based half-open
+            ``chrom`` / ``start`` / ``end`` columns and DISJOIN runs against
+            the CTE.
+        Then:
+            The output should equal the canonical partition ``{[0, 10),
+            [10, 20), [20, 30)}`` regardless of the source convention — a
+            CTE target is assumed canonical, so the user's canonicalization
+            formula determines the result, not the registered table's config.
+        """
+        # Arrange
+        s_a, e_a = encode(0, 20, coordinate_system, interval_type)
+        s_b, e_b = encode(10, 30, coordinate_system, interval_type)
+        tables = [make_table("features", coordinate_system, interval_type)]
+
+        # Per-convention canonicalization formulae (inverse of encode):
+        # `start` shifts by `-1` for 1-based; `end` shifts by `+1` (closed)
+        # or `-1` (1-based half-open).
+        start_expr = '"start"' if coordinate_system == "0based" else '"start" - 1'
+        key = (coordinate_system, interval_type)
+        if key == ("0based", "half_open"):
+            end_expr = '"end"'
+        elif key == ("0based", "closed"):
+            end_expr = '"end" + 1'
+        elif key == ("1based", "half_open"):
+            end_expr = '"end" - 1'
+        else:  # ("1based", "closed")
+            end_expr = '"end"'
+
+        # Act
+        result = giql_query(
+            f'WITH x AS (SELECT chrom, {start_expr} AS "start", '
+            f'{end_expr} AS "end" FROM features) '
+            "SELECT DISTINCT disjoin_chrom, disjoin_start, disjoin_end "
+            "FROM DISJOIN(x) ORDER BY disjoin_start",
+            tables=tables,
+            features=[_row("chr1", s_a, e_a, "a"), _row("chr1", s_b, e_b, "b")],
+        )
+
+        # Assert
+        assert result == [
+            ("chr1", 0, 10),
+            ("chr1", 10, 20),
+            ("chr1", 20, 30),
+        ]
