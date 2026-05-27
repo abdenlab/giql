@@ -83,7 +83,7 @@ class TestDisjoinParsing:
             It should raise a ParseError naming the positional-argument limit.
         """
         # Arrange, act, & assert
-        with pytest.raises(ParseError, match="at most one positional"):
+        with pytest.raises(ParseError, match="at most 1 positional"):
             parse_one("SELECT * FROM DISJOIN(features, refs)", dialect=GIQLDialect)
 
     def test_from_arg_list_should_reject_unknown_named_argument(self):
@@ -116,9 +116,7 @@ class TestDisjoinParsing:
         """
         # Arrange, act, & assert
         with pytest.raises(ParseError, match="requires a target table"):
-            parse_one(
-                "SELECT * FROM DISJOIN(reference := refs)", dialect=GIQLDialect
-            )
+            parse_one("SELECT * FROM DISJOIN(reference := refs)", dialect=GIQLDialect)
 
     def test_from_arg_list_should_map_reference_when_named_with_walrus(self):
         """Test that a walrus-named reference argument is carried.
@@ -153,6 +151,28 @@ class TestDisjoinParsing:
 
         # Assert
         assert node.args.get("reference") is not None
+
+    def test_from_arg_list_should_reject_positional_and_explicit_this_kwarg(self):
+        """Test that supplying both a positional target and an explicit ``this`` is rejected.
+
+        Given:
+            A GIQL query like ``DISJOIN(features, this := other)`` that
+            passes a positional target *and* an explicit ``this`` kwarg.
+        When:
+            Parsing the query.
+        Then:
+            It should raise a ParseError naming the conflict instead of
+            silently letting the positional overwrite the kwarg-supplied
+            ``this`` (case-insensitive kwarg keys in
+            ``_split_named_and_positional`` made the silent overwrite
+            reachable for ``THIS := ...`` too).
+        """
+        # Arrange, act, & assert
+        with pytest.raises(ParseError, match="got both a positional"):
+            parse_one(
+                "SELECT * FROM DISJOIN(features, this := other)",
+                dialect=GIQLDialect,
+            )
 
     def test_from_arg_list_should_carry_subquery_reference(self):
         """Test that a subquery reference is carried as a nested SELECT.

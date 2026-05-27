@@ -203,25 +203,17 @@ class TestNearestParsing:
         """
         GIVEN a GIQL query with NEAREST(genes, k=3) using = syntax
         WHEN parsing the query
-        THEN should not treat k as a named parameter
+        THEN should reject the extra positional argument
+            (= is not a kwarg binder — only := and => are — so ``k=3``
+            parses as an SQL equality expression, pushing the arg list
+            past NEAREST's max_positional=1)
         """
-        # Act
-        ast = parse_one(
-            "SELECT * FROM peaks CROSS JOIN LATERAL NEAREST(genes, k=3)",
-            dialect=GIQLDialect,
-        )
-
-        # Assert
-        joins = ast.args.get("joins")
-        join = joins[0]
-        lateral_expr = join.this
-        nearest_expr = (
-            lateral_expr.this if hasattr(lateral_expr, "this") else lateral_expr
-        )
-        assert isinstance(nearest_expr, GIQLNearest)
-        assert nearest_expr.args.get("k") is None, (
-            "= should not be treated as named parameter assignment"
-        )
+        # Act & assert
+        with pytest.raises(ParseError, match="at most 1 positional"):
+            parse_one(
+                "SELECT * FROM peaks CROSS JOIN LATERAL NEAREST(genes, k=3)",
+                dialect=GIQLDialect,
+            )
 
     def test_from_arg_list_with_kwarg_syntax(self):
         """
@@ -261,3 +253,37 @@ class TestNearestParsing:
         # Arrange, act, & assert
         with pytest.raises(ParseError, match="requires a target table"):
             parse_one("SELECT * FROM NEAREST(k := 3)", dialect=GIQLDialect)
+
+    def test_from_arg_list_should_reject_unknown_named_argument(self):
+        """Test that an unrecognized named argument is rejected.
+
+        Given:
+            A GIQL query whose NEAREST call uses a misspelled named
+            argument such as ``kk := 3``.
+        When:
+            Parsing the query.
+        Then:
+            It should raise a ParseError naming the unexpected argument
+            — the shared ``_validate_arg_list`` helper now applies
+            DISJOIN's strict discipline uniformly across operators.
+        """
+        # Arrange, act, & assert
+        with pytest.raises(ParseError, match="unexpected named argument"):
+            parse_one("SELECT * FROM NEAREST(genes, kk := 3)", dialect=GIQLDialect)
+
+    def test_from_arg_list_should_reject_extra_positional_argument(self):
+        """Test that a bare extra positional argument is rejected.
+
+        Given:
+            A GIQL query with ``NEAREST(genes, extra)`` passing a second
+            bare positional argument beyond the single-positional limit.
+        When:
+            Parsing the query.
+        Then:
+            It should raise a ParseError naming the positional-argument
+            limit — the shared ``_validate_arg_list`` helper enforces
+            the per-operator ``max_positional`` count.
+        """
+        # Arrange, act, & assert
+        with pytest.raises(ParseError, match="at most 1 positional"):
+            parse_one("SELECT * FROM NEAREST(genes, extra)", dialect=GIQLDialect)

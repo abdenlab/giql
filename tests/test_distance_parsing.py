@@ -4,7 +4,9 @@ Tests verify that the GIQL parser correctly recognizes and parses
 DISTANCE function calls with various argument patterns.
 """
 
+import pytest
 from sqlglot import parse_one
+from sqlglot.errors import ParseError
 
 from giql.dialect import GIQLDialect
 from giql.expressions import GIQLDistance
@@ -63,20 +65,18 @@ class TestDistanceParsing:
         """
         GIVEN a GIQL query with DISTANCE(a.interval, b.interval, stranded=true) using = syntax
         WHEN parsing the query
-        THEN should not treat stranded as a named parameter
+        THEN should reject the extra positional argument
+            (= is not a kwarg binder — only := and => are — so
+            ``stranded=true`` parses as an SQL equality expression,
+            pushing the arg list past DISTANCE's max_positional=2)
         """
-        # Act
-        ast = parse_one(
-            "SELECT DISTANCE(a.interval, b.interval, stranded=true) FROM features_a a, features_b b",
-            dialect=GIQLDialect,
-        )
-
-        # Assert
-        select_expr = ast.expressions[0]
-        assert isinstance(select_expr, GIQLDistance)
-        assert select_expr.args.get("stranded") is None, (
-            "= should not be treated as named parameter assignment"
-        )
+        # Act & assert
+        with pytest.raises(ParseError, match="at most 2 positional"):
+            parse_one(
+                "SELECT DISTANCE(a.interval, b.interval, stranded=true) "
+                "FROM features_a a, features_b b",
+                dialect=GIQLDialect,
+            )
 
     def test_from_arg_list_with_kwarg_syntax(self):
         """
@@ -96,3 +96,24 @@ class TestDistanceParsing:
         assert select_expr.args.get("stranded") is not None, (
             "Missing stranded parameter with => syntax"
         )
+
+    def test_from_arg_list_should_reject_unknown_named_argument(self):
+        """Test that an unrecognized named argument is rejected.
+
+        Given:
+            A GIQL query whose DISTANCE call uses a misspelled named
+            argument such as ``strandedd := true``.
+        When:
+            Parsing the query.
+        Then:
+            It should raise a ParseError naming the unexpected argument
+            — the shared ``_validate_arg_list`` helper now applies
+            DISJOIN's strict discipline uniformly across operators.
+        """
+        # Arrange, act, & assert
+        with pytest.raises(ParseError, match="unexpected named argument"):
+            parse_one(
+                "SELECT DISTANCE(a.interval, b.interval, strandedd := true) "
+                "FROM features_a a, features_b b",
+                dialect=GIQLDialect,
+            )
