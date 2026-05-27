@@ -644,7 +644,7 @@ class IntersectsBinnedJoinTransformer:
             Table configurations for column mapping
         :param bin_size:
             Bin width for the equi-join rewrite. Defaults to
-            DEFAULT_BIN_SIZE if not specified.
+            :data:`~giql.constants.DEFAULT_BIN_SIZE` if not specified.
         """
         self.tables = tables
         resolved = bin_size if bin_size is not None else DEFAULT_BIN_SIZE
@@ -842,7 +842,9 @@ class IntersectsBinnedJoinTransformer:
         from_cols = self._get_columns(from_table_name)
         join_cols = self._get_columns(join_table_name)
 
-        # Determine which INTERSECTS side maps to FROM vs JOIN table
+        # Prefix assignment encodes which INTERSECTS argument feeds the
+        # left vs right bin column of the pairs CTE, so the downstream
+        # equi-join compares matching halves regardless of FROM order.
         if left_alias == from_alias:
             l_table_name, r_table_name = from_table_name, join_table_name
             l_cols, r_cols = from_cols, join_cols
@@ -852,11 +854,9 @@ class IntersectsBinnedJoinTransformer:
             l_cols, r_cols = join_cols, from_cols
             from_prefix, join_prefix = "__giql_r", "__giql_l"
 
-        # Ensure key-only bin CTEs exist
         l_cte = self._ensure_key_binned(query, l_table_name, key_binned)
         r_cte = self._ensure_key_binned(query, r_table_name, key_binned)
 
-        # Build and attach the pairs CTE
         pairs_name = f"__giql_pairs_{pairs_idx}"
         pairs_cte = self._build_pairs_cte(pairs_name, l_cte, r_cte, l_cols, r_cols)
         existing_with = query.args.get("with_")
@@ -868,7 +868,6 @@ class IntersectsBinnedJoinTransformer:
         side = join.args.get("side")
         p_alias = f"__giql_p{pairs_idx}"
 
-        # join1: [SIDE] JOIN pairs ON from.key = pairs.from_key
         join1_on = self._build_key_match(from_alias, from_cols, p_alias, from_prefix)
         join1_kwargs: dict = {
             "this": exp.Table(
@@ -881,7 +880,6 @@ class IntersectsBinnedJoinTransformer:
             join1_kwargs["side"] = side
         join1 = exp.Join(**join1_kwargs)
 
-        # join2: [SIDE] JOIN join_table ON join.key = pairs.join_key
         join2_on = self._build_key_match(join_alias, join_cols, p_alias, join_prefix)
         if extra:
             join2_on = exp.And(this=join2_on, expression=extra)
