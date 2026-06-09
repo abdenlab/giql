@@ -87,6 +87,35 @@ def _split_named_and_positional(args):
     return kwargs, positional_args
 
 
+def _validate_arg_list(
+    op_name: str,
+    kwargs: dict,
+    positional_args: list,
+    *,
+    allowed: set[str],
+    max_positional: int,
+) -> None:
+    """Reject unknown named arguments and excess positional arguments.
+
+    Each GIQL operator's ``from_arg_list`` calls this immediately after
+    ``_split_named_and_positional`` so a typo (``stranded`` → ``strandedd``)
+    or an extra positional surfaces as a clear ``ParseError`` instead of
+    being silently dropped by ``cls(**kwargs)``.
+    """
+    unknown = set(kwargs) - allowed
+    if unknown:
+        raise ParseError(
+            f"{op_name} got unexpected named argument(s): "
+            f"{', '.join(sorted(unknown))}. "
+            f"Valid arguments: {', '.join(sorted(allowed))}."
+        )
+    if len(positional_args) > max_positional:
+        raise ParseError(
+            f"{op_name} accepts at most {max_positional} positional "
+            f"argument(s); got {len(positional_args)}."
+        )
+
+
 class GIQLCluster(exp.Func):
     """CLUSTER window function for assigning cluster IDs to overlapping intervals.
 
@@ -108,14 +137,20 @@ class GIQLCluster(exp.Func):
     @classmethod
     def from_arg_list(cls, args):
         kwargs, positional_args = _split_named_and_positional(args)
+        _validate_arg_list(
+            "CLUSTER",
+            kwargs,
+            positional_args,
+            allowed=set(cls.arg_types),
+            max_positional=2,
+        )
         if len(positional_args) > 0:
             kwargs["this"] = positional_args[0]
         if len(positional_args) > 1:
             kwargs["distance"] = positional_args[1]
         if "this" not in kwargs:
             raise ParseError(
-                "CLUSTER requires a genomic interval column as its first "
-                "argument."
+                "CLUSTER requires a genomic interval column as its first argument."
             )
         return cls(**kwargs)
 
@@ -141,14 +176,20 @@ class GIQLMerge(exp.Func):
     @classmethod
     def from_arg_list(cls, args):
         kwargs, positional_args = _split_named_and_positional(args)
+        _validate_arg_list(
+            "MERGE",
+            kwargs,
+            positional_args,
+            allowed=set(cls.arg_types),
+            max_positional=2,
+        )
         if len(positional_args) > 0:
             kwargs["this"] = positional_args[0]
         if len(positional_args) > 1:
             kwargs["distance"] = positional_args[1]
         if "this" not in kwargs:
             raise ParseError(
-                "MERGE requires a genomic interval column as its first "
-                "argument."
+                "MERGE requires a genomic interval column as its first argument."
             )
         return cls(**kwargs)
 
@@ -177,6 +218,13 @@ class GIQLDistance(exp.Func):
     @classmethod
     def from_arg_list(cls, args):
         kwargs, positional_args = _split_named_and_positional(args)
+        _validate_arg_list(
+            "DISTANCE",
+            kwargs,
+            positional_args,
+            allowed=set(cls.arg_types),
+            max_positional=2,
+        )
         if len(positional_args) >= 1:
             kwargs["this"] = positional_args[0]
         if len(positional_args) >= 2:
@@ -209,12 +257,17 @@ class GIQLNearest(exp.Func):
     @classmethod
     def from_arg_list(cls, args):
         kwargs, positional_args = _split_named_and_positional(args)
+        _validate_arg_list(
+            "NEAREST",
+            kwargs,
+            positional_args,
+            allowed=set(cls.arg_types),
+            max_positional=1,
+        )
         if len(positional_args) >= 1:
             kwargs["this"] = positional_args[0]
         if "this" not in kwargs:
-            raise ParseError(
-                "NEAREST requires a target table as its first argument."
-            )
+            raise ParseError("NEAREST requires a target table as its first argument.")
         return cls(**kwargs)
 
 
@@ -233,32 +286,34 @@ class GIQLDisjoin(exp.Func):
         DISJOIN(features, reference := other)
         DISJOIN(features, reference => other)
         DISJOIN(features, reference := (SELECT ...))
+
+        With an enclosing CTE:
+            WITH x AS (SELECT chrom, "start", "end" FROM features WHERE ...)
+            SELECT * FROM DISJOIN(x)
     """
 
     arg_types = {
-        "this": True,  # Required: target table name
+        "this": True,  # Required: target table or CTE name
         "reference": False,  # Optional: reference table/CTE name or subquery
     }
 
     @classmethod
     def from_arg_list(cls, args):
         kwargs, positional_args = _split_named_and_positional(args)
-        unknown = set(kwargs) - set(cls.arg_types)
-        if unknown:
+        _validate_arg_list(
+            "DISJOIN",
+            kwargs,
+            positional_args,
+            allowed=set(cls.arg_types),
+            max_positional=1,
+        )
+        if "this" in kwargs and len(positional_args) >= 1:
             raise ParseError(
-                f"DISJOIN got unexpected named argument(s): "
-                f"{', '.join(sorted(unknown))}. Valid arguments: reference."
-            )
-        if len(positional_args) > 1:
-            raise ParseError(
-                "DISJOIN accepts at most one positional argument (the target "
-                f"table); got {len(positional_args)}. Pass the reference set "
-                "as 'reference := ...'."
+                "DISJOIN got both a positional target and an explicit "
+                "`this :=` kwarg; pass exactly one."
             )
         if len(positional_args) >= 1:
             kwargs["this"] = positional_args[0]
         if "this" not in kwargs:
-            raise ParseError(
-                "DISJOIN requires a target table as its first argument."
-            )
+            raise ParseError("DISJOIN requires a target table as its first argument.")
         return cls(**kwargs)

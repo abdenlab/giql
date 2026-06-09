@@ -95,3 +95,23 @@ class TestClusterParsing:
                 "SELECT CLUSTER(stranded := true) AS cluster_id FROM peaks",
                 dialect=GIQLDialect,
             )
+
+    def test_from_arg_list_should_reject_unknown_named_argument(self):
+        """Test that an unrecognized named argument is rejected.
+
+        Given:
+            A GIQL query whose CLUSTER call uses a misspelled named
+            argument such as ``strandedd := true``.
+        When:
+            Parsing the query.
+        Then:
+            It should raise a ParseError naming the unexpected argument
+            — the shared ``_validate_arg_list`` helper now applies
+            DISJOIN's strict discipline uniformly across operators.
+        """
+        # Arrange, act, & assert
+        with pytest.raises(ParseError, match="unexpected named argument"):
+            parse_one(
+                "SELECT CLUSTER(interval, strandedd := true) FROM peaks",
+                dialect=GIQLDialect,
+            )

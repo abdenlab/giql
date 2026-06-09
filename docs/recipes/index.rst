@@ -21,7 +21,8 @@ Recipe Categories
 
 :doc:`disjoin`
    Splitting intervals at breakpoints, partitioning a set into
-   non-overlapping segments, and re-tiling features against a reference grid.
+   non-overlapping segments, re-tiling features against a reference grid,
+   and disjoining filtered or canonicalised subsets defined as in-query CTEs.
 
 :doc:`advanced`
    Multi-range matching, complex filtering with joins, aggregate statistics,

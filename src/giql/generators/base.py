@@ -1,3 +1,5 @@
+from dataclasses import dataclass
+
 from sqlglot import exp
 from sqlglot.generator import Generator
 
@@ -5,6 +7,7 @@ from giql.canonical import canonical_end
 from giql.canonical import canonical_start
 from giql.canonical import decanonical_end
 from giql.canonical import decanonical_start
+from giql.constants import CANONICAL_DEFAULT_COLS
 from giql.constants import DEFAULT_CHROM_COL
 from giql.constants import DEFAULT_END_COL
 from giql.constants import DEFAULT_START_COL
@@ -20,6 +23,216 @@ from giql.range_parser import ParsedRange
 from giql.range_parser import RangeParser
 from giql.table import Table
 from giql.table import Tables
+
+# Reserved identifier prefix for DISJOIN's internal CTE aliases. User-supplied
+# target/reference names or enclosing CTE names sharing this prefix would
+# collide with the generator's emitted SQL.
+_DISJOIN_RESERVED_PREFIX = "__giql_dj_"
+
+# Internal CTE aliases emitted by giqldisjoin_sql. Kept as named constants so
+# a typo in the emitted SQL produces a Python NameError rather than a
+# downstream engine "unknown CTE" error.
+#
+# - ``_DISJOIN_CTE_REF``: filtered/canonicalized reference rows.
+# - ``_DISJOIN_CTE_TGT``: target rows brought into scope.
+# - ``_DISJOIN_CTE_BP``: breakpoint positions ``(chrom, pos)``.
+# - ``_DISJOIN_CTE_CUTS``: cut points per target row.
+# - ``_DISJOIN_CTE_SEGS``: contiguous segments via ``LEAD()``.
+# - ``_DISJOIN_CTE_RS``: alias for an inlined subquery reference.
+_DISJOIN_CTE_REF = "__giql_dj_ref"
+_DISJOIN_CTE_TGT = "__giql_dj_tgt"
+_DISJOIN_CTE_BP = "__giql_dj_bp"
+_DISJOIN_CTE_CUTS = "__giql_dj_cuts"
+_DISJOIN_CTE_SEGS = "__giql_dj_segs"
+_DISJOIN_CTE_RS = "__giql_dj_rs"
+
+
+def _quote_relation(name: str) -> str:
+    """Quote a relation identifier for emission into SQL.
+
+    Escapes embedded double quotes by doubling them, matching the SQL
+    standard for delimited identifiers.
+    """
+    return '"' + name.replace('"', '""') + '"'
+
+
+class _NotABareName(Exception):
+    """Internal marker raised by :func:`_extract_bare_name`.
+
+    Callers catch this to attach operator/role-specific wording while
+    bare-name validation stays centralized.
+    """
+
+    def __init__(self, node: exp.Expression) -> None:
+        super().__init__()
+        self.node = node
+
+
+def _is_qualified_name(node: exp.Expression) -> bool:
+    """Return ``True`` when ``node`` is a db/schema-qualified Table or a
+    table-qualified Column. Used by callers to phrase ``is qualified``
+    error messages after :func:`_extract_bare_name` raises.
+    """
+    if isinstance(node, exp.Table):
+        return bool(node.db or node.catalog)
+    if isinstance(node, exp.Column):
+        return bool(node.table)
+    return False
+
+
+def _bare_name_or_none(node: exp.Expression | None) -> str | None:
+    """Return :func:`_extract_bare_name`\\ 's result, or ``None`` on failure.
+
+    Convenience wrapper for callers (e.g. ``_check_reserved_collisions``)
+    that only care whether the node *is* a bare name, not why it isn't.
+    """
+    if node is None:
+        return None
+    try:
+        return _extract_bare_name(node)
+    except _NotABareName:
+        return None
+
+
+def _extract_bare_name(node: exp.Expression) -> str:
+    """Return the bare identifier for a DISJOIN/NEAREST target or DISJOIN
+    reference node.
+
+    Quoted identifiers are normalized via sqlglot's unquoted ``.name`` so
+    ``DISJOIN("X")`` matches a same-named enclosing ``WITH "X" AS (...)``
+    whose alias is also collected unquoted.
+
+    :param node:
+        Accepts :class:`sqlglot.exp.Table`, unqualified
+        :class:`sqlglot.exp.Column`, and bare :class:`sqlglot.exp.Identifier`.
+    :return:
+        The bare identifier.
+    :raises _NotABareName:
+        If the node is a qualified column, db/schema-qualified table, or
+        any other shape that does not resolve to a single bare name.
+        Callers catch this marker to phrase operator/role-specific
+        wording.
+    """
+    if isinstance(node, exp.Table) and not (node.db or node.catalog):
+        return node.name
+    if isinstance(node, exp.Column) and not node.table:
+        return node.name
+    if isinstance(node, exp.Identifier):
+        return node.name
+    raise _NotABareName(node)
+
+
+def _enclosing_cte_names(expression: exp.Expression) -> set[str]:
+    """Collect CTE names visible from enclosing ``WITH`` clauses.
+
+    Walks the ancestor chain and gathers the aliases of every
+    :class:`exp.With`-clause CTE that is visible at ``expression``'s
+    position per SQL scoping rules: a CTE is visible from the containing
+    ``SELECT`` body, and from later siblings inside the same ``WITH``.
+    From inside a CTE body only earlier siblings are visible (forward
+    references are forbidden), and the CTE itself is visible only under
+    ``WITH RECURSIVE``.
+
+    ``WITH`` attaches to ``SELECT``, set operations (``UNION`` /
+    ``INTERSECT`` / ``EXCEPT``), and DML/DDL forms (``INSERT`` /
+    ``UPDATE`` / ``DELETE`` / ``MERGE`` / ``CREATE`` / ``SUBQUERY``);
+    reading the ``with_`` arg from every ancestor covers all of them.
+    Names are de-duplicated; innermost shadowing is not modeled —
+    callers only test membership.
+
+    :param expression:
+        Any sqlglot expression node. The walk starts at this node and
+        proceeds via ``.parent``.
+    :return:
+        Unordered set of CTE aliases visible at this node per SQL
+        scoping. Empty when no enclosing ``WITH`` exists.
+    """
+    names: set[str] = set()
+    last_cte: exp.CTE | None = None
+    node: exp.Expression | None = expression
+    while node is not None:
+        if isinstance(node, exp.CTE):
+            last_cte = node
+        with_clause = node.args.get("with_")
+        # Every WITH-bearing sqlglot node we care about stores the clause
+        # under ``with_``; surface a schema rename loudly rather than
+        # silently dropping visible CTE names. ``raise`` survives ``-O``,
+        # which strips ``assert``.
+        if with_clause is not None and not isinstance(with_clause, exp.With):
+            raise TypeError(
+                f"Expected exp.With under 'with_' arg, got {type(with_clause).__name__}"
+            )
+        if with_clause is not None:
+            ctes = list(with_clause.expressions)
+            if last_cte in ctes:
+                recursive = bool(with_clause.args.get("recursive"))
+                for cte in ctes:
+                    if cte is last_cte:
+                        if recursive and cte.alias:
+                            names.add(cte.alias)
+                        break
+                    if cte.alias:
+                        names.add(cte.alias)
+            else:
+                # Ascended from the SELECT body (or another non-CTE child);
+                # all sibling CTEs in this WITH are visible.
+                for cte in ctes:
+                    if cte.alias:
+                        names.add(cte.alias)
+        node = node.parent
+    return names
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class _ResolvedRelation:
+    """A bare-name reference resolved against registered tables or enclosing
+    CTEs.
+
+    :ivar name:
+        The unquoted identifier. Empty string for an inlined subquery
+        reference (its :attr:`_ResolvedReference.subquery` field carries
+        the AST node).
+    :ivar cols:
+        ``(chrom_col, start_col, end_col)``. Canonical defaults
+        (:data:`giql.constants.CANONICAL_DEFAULT_COLS`) for a CTE or
+        subquery relation; configured column names for a registered table.
+    :ivar table:
+        The registered :class:`Table` when the name maps to one, else
+        ``None``. ``None`` signals a CTE or subquery relation, which by
+        contract exposes canonical 0-based half-open columns.
+    """
+
+    name: str
+    cols: tuple[str, str, str]
+    table: Table | None
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class _ResolvedReference:
+    """A resolved DISJOIN reference.
+
+    :ivar relation:
+        The relation-level fields (name, cols, table). For a subquery
+        reference the relation's ``name`` is empty and its ``table`` is
+        ``None`` — :attr:`subquery` is what the emitter uses to build the
+        ``FROM`` clause.
+    :ivar subquery:
+        The inlined ``(SELECT ...)`` AST node when the user passed one as
+        ``reference := (SELECT ...)``; otherwise ``None``.
+    :ivar is_self_reference:
+        ``True`` only when both target and reference provably resolve to
+        the same registered :class:`Table`. The ``EXISTS`` coverage filter
+        in ``giqldisjoin_sql`` is then a tautology and is omitted. For a
+        CTE target the engine may inline the body twice with divergent
+        results, so the optimization is unsafe and this flag stays
+        ``False``; subquery references and CTE-shadowed names are also
+        treated as distinct because row-set identity to the target is not
+        provable from the AST.
+    """
+
+    relation: _ResolvedRelation
+    subquery: exp.Subquery | None
+    is_self_reference: bool
 
 
 class BaseGIQLGenerator(Generator):
@@ -38,6 +251,19 @@ class BaseGIQLGenerator(Generator):
     # Most databases support LATERAL joins (PostgreSQL 9.3+, DuckDB 0.7.0+)
     # SQLite does not support LATERAL, so it overrides this to False
     SUPPORTS_LATERAL = True
+
+    @staticmethod
+    def _extract_bool_param(param_expr: exp.Expression | None) -> bool:
+        """Extract boolean value from a parameter expression.
+
+        Handles exp.Boolean, exp.Literal, and string representations.
+        """
+        if not param_expr:
+            return False
+        elif isinstance(param_expr, exp.Boolean):
+            return param_expr.this
+        else:
+            return str(param_expr).upper() in ("TRUE", "1", "YES")
 
     def __init__(self, tables: Tables | None = None, **kwargs):
         super().__init__(**kwargs)
@@ -125,17 +351,33 @@ class BaseGIQLGenerator(Generator):
         - Correlated (LATERAL): Subquery for k-nearest neighbors
 
         :param expression:
-            GIQLNearest expression node
+            GIQLNearest expression node.
         :return:
-            SQL string for NEAREST operation
+            SQL string for NEAREST operation.
+        :raises ValueError:
+            If the target node is not a bare name (e.g. ``db.genes`` or a
+            subquery); if a bare target resolves to neither a registered
+            table nor an enclosing CTE; if a bare target name resolves to
+            both a registered table and an enclosing CTE (ambiguous); if
+            the target name resolves only to an enclosing CTE (CTE
+            targets are unsupported for NEAREST — register the relation
+            as a table); or if NEAREST runs in correlated mode against a
+            dialect lacking ``LATERAL`` support (SQLite).
         """
         # Detect mode
         mode = self._detect_nearest_mode(expression)
 
         # Resolve target table
-        table_name, (target_chrom, target_start, target_end) = (
-            self._resolve_target_table(expression)
+        target = self._resolve_target(
+            expression, accept_cte=False, operator_label="NEAREST"
         )
+        target_name = target.name
+        target_chrom, target_start, target_end = target.cols
+        target_table = target.table
+        # Quoted form used in emitted SQL (FROM clause and column prefixes).
+        # Quoting preserves case on engines that fold unquoted identifiers
+        # and escapes any embedded double quotes per the SQL standard.
+        target_ref = _quote_relation(target_name)
 
         # Resolve reference
         ref_chrom, ref_start, ref_end = self._resolve_nearest_reference(expression, mode)
@@ -149,8 +391,6 @@ class BaseGIQLGenerator(Generator):
 
         is_stranded = self._extract_bool_param(expression.args.get("stranded"))
         is_signed = self._extract_bool_param(expression.args.get("signed"))
-
-        target_table = self.tables.get(table_name) if self.tables else None
 
         # Resolve strand columns if stranded mode
         ref_strand = None
@@ -188,13 +428,15 @@ class BaseGIQLGenerator(Generator):
 
             # Get strand column for target table
             if target_table and target_table.strand_col:
-                target_strand = f'{table_name}."{target_table.strand_col}"'
+                target_strand = f'{target_ref}."{target_table.strand_col}"'
 
         # Distance math below assumes 0-based half-open.
         target_start_expr = canonical_start(
-            f'{table_name}."{target_start}"', target_table
+            f'{target_ref}."{target_start}"', target_table
         )
-        target_end_expr = canonical_end(f'{table_name}."{target_end}"', target_table)
+        target_end_expr = canonical_end(
+            f'{target_ref}."{target_end}"', target_table
+        )
 
         # Build distance calculation using CASE expression
         # For NEAREST: ORDER BY absolute distance, but RETURN signed distance
@@ -203,7 +445,7 @@ class BaseGIQLGenerator(Generator):
             ref_start,
             ref_end,
             ref_strand,
-            f'{table_name}."{target_chrom}"',
+            f'{target_ref}."{target_chrom}"',
             target_start_expr,
             target_end_expr,
             target_strand,
@@ -216,7 +458,7 @@ class BaseGIQLGenerator(Generator):
 
         # Build WHERE clauses
         where_clauses = [
-            f'{ref_chrom} = {table_name}."{target_chrom}"'  # Chromosome pre-filter
+            f'{ref_chrom} = {target_ref}."{target_chrom}"'  # Chromosome pre-filter
         ]
 
         # Add strand matching for stranded mode
@@ -233,8 +475,8 @@ class BaseGIQLGenerator(Generator):
             # Standalone mode: direct ORDER BY + LIMIT
             # Return signed distance, but order by absolute distance
             sql = f"""(
-                SELECT {table_name}.*, {distance_expr} AS distance
-                FROM {table_name}
+                SELECT {target_ref}.*, {distance_expr} AS distance
+                FROM {target_ref}
                 WHERE {where_sql}
                 ORDER BY {abs_distance_expr}
                 LIMIT {k_value}
@@ -255,8 +497,8 @@ class BaseGIQLGenerator(Generator):
             # LATERAL mode: subquery for k-nearest neighbors
             # Return signed distance, but order by absolute distance
             sql = f"""(
-                SELECT {table_name}.*, {distance_expr} AS distance
-                FROM {table_name}
+                SELECT {target_ref}.*, {distance_expr} AS distance
+                FROM {target_ref}
                 WHERE {where_sql}
                 ORDER BY {abs_distance_expr}
                 LIMIT {k_value}
@@ -274,47 +516,44 @@ class BaseGIQLGenerator(Generator):
         filter drops sub-intervals overlapping no reference interval. When no
         ``reference`` is given it defaults to the target set.
 
-        Coordinate-system round-tripping is handled by
-        :func:`giql.canonical.decanonical_start` /
-        :func:`giql.canonical.decanonical_end`.
+        The target may be a registered table or an enclosing-WITH CTE; a CTE
+        target is assumed canonical (0-based half-open), and its appended
+        ``disjoin_*`` columns are emitted in that convention.
 
         :param expression:
-            GIQLDisjoin expression node
+            GIQLDisjoin expression node.
         :return:
-            SQL string (a parenthesized WITH-CTE subquery) for the DISJOIN table
+            SQL string (a parenthesized WITH-CTE subquery) for the DISJOIN
+            table.
+        :raises ValueError:
+            If the target or reference name resolves to neither a registered
+            table nor an enclosing CTE; if the target or reference name uses
+            the reserved ``__giql_dj_`` prefix; or if any enclosing CTE alias
+            uses the reserved ``__giql_dj_`` prefix.
         """
-        # Resolve the target table and its genomic columns.
-        target_name, (target_chrom, target_start, target_end) = (
-            self._resolve_target_table(expression)
+        # Reject any user-visible identifier that would shadow DISJOIN's
+        # internal __giql_dj_* namespace. Run before resolution so a reserved
+        # name reports as such even when no table/CTE of that name exists.
+        self._check_reserved_collisions(expression)
+        target = self._resolve_target(
+            expression, accept_cte=True, operator_label="DISJOIN"
         )
-        target_table = self.tables.get(target_name)
+        reference = self._resolve_disjoin_reference(expression, target)
 
-        # The __giql_dj_ prefix names the operator's internal CTEs; a target
-        # table using it would collide with them.
-        if target_name.startswith("__giql_dj_"):
-            raise ValueError(
-                f"DISJOIN target {target_name!r} uses the reserved "
-                "'__giql_dj_' prefix, which names the operator's internal "
-                "CTEs. Rename the table."
-            )
+        target_name = target.name
+        target_chrom, target_start, target_end = target.cols
+        target_table = target.table
 
-        # Resolve the reference relation (defaults to the target set).
-        ref_from, ref_chrom, ref_start, ref_end, ref_table, is_self_reference = (
-            self._resolve_disjoin_reference(
-                expression,
-                target_name,
-                (target_chrom, target_start, target_end),
-                target_table,
-            )
-        )
+        ref_chrom, ref_start, ref_end = reference.relation.cols
+        ref_table = reference.relation.table
 
-        # Canonical target endpoints, qualified by the __giql_dj_tgt alias.
+        # Endpoint qualification scheme: target endpoints are qualified by the
+        # ``__giql_dj_tgt`` alias (``t``); reference endpoints appear
+        # unqualified in the breakpoint CTE and qualified by ``r`` in the
+        # coverage ``EXISTS`` filter.
         t_chrom = f't."{target_chrom}"'
         t_start = canonical_start(f't."{target_start}"', target_table)
         t_end = canonical_end(f't."{target_end}"', target_table)
-
-        # Canonical reference endpoints: unqualified for the breakpoint CTE,
-        # qualified by 'r' for the coverage EXISTS filter.
         bp_start = canonical_start(f'"{ref_start}"', ref_table)
         bp_end = canonical_end(f'"{ref_end}"', ref_table)
         r_start = canonical_start(f'r."{ref_start}"', ref_table)
@@ -326,54 +565,63 @@ class BaseGIQLGenerator(Generator):
         out_start = decanonical_start("s.seg_start", target_table)
         out_end = decanonical_end("s.seg_end", target_table)
 
-        # Build the WITH clause one named fragment per __giql_dj_* CTE so each
-        # block reads on its own. The `seg_end > seg_start` guard in the final
-        # WHERE is belt-and-suspenders: UNION already dedupes cut positions, so
-        # LEAD cannot produce a zero-length segment unless it becomes UNION ALL.
-        ref_cte = f"__giql_dj_ref AS (SELECT * FROM {ref_from})"
-        tgt_cte = f"__giql_dj_tgt AS (SELECT * FROM {target_name})"
+        # Build the FROM clause for the reference CTE. A subquery reference is
+        # aliased with the reserved ``__giql_dj_rs`` so downstream column refs
+        # resolve unambiguously; bare references quote the relation name.
+        if reference.subquery is not None:
+            ref_from = f"{self.sql(reference.subquery)} AS {_DISJOIN_CTE_RS}"
+        else:
+            ref_from = _quote_relation(reference.relation.name)
+
+        ref_cte = f"{_DISJOIN_CTE_REF} AS (SELECT * FROM {ref_from})"
+        tgt_cte = f"{_DISJOIN_CTE_TGT} AS (SELECT * FROM {_quote_relation(target_name)})"
         bp_cte = (
-            "__giql_dj_bp AS ("
-            f'SELECT "{ref_chrom}" AS chrom, {bp_start} AS pos FROM __giql_dj_ref '
+            f"{_DISJOIN_CTE_BP} AS ("
+            f'SELECT "{ref_chrom}" AS chrom, {bp_start} AS pos '
+            f"FROM {_DISJOIN_CTE_REF} "
             "UNION "
-            f'SELECT "{ref_chrom}" AS chrom, {bp_end} AS pos FROM __giql_dj_ref)'
+            f'SELECT "{ref_chrom}" AS chrom, {bp_end} AS pos '
+            f"FROM {_DISJOIN_CTE_REF})"
         )
         cuts_cte = (
-            "__giql_dj_cuts AS ("
+            f"{_DISJOIN_CTE_CUTS} AS ("
             f'SELECT t."{target_chrom}" AS kc, t."{target_start}" AS ks, '
-            f't."{target_end}" AS ke, {t_start} AS pos FROM __giql_dj_tgt AS t '
+            f't."{target_end}" AS ke, {t_start} AS pos '
+            f"FROM {_DISJOIN_CTE_TGT} AS t "
             "UNION "
             f'SELECT t."{target_chrom}", t."{target_start}", t."{target_end}", '
-            f"{t_end} FROM __giql_dj_tgt AS t "
+            f"{t_end} FROM {_DISJOIN_CTE_TGT} AS t "
             "UNION "
             f'SELECT t."{target_chrom}", t."{target_start}", t."{target_end}", '
-            "bp.pos FROM __giql_dj_tgt AS t JOIN __giql_dj_bp AS bp "
+            f"bp.pos FROM {_DISJOIN_CTE_TGT} AS t JOIN {_DISJOIN_CTE_BP} AS bp "
             f"ON bp.chrom = {t_chrom} AND bp.pos > {t_start} "
             f"AND bp.pos < {t_end})"
         )
         segs_cte = (
-            "__giql_dj_segs AS ("
+            f"{_DISJOIN_CTE_SEGS} AS ("
             "SELECT kc, ks, ke, pos AS seg_start, "
             "LEAD(pos) OVER (PARTITION BY kc, ks, ke ORDER BY pos) AS seg_end "
-            "FROM __giql_dj_cuts)"
+            f"FROM {_DISJOIN_CTE_CUTS})"
         )
-        # In self-reference mode the coverage EXISTS is provably always true:
-        # every emitted segment lies inside its parent target row, and that
-        # row is itself a member of the reference set. Skip the clause so the
-        # planner does not waste work on a no-op semi-join. The __giql_dj_ref
-        # CTE itself stays live because __giql_dj_bp still draws breakpoints
-        # from it.
+        # The ``seg_end > seg_start`` guard is belt-and-suspenders: UNION
+        # already dedupes cut positions, so LEAD cannot produce a zero-length
+        # segment unless it becomes UNION ALL.
         where_clauses = ["s.seg_end IS NOT NULL", "s.seg_end > s.seg_start"]
-        if not is_self_reference:
+        if not reference.is_self_reference:
+            # See ``_ResolvedReference.is_self_reference`` for when the
+            # coverage EXISTS may be skipped. giql does not emit dialect-
+            # specific MATERIALIZED hints, so we keep EXISTS rather than rely
+            # on engine-specific materialization guarantees for CTE bodies.
             where_clauses.append(
-                f'EXISTS (SELECT 1 FROM __giql_dj_ref AS r WHERE r."{ref_chrom}" = s.kc '
+                f"EXISTS (SELECT 1 FROM {_DISJOIN_CTE_REF} AS r "
+                f'WHERE r."{ref_chrom}" = s.kc '
                 f"AND {r_start} <= s.seg_start AND {r_end} > s.seg_start)"
             )
         where_sql = " AND ".join(where_clauses)
         final_select = (
             f"SELECT t.*, s.kc AS disjoin_chrom, {out_start} AS disjoin_start, "
-            f"{out_end} AS disjoin_end FROM __giql_dj_tgt AS t "
-            f'JOIN __giql_dj_segs AS s ON t."{target_chrom}" = s.kc '
+            f"{out_end} AS disjoin_end FROM {_DISJOIN_CTE_TGT} AS t "
+            f'JOIN {_DISJOIN_CTE_SEGS} AS s ON t."{target_chrom}" = s.kc '
             f'AND t."{target_start}" = s.ks AND t."{target_end}" = s.ke '
             f"WHERE {where_sql}"
         )
@@ -801,8 +1049,8 @@ class BaseGIQLGenerator(Generator):
             Tuple of (chromosome, start, end) or (chromosome, start, end, strand)
             Returns SQL expressions (column refs for correlated, literals for standalone)
             Endpoints are canonicalized to 0-based half-open: literal references via
-            :meth:`~giql.range_parser.RangeParser.to_zero_based_half_open`, column
-            references via :func:`giql.canonical.canonical_start` /
+            :meth:`RangeParser.to_zero_based_half_open`, column references via
+            :func:`giql.canonical.canonical_start` /
             :func:`giql.canonical.canonical_end`.
         :raises ValueError:
             If reference is missing in standalone mode or invalid format
@@ -885,186 +1133,267 @@ class BaseGIQLGenerator(Generator):
                     canonical_end(end, table),
                 )
 
-    def _resolve_target_table(
-        self, expression: GIQLNearest | GIQLDisjoin
-    ) -> tuple[str, tuple[str, str, str]]:
-        """Resolve the target table name and its genomic column references.
+    def _resolve_cte_or_registered(
+        self, name: str, expression: exp.Expression
+    ) -> _ResolvedRelation | None:
+        """Resolve ``name`` against enclosing CTEs first, then registered tables.
+
+        A CTE shadowing a registered table of the same name yields the
+        canonical default columns and ``None`` for the table config; a
+        registered table contributes its configured column names and config.
+
+        :param name:
+            Bare identifier extracted from a target or reference node.
+        :param expression:
+            The operator expression; the ancestor walk for CTE collection
+            starts from this node.
+        :return:
+            A :class:`_ResolvedRelation` on a hit, or ``None`` when the name
+            matches neither an enclosing CTE nor a registered table.
+        """
+        if name in _enclosing_cte_names(expression):
+            return _ResolvedRelation(name=name, cols=CANONICAL_DEFAULT_COLS, table=None)
+        table = self.tables.get(name)
+        if table is not None:
+            return _ResolvedRelation(
+                name=name,
+                cols=(table.chrom_col, table.start_col, table.end_col),
+                table=table,
+            )
+        return None
+
+    def _resolve_target(
+        self,
+        expression: GIQLDisjoin | GIQLNearest,
+        *,
+        accept_cte: bool,
+        operator_label: str,
+    ) -> _ResolvedRelation:
+        """Resolve a DISJOIN or NEAREST target to a :class:`_ResolvedRelation`.
+
+        When ``accept_cte`` is true (DISJOIN), a name defined by an enclosing
+        ``WITH`` shadows a same-named registered table (matching SQL scoping)
+        and is assumed to expose canonical 0-based half-open ``chrom`` /
+        ``start`` / ``end`` columns — the CTE contract is *unvalidated*: the
+        resolver does not inspect the CTE body. When ``accept_cte`` is false
+        (NEAREST), a CTE-only match is rejected, and a name matching *both*
+        an enclosing CTE and a registered table is rejected as ambiguous —
+        the emitted ``FROM "x"`` would be shadowed by the CTE under SQL
+        lexical scoping while column references resolve against the
+        registered table, so the two interpretations would silently diverge.
 
         :param expression:
-            GIQLNearest or GIQLDisjoin expression node
+            A :class:`GIQLDisjoin` or :class:`GIQLNearest` expression node.
+        :param accept_cte:
+            ``True`` for DISJOIN (CTE shadow allowed); ``False`` for NEAREST.
+        :param operator_label:
+            ``"DISJOIN"`` or ``"NEAREST"`` for operator-specific error
+            wording.
         :return:
-            Tuple of (table_name, (chromosome_col, start_col, end_col))
+            The :class:`_ResolvedRelation`. ``table`` is ``None`` for a CTE
+            target (DISJOIN only); never ``None`` for NEAREST.
         :raises ValueError:
-            If target table is not found or doesn't have genomic columns
+            If the target node is not a bare name (qualified, subquery,
+            etc.); if a bare name resolves to neither a registered table
+            nor an enclosing CTE; for NEAREST, if a bare name matches an
+            enclosing CTE (rejected) or matches both a registered table and
+            an enclosing CTE (ambiguous).
         """
-        # Extract target table from 'this' argument
-        target = expression.this
-
-        if isinstance(target, exp.Table):
-            table_name = target.name
-        elif isinstance(target, exp.Column):
-            # If it's a column reference, extract table name
-            table_name = target.table if target.table else str(target.this)
-        else:
-            # Try to extract as string
-            table_name = str(target)
-
-        table = self.tables.get(table_name)
-        if not table:
+        target_node = expression.this
+        try:
+            name = _extract_bare_name(target_node)
+        except _NotABareName:
+            if _is_qualified_name(target_node):
+                raise ValueError(
+                    f"Target {target_node.sql()!r} is qualified; "
+                    "pass a bare table or CTE name."
+                ) from None
             raise ValueError(
-                f"Target table '{table_name}' not found in tables. "
-                "Register the table before transpiling."
-            )
+                f"Target must be a bare table or CTE name; "
+                f"got {type(target_node).__name__}: {target_node.sql()!r}."
+            ) from None
 
-        # Get physical column names from table config
-        return table_name, (table.chrom_col, table.start_col, table.end_col)
+        if accept_cte:
+            resolved = self._resolve_cte_or_registered(name, expression)
+            if resolved is None:
+                raise ValueError(
+                    f"{operator_label} target {name!r} is neither a "
+                    "registered table nor a CTE defined in an enclosing "
+                    "WITH clause. Pass the relation via "
+                    "`transpile(..., tables=[...])` or define the CTE in an "
+                    "enclosing WITH clause before transpiling."
+                )
+            return resolved
+
+        # NEAREST policy: registered tables only.
+        table = self.tables.get(name)
+        is_cte = name in _enclosing_cte_names(expression)
+        if table is not None and is_cte:
+            raise ValueError(
+                f"{operator_label} target {name!r} resolves to both a "
+                "registered table and an enclosing CTE. The engine's SQL "
+                "scoping would route NEAREST's rows from the CTE while "
+                "column references resolve against the registered table — "
+                "rename one of them to disambiguate."
+            )
+        if table is not None:
+            return _ResolvedRelation(
+                name=name,
+                cols=(table.chrom_col, table.start_col, table.end_col),
+                table=table,
+            )
+        if is_cte:
+            raise ValueError(
+                f"{operator_label} target {name!r} matches an enclosing CTE. "
+                f"{operator_label} does not accept CTE targets; register the "
+                "relation as a table via `transpile(..., tables=[...])`, or "
+                "rephrase the query against a registered table."
+            )
+        raise ValueError(
+            f"Target table {name!r} not found in tables. "
+            "Register the table before transpiling."
+        )
 
     def _resolve_disjoin_reference(
         self,
         expression: GIQLDisjoin,
-        target_name: str,
-        target_cols: tuple[str, str, str],
-        target_table: Table | None,
-    ) -> tuple[str, str, str, str, Table | None, bool]:
+        target: _ResolvedRelation,
+    ) -> _ResolvedReference:
         """Resolve the reference relation for a DISJOIN query.
 
-        The reference contributes the breakpoints at which target intervals are
-        cut. When ``reference`` is omitted it defaults to the target set.
+        The reference contributes the breakpoints at which target intervals
+        are cut. When ``reference`` is omitted it defaults to the target set.
 
         A bare reference name is resolved against the query's CTEs first: a
-        name defined by an enclosing ``WITH`` clause shadows a registered table
-        of the same name (matching SQL scoping) and is assumed to expose
-        canonical 0-based half-open ``chrom`` / ``start`` / ``end`` columns. A
-        name with no such CTE but a registered table contributes that table's
-        column names and coordinate system. A name that is neither is an error.
+        name defined by an enclosing ``WITH`` clause shadows a registered
+        table of the same name (matching SQL scoping) and is assumed to
+        expose canonical 0-based half-open ``chrom`` / ``start`` / ``end``
+        columns. A name with no such CTE but a registered table contributes
+        that table's column names and coordinate system. A name that is
+        neither is an error. A ``(SELECT ...)`` subquery is inlined verbatim
+        and assumed to project the canonical columns.
 
         :param expression:
-            GIQLDisjoin expression node
-        :param target_name:
-            Resolved target table name (the default reference)
-        :param target_cols:
-            ``(chrom, start, end)`` column names of the target table
-        :param target_table:
-            Table config of the target (the default reference config)
+            GIQLDisjoin expression node.
+        :param target:
+            The already-resolved target relation (used to default the
+            reference and to determine whether the coverage EXISTS may be
+            omitted).
         :return:
-            Tuple of ``(from_clause, chrom_col, start_col, end_col, table,
-            is_self_reference)`` where ``from_clause`` is the text following
-            ``FROM`` inside the ``__giql_dj_ref`` CTE. A subquery or CTE
-            reference is assumed to expose canonical 0-based half-open
-            ``chrom`` / ``start`` / ``end`` columns, so ``table`` is ``None``
-            for those. ``is_self_reference`` is ``True`` only when the
-            reference provably resolves to the same registered relation as the
-            target (omitted reference, or a bare name equal to the target name
-            that is not shadowed by an enclosing CTE and maps to the same
-            registered table). It is ``False`` in all other cases, including
-            subquery and CTE references that may textually duplicate the
-            target.
+            A :class:`_ResolvedReference`. For a subquery reference,
+            ``subquery`` carries the AST node and ``relation.name`` is
+            empty. ``is_self_reference`` is ``True`` only when both sides
+            provably resolve to the same registered :class:`Table` — i.e.
+            an omitted reference against a registered target, or a bare
+            name that maps to the same Table instance.
         :raises ValueError:
-            If the reference is not a table name, a CTE, or a subquery, or if
-            a bare name resolves to neither a registered table nor a CTE.
+            If the reference is not a bare table/CTE name or a
+            ``(SELECT ...)`` subquery, or if a bare name resolves to neither
+            a registered table nor a CTE.
         """
         reference = expression.args.get("reference")
-        tc, ts, te = target_cols
 
         # No reference: default to the target set (single-mode).
         if reference is None:
-            return target_name, tc, ts, te, target_table, True
-
-        # Subquery reference: inline it as an aliased derived table. The
-        # subquery may textually duplicate the target, but proving equivalence
-        # is out of scope, so treat it as a distinct relation.
-        if isinstance(reference, (exp.Subquery, exp.Select, exp.Union)):
-            from_clause = f"{self.sql(reference)} AS __giql_dj_rs"
-            return (
-                from_clause,
-                DEFAULT_CHROM_COL,
-                DEFAULT_START_COL,
-                DEFAULT_END_COL,
-                None,
-                False,
+            return _ResolvedReference(
+                relation=target,
+                subquery=None,
+                is_self_reference=target.table is not None,
             )
 
-        # Anything that is not a bare table/CTE name is unsupported.
+        # Subquery reference: inline as an aliased derived table. The subquery
+        # may textually duplicate the target but proving equivalence is out
+        # of scope, so treat it as a distinct relation.
+        if isinstance(reference, exp.Subquery):
+            return _ResolvedReference(
+                relation=_ResolvedRelation(
+                    name="", cols=CANONICAL_DEFAULT_COLS, table=None
+                ),
+                subquery=reference,
+                is_self_reference=False,
+            )
+
         if not isinstance(reference, (exp.Table, exp.Column, exp.Identifier)):
             raise ValueError(
                 "DISJOIN reference must be a table name, a CTE, or a "
                 f"(SELECT ...) subquery; got {type(reference).__name__}: "
-                f"{reference}"
+                f"{reference.sql() if hasattr(reference, 'sql') else reference!r}"
             )
 
-        ref_name = reference.name
-
-        # The __giql_dj_ prefix names the operator's internal CTEs.
-        if ref_name.startswith("__giql_dj_"):
+        try:
+            ref_name = _extract_bare_name(reference)
+        except _NotABareName:
+            if _is_qualified_name(reference):
+                raise ValueError(
+                    f"Reference {reference.sql()!r} is qualified; "
+                    "pass a bare table or CTE name, or a (SELECT ...) "
+                    "subquery."
+                ) from None
             raise ValueError(
-                f"DISJOIN reference {ref_name!r} uses the reserved "
-                "'__giql_dj_' prefix, which names the operator's internal "
-                "CTEs. Rename the reference relation."
-            )
+                "Reference must be a bare table or CTE name, or a "
+                f"(SELECT ...) subquery; got {type(reference).__name__}: "
+                f"{reference.sql()!r}."
+            ) from None
 
-        # A CTE from an enclosing WITH shadows a registered table of the same
-        # name; it is assumed to expose canonical default columns. A CTE may
-        # contain rows distinct from any same-named registered table, so it is
-        # never treated as a self-reference.
-        if ref_name in self._enclosing_cte_names(expression):
-            return (
-                ref_name,
-                DEFAULT_CHROM_COL,
-                DEFAULT_START_COL,
-                DEFAULT_END_COL,
-                None,
-                False,
+        resolved = self._resolve_cte_or_registered(ref_name, expression)
+        if resolved is None:
+            raise ValueError(
+                f"DISJOIN reference {ref_name!r} is neither a registered "
+                "table nor a CTE defined in an enclosing WITH clause. Pass "
+                "the relation via `transpile(..., tables=[...])` or define "
+                "the CTE in an enclosing WITH clause before transpiling. "
+                "You may also inline the rows via `reference := (SELECT ...)`."
             )
-
-        ref_table = self.tables.get(ref_name)
-        if ref_table:
-            return (
-                ref_name,
-                ref_table.chrom_col,
-                ref_table.start_col,
-                ref_table.end_col,
-                ref_table,
-                ref_name == target_name and ref_table is target_table,
-            )
-        raise ValueError(
-            f"DISJOIN reference {ref_name!r} is neither a registered table "
-            "nor a CTE defined in this query. Register the table or define "
-            "the CTE before transpiling."
+        is_self_reference = (
+            resolved.table is not None
+            and resolved.name == target.name
+            and resolved.table is target.table
+        )
+        return _ResolvedReference(
+            relation=resolved,
+            subquery=None,
+            is_self_reference=is_self_reference,
         )
 
-    @staticmethod
-    def _extract_bool_param(param_expr: exp.Expression | None) -> bool:
-        """Extract boolean value from a parameter expression.
+    def _check_reserved_collisions(self, expression: GIQLDisjoin) -> None:
+        """Reject identifiers that would shadow DISJOIN's internal
+        ``__giql_dj_*`` CTE namespace.
 
-        Handles :class:`exp.Boolean`, :class:`exp.Literal`, and string
-        representations.
+        Three sources are checked: every CTE alias visible in an enclosing
+        ``WITH``, the target's bare name, and the reference's bare name
+        (subquery references and non-bare reference shapes are skipped —
+        their own resolution paths handle them). Surfacing the collision
+        here keeps the diagnostic at transpile time; without it the
+        duplicate-CTE name reaches the engine as an opaque parse error.
+
+        :raises ValueError:
+            If any of the three sources begins with ``__giql_dj_``.
         """
-        if not param_expr:
-            return False
-        elif isinstance(param_expr, exp.Boolean):
-            return param_expr.this
-        else:
-            return str(param_expr).upper() in ("TRUE", "1", "YES")
-
-    @staticmethod
-    def _enclosing_cte_names(expression: exp.Expression) -> set[str]:
-        """Collect CTE names visible to an expression from enclosing WITH clauses.
-
-        Walks the ancestor chain and gathers the aliases of every ``WITH``-clause
-        CTE, so a DISJOIN reference can be recognized as an in-query CTE rather
-        than a registered table.
-        """
-        names: set[str] = set()
-        node: exp.Expression | None = expression
-        while node is not None:
-            if isinstance(node, exp.Select):
-                with_clause = node.args.get("with_") or node.args.get("with")
-                if with_clause is not None:
-                    for cte in with_clause.expressions:
-                        if cte.alias:
-                            names.add(cte.alias)
-            node = node.parent
-        return names
+        prefix = _DISJOIN_RESERVED_PREFIX
+        for cte_name in _enclosing_cte_names(expression):
+            if cte_name.startswith(prefix):
+                raise ValueError(
+                    f"Enclosing CTE {cte_name!r} uses the reserved "
+                    f"{prefix!r} prefix, which names DISJOIN's internal "
+                    "CTEs — this CTE collides with DISJOIN's internal "
+                    "namespace and would shadow its emitted SQL. Rename "
+                    "the CTE before invoking DISJOIN."
+                )
+        target_name = _bare_name_or_none(expression.this)
+        if target_name and target_name.startswith(prefix):
+            raise ValueError(
+                f"DISJOIN target {target_name!r} uses the reserved "
+                f"{prefix!r} prefix, which names the operator's internal "
+                "CTEs. Rename the relation."
+            )
+        ref_node = expression.args.get("reference")
+        ref_name = _bare_name_or_none(ref_node) if ref_node is not None else None
+        if ref_name and ref_name.startswith(prefix):
+            raise ValueError(
+                f"DISJOIN reference {ref_name!r} uses the reserved "
+                f"{prefix!r} prefix, which names the operator's internal "
+                "CTEs. Rename the relation."
+            )
 
     def _get_column_refs(
         self,

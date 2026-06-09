@@ -153,3 +153,129 @@ class TestNearestTranspilation:
         assert "ELSE -(" in output, (
             f"Expected signed distance with negation for upstream, got:\n{output}"
         )
+
+    def test_giqlnearest_sql_should_raise_legacy_error_when_target_is_unknown(
+        self, tables_with_peaks_and_genes
+    ):
+        """Test that NEAREST keeps the legacy error wording for an unknown target.
+
+        Given:
+            A NEAREST call whose target is neither a registered table nor a CTE.
+        When:
+            Generating SQL via the base generator.
+        Then:
+            It should raise ``ValueError`` matching the legacy ``Target table
+            'missing' not found`` wording and not borrow DISJOIN-specific
+            phrasing — a regression guard for the DISJOIN/NEAREST branching
+            introduced for issue #105.
+        """
+        # Arrange
+        sql = (
+            "SELECT * FROM peaks "
+            "CROSS JOIN LATERAL NEAREST(missing, reference := peaks.interval, k := 1)"
+        )
+        ast = parse_one(sql, dialect=GIQLDialect)
+        generator = BaseGIQLGenerator(tables=tables_with_peaks_and_genes)
+
+        # Act & assert
+        with pytest.raises(ValueError) as excinfo:
+            generator.generate(ast)
+        message = str(excinfo.value)
+        assert "Target table 'missing' not found in tables" in message
+        assert "DISJOIN target" not in message
+        assert "CTE defined in this query" not in message
+
+    def test_giqlnearest_sql_should_reject_cte_target_with_cte_aware_message(
+        self, tables_with_peaks_and_genes
+    ):
+        """Test that NEAREST rejects a CTE target with a CTE-aware message.
+
+        Given:
+            A WITH clause defines a CTE named ``__cte`` and a NEAREST call
+            names it as its target; only ``peaks`` is a registered table.
+        When:
+            Generating SQL via the base generator.
+        Then:
+            It should raise ``ValueError`` whose message names the CTE
+            match and directs the user to register the relation as a
+            table — the legacy ``not found in tables`` wording masked the
+            in-scope CTE case.
+        """
+        # Arrange
+        sql = (
+            "WITH __cte AS (SELECT * FROM peaks) "
+            "SELECT * FROM peaks CROSS JOIN LATERAL "
+            "NEAREST(__cte, reference := peaks.interval, k := 1)"
+        )
+        ast = parse_one(sql, dialect=GIQLDialect)
+        generator = BaseGIQLGenerator(tables=tables_with_peaks_and_genes)
+
+        # Act & assert
+        with pytest.raises(ValueError) as excinfo:
+            generator.generate(ast)
+        message = str(excinfo.value)
+        assert "NEAREST target '__cte'" in message
+        assert "matches an enclosing CTE" in message
+        assert "register the relation as a table" in message
+
+    def test_giqlnearest_sql_should_raise_ambiguity_when_target_is_both_registered_and_cte(
+        self, tables_with_peaks_and_genes
+    ):
+        """Test that NEAREST rejects a target name that is both registered and a CTE.
+
+        Given:
+            A query where the NEAREST target name ``peaks`` matches both a
+            registered table and an enclosing CTE.
+        When:
+            Generating SQL via the base generator.
+        Then:
+            It should raise ``ValueError`` whose message names the
+            ambiguity and asks the user to rename one of the two
+            bindings, preventing the silent SQL-scoping shadow where the
+            CTE rows win at execution time while column expressions are
+            built against the registered table's schema.
+        """
+        # Arrange
+        sql = (
+            'WITH peaks AS (SELECT \'chr1\' AS chrom, 500 AS "start", 600 AS "end") '
+            "SELECT * FROM NEAREST(peaks, reference := 'chr1:50-60', k := 1)"
+        )
+        ast = parse_one(sql, dialect=GIQLDialect)
+        generator = BaseGIQLGenerator(tables=tables_with_peaks_and_genes)
+
+        # Act & assert
+        with pytest.raises(ValueError) as excinfo:
+            generator.generate(ast)
+        message = str(excinfo.value)
+        assert "NEAREST target 'peaks'" in message
+        assert "resolves to both" in message
+        assert "rename one of them" in message
+
+    def test_giqlnearest_sql_should_raise_without_DISJOIN_prefix_when_target_is_qualified(
+        self, tables_with_peaks_and_genes
+    ):
+        """Test that a qualified NEAREST target raises a NEAREST-prefixed error.
+
+        Given:
+            A NEAREST query whose target is db-qualified (``db.genes``).
+        When:
+            Generating SQL via the base generator.
+        Then:
+            It should raise ``ValueError`` whose message begins with
+            ``Target`` (capitalised role label) and does NOT contain
+            ``DISJOIN`` — a regression guard against the shared
+            ``_extract_bare_name`` helper hardcoding the wrong operator
+            name on the NEAREST branch.
+        """
+        # Arrange
+        sql = "SELECT * FROM NEAREST(db.genes, reference := 'chr1:1000-2000', k := 1)"
+        ast = parse_one(sql, dialect=GIQLDialect)
+        generator = BaseGIQLGenerator(tables=tables_with_peaks_and_genes)
+
+        # Act & assert
+        with pytest.raises(ValueError) as excinfo:
+            generator.generate(ast)
+        message = str(excinfo.value)
+        assert "is qualified" in message
+        assert message.startswith("Target")
+        assert "DISJOIN" not in message

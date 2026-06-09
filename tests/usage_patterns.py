@@ -141,8 +141,9 @@ class UsagePattern(Enum):
 # Reasons GIQL cannot transpile certain patterns -- attached as xfail reasons so
 # the catalogue enumerates the expected use while documenting the limitation.
 _TARGET_MUST_BE_TABLE = (
-    "GIQL requires a table-function target to be a registered base table; "
-    "a subquery or CTE in target position is rejected during target resolution"
+    "GIQL requires a table-function target to be a registered base table or "
+    "an in-query CTE; a subquery in target position is rejected during "
+    "target resolution"
 )
 _NESTED_OPERATOR_TARGET = (
     "GIQL does not recognise a nested operator call in a table-function's "
@@ -157,12 +158,8 @@ _TABLE_FUNCTION_TEMPLATES: dict[UsagePattern, str] = {
     UsagePattern.ALIASED_PROJECTION: (
         "SELECT __d.{out_start} AS s, __d.{out_end} AS e FROM {op} AS __d"
     ),
-    UsagePattern.OUTER_WHERE: (
-        "SELECT * FROM {op} WHERE {out_end} - {out_start} >= 50"
-    ),
-    UsagePattern.OUTER_ORDER_LIMIT: (
-        "SELECT * FROM {op} ORDER BY {out_start} LIMIT 1"
-    ),
+    UsagePattern.OUTER_WHERE: ("SELECT * FROM {op} WHERE {out_end} - {out_start} >= 50"),
+    UsagePattern.OUTER_ORDER_LIMIT: ("SELECT * FROM {op} ORDER BY {out_start} LIMIT 1"),
     UsagePattern.OUTER_GROUP_BY: (
         "SELECT {out_chrom}, COUNT(*) AS n FROM {op} GROUP BY {out_chrom}"
     ),
@@ -193,22 +190,16 @@ _TABLE_FUNCTION_TEMPLATES: dict[UsagePattern, str] = {
     # whereas ROW_NUMBER over a non-total ORDER BY (duplicate segments share a
     # start) would assign ranks non-deterministically and flake the snapshot.
     UsagePattern.WINDOWED_PROJECTION: (
-        "SELECT *, COUNT(*) OVER (PARTITION BY {out_chrom}) AS chrom_n "
-        "FROM {op}"
+        "SELECT *, COUNT(*) OVER (PARTITION BY {out_chrom}) AS chrom_n FROM {op}"
     ),
-    UsagePattern.WRAPPING_CTE: (
-        "WITH __u AS (SELECT * FROM {op}) SELECT * FROM __u"
-    ),
+    UsagePattern.WRAPPING_CTE: ("WITH __u AS (SELECT * FROM {op}) SELECT * FROM __u"),
     # An inner ORDER BY inside the CTE. The outer query re-selects unordered;
     # the functional suite re-sorts every result by repr, so the snapshot is
     # stable even though the inner ORDER BY is not total.
     UsagePattern.ORDERED_CTE: (
-        "WITH __o AS (SELECT * FROM {op} ORDER BY {out_start}) "
-        "SELECT * FROM __o"
+        "WITH __o AS (SELECT * FROM {op} ORDER BY {out_start}) SELECT * FROM __o"
     ),
-    UsagePattern.DERIVED_SUBQUERY: (
-        "SELECT * FROM (SELECT * FROM {op}) AS __s"
-    ),
+    UsagePattern.DERIVED_SUBQUERY: ("SELECT * FROM (SELECT * FROM {op}) AS __s"),
     # An aggregate consuming a derived-table subquery of the result. COUNT(*)
     # and SUM are order-insensitive, so the single output row is deterministic.
     UsagePattern.NESTED_AGGREGATE: (
@@ -242,18 +233,24 @@ _TABLE_FUNCTION_TEMPLATES: dict[UsagePattern, str] = {
         "AND __t.{tgt_end} > __d.{out_start}"
     ),
     UsagePattern.SET_UNION: (
-        "SELECT {out_chrom} AS c FROM {op} "
-        "UNION ALL SELECT chrom AS c FROM {join_table}"
+        "SELECT {out_chrom} AS c FROM {op} UNION ALL SELECT chrom AS c FROM {join_table}"
     ),
     UsagePattern.SET_DIFFERENCE: (
-        "SELECT {out_chrom} AS c FROM {op} "
-        "EXCEPT SELECT chrom AS c FROM {join_table}"
+        "SELECT {out_chrom} AS c FROM {op} EXCEPT SELECT chrom AS c FROM {join_table}"
     ),
-    UsagePattern.SUBQUERY_INPUT: (
-        "SELECT * FROM {name}((SELECT * FROM {target}))"
-    ),
+    UsagePattern.SUBQUERY_INPUT: ("SELECT * FROM {name}((SELECT * FROM {target}))"),
+    # The CTE projects the target's genomic columns aliased to the canonical
+    # chrom/start/end names. GIQL's CTE-target resolution assumes a canonical
+    # layout, so a custom-column target must be aliased explicitly here
+    # rather than passed through with SELECT *. Coordinate-system
+    # canonicalisation (1-based → 0-based, closed → half-open) is *not*
+    # applied: profiles whose target uses a non-default coordinate system
+    # intentionally exercise the documented unvalidated-contract path, so
+    # the matching manifest rows surface raw, un-shifted values rather than
+    # a canonical partition. Coordinate-system equivalence is covered
+    # separately by ``test_disjoin_coordinate_space``.
     UsagePattern.CTE_INPUT: (
-        "WITH __in AS (SELECT * FROM {target}) SELECT * FROM {name}(__in)"
+        "WITH __in AS (SELECT {tgt_select} FROM {target}) SELECT * FROM {name}(__in)"
     ),
     # The reference subquery projects the operand's genomic columns aliased to
     # the canonical chrom/start/end names. GIQL's subquery-reference resolution
@@ -271,8 +268,8 @@ _TABLE_FUNCTION_TEMPLATES: dict[UsagePattern, str] = {
     # the outer DISJOIN's subquery-reference resolution can resolve them.
     UsagePattern.CHAINED_REFERENCE: (
         "SELECT * FROM {name}({target}, "
-        "reference := (SELECT {out_chrom} AS chrom, {out_start} AS \"start\", "
-        "{out_end} AS \"end\" FROM {name}({ref_operand})))"
+        'reference := (SELECT {out_chrom} AS chrom, {out_start} AS "start", '
+        '{out_end} AS "end" FROM {name}({ref_operand})))'
     ),
     UsagePattern.CHAINED_COOCCURRING: (
         "SELECT __a.{out_start} FROM {op} AS __a JOIN {op} AS __b "
@@ -352,11 +349,11 @@ class OperatorUsage(abc.ABC):
 class TableFunctionUsage(OperatorUsage):
     """Usage descriptor for a FROM-clause table-function operator (e.g. DISJOIN).
 
-    ``target`` must be a registered base table -- GIQL rejects a subquery or CTE
-    in target position. ``reference`` is the optional two-table-mode reference
-    relation; ``join_table`` is a second interval table used by the ``JOINED``
-    and set-operation patterns. ``fixtures`` supplies the rows of every table
-    the patterns reference.
+    ``target`` must be a registered base table or an in-query CTE -- GIQL
+    rejects a subquery in target position. ``reference`` is the optional
+    two-table-mode reference relation; ``join_table`` is a second interval
+    table used by the ``JOINED`` and set-operation patterns. ``fixtures``
+    supplies the rows of every table the patterns reference.
 
     ``profile_id`` names the semantic edge case the descriptor exercises; it is
     the manifest-key prefix that keeps every profile's snapshot rows distinct.
@@ -404,7 +401,6 @@ class TableFunctionUsage(OperatorUsage):
     xfails: ClassVar[Mapping[UsagePattern, str]] = MappingProxyType(
         {
             UsagePattern.SUBQUERY_INPUT: _TARGET_MUST_BE_TABLE,
-            UsagePattern.CTE_INPUT: _TARGET_MUST_BE_TABLE,
             UsagePattern.CHAINED_INPUT: _NESTED_OPERATOR_TARGET,
         }
     )
@@ -466,20 +462,26 @@ class TableFunctionUsage(OperatorUsage):
         ``ref_select`` is a canonical-column projection of the reference
         operand: it aliases the operand's physical columns to ``chrom`` /
         ``start`` / ``end``, the column names GIQL's subquery / CTE reference
-        resolution requires.
+        resolution requires. ``tgt_select`` is the same canonical-column
+        projection for the target, used by the ``CTE_INPUT`` template since
+        GIQL's CTE-target resolution assumes a canonical layout. Note that
+        ``tgt_select`` aliases physical *column names* only; it does *not*
+        apply coordinate-system canonicalisation (1-based → 0-based,
+        closed → half-open), so profiles whose target uses a non-default
+        coordinate system intentionally feed un-shifted values to exercise
+        the documented unvalidated-contract behaviour.
         """
         tgt_chrom, tgt_start, tgt_end = self._genomic_columns(self.target)
         ref_chrom, ref_start, ref_end = self._genomic_columns(self.ref_operand)
-        ref_select = (
-            f'{ref_chrom} AS chrom, {ref_start} AS "start", '
-            f'{ref_end} AS "end"'
-        )
+        ref_select = f'{ref_chrom} AS chrom, {ref_start} AS "start", {ref_end} AS "end"'
+        tgt_select = f'{tgt_chrom} AS chrom, {tgt_start} AS "start", {tgt_end} AS "end"'
         return {
             "name": self.name,
             "op": self.op,
             "target": self.target,
             "ref_operand": self.ref_operand,
             "ref_select": ref_select,
+            "tgt_select": tgt_select,
             "out_chrom": self.out_chrom,
             "out_start": self.out_start,
             "out_end": self.out_end,
@@ -539,9 +541,7 @@ def templated_patterns(usage: OperatorUsage) -> tuple[UsagePattern, ...]:
     class has a template for.
     """
     templates = usage.template_table()
-    return tuple(
-        pattern for pattern in usage.canonical_patterns if pattern in templates
-    )
+    return tuple(pattern for pattern in usage.canonical_patterns if pattern in templates)
 
 
 def render(pattern: UsagePattern, usage: OperatorUsage) -> str:
@@ -578,9 +578,7 @@ def rendered_cases(usage: OperatorUsage) -> list:
     for pattern in templated_patterns(usage):
         marks = [pytest.mark.usage(pattern)]
         if pattern in usage.xfails:
-            marks.append(
-                pytest.mark.xfail(reason=usage.xfails[pattern], strict=True)
-            )
+            marks.append(pytest.mark.xfail(reason=usage.xfails[pattern], strict=True))
         cases.append(
             pytest.param(
                 pattern,

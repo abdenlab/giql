@@ -59,12 +59,19 @@ Syntax
    -- The reference may be a subquery
    SELECT * FROM DISJOIN(features, reference := (SELECT * FROM mask))
 
+   -- The target may be a CTE assembled in the same query
+   WITH x AS (SELECT chrom, "start", "end" FROM features WHERE chrom = 'chr1')
+   SELECT * FROM DISJOIN(x)
+
 Parameters
 ~~~~~~~~~~
 
 **target**
-   The table of intervals to split. Must be a table registered with the
-   transpiler so its genomic columns can be resolved.
+   The set of intervals to split. May be a registered table (whose configured
+   genomic columns are used) or a CTE defined in an enclosing ``WITH`` clause
+   (assumed to expose canonical 0-based half-open ``chrom`` / ``start`` /
+   ``end`` columns). A CTE shadows a registered table of the same name,
+   matching SQL scoping. A bare name that is neither is rejected.
 
 **reference** *(optional)*
    A registered table, a CTE defined in the same query, or a ``(SELECT ...)``
@@ -96,6 +103,13 @@ target entirely, not merely trim it.
    silently renames the second, so ``SELECT disjoin_start`` then resolves to
    the passed-through parent column rather than the computed sub-interval.
    Rename the conflicting target column before the call.
+
+.. note::
+
+   ``DISJOIN`` reserves identifiers beginning with ``__giql_dj_`` for its
+   internal CTEs. A target, reference, or enclosing CTE that starts with
+   this prefix is rejected at transpile time -- rename the relation before
+   the call.
 
 Examples
 ~~~~~~~~
@@ -150,7 +164,9 @@ breakpoint ``20``:
    target table's coordinate system -- the same convention as its
    passed-through ``start`` / ``end`` columns, so every column of an output row
    shares one convention. Cut positions are computed canonically inside the
-   operator; only their final representation follows the target table.
+   operator; only their final representation follows the target table. A CTE
+   target is assumed canonical (0-based half-open), so its appended
+   ``disjoin_*`` columns are emitted canonically as well.
 
 .. note::
 
@@ -158,6 +174,15 @@ breakpoint ``20``:
    interval cuts a target interval regardless of either one's strand. To
    disjoin per strand, filter the target and reference to a single strand
    before the call.
+
+.. note::
+
+   Unlike ``DISJOIN``, ``NEAREST`` does not accept a CTE as its target -- only
+   a registered table. Naming an in-query CTE in ``NEAREST(...)`` raises a
+   transpilation error suggesting ``DISJOIN`` if a CTE target is desired.
+
+See also :doc:`../recipes/disjoin` for end-to-end recipes, including the
+CTE-target patterns for filtering and canonicalisation.
 
 Related Operators
 ~~~~~~~~~~~~~~~~~

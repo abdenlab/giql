@@ -126,16 +126,28 @@ OPERATORS: dict[str, dict[str, Any]] = {
     "DISJOIN": {
         "category": "set-operation",
         "description": "Split genomic intervals into sub-intervals at reference breakpoints",
-        "syntax": "SELECT * FROM DISJOIN(target, reference := refs)",
+        "syntax": "SELECT * FROM DISJOIN(target_or_cte, reference := refs)",
         "parameters": [
-            {"name": "target", "description": "Table of intervals to split"},
+            {
+                "name": "target",
+                "description": (
+                    "Registered table or in-query CTE of intervals to split. A "
+                    "CTE shadows a same-named registered table and is assumed "
+                    "to expose canonical 0-based half-open chrom/start/end "
+                    "columns."
+                ),
+            },
             {
                 "name": "reference",
-                "description": "Table, CTE, or subquery supplying breakpoints (defaults to target)",
+                "description": (
+                    "Table, CTE, or subquery supplying breakpoints (defaults "
+                    "to target). A CTE or subquery is assumed to expose "
+                    "canonical 0-based half-open chrom/start/end columns."
+                ),
             },
         ],
         "returns": "Each target row with the sub-interval appended (disjoin_chrom, disjoin_start, disjoin_end)",
-        "example": "SELECT * FROM DISJOIN(features, reference := mask)",
+        "example": "SELECT * FROM DISJOIN(features, reference := other)",
         "doc_file": "dialect/set-operators.rst",
     },
     "ANY": {
@@ -453,6 +465,7 @@ Set Operations
 --------------
 DISJOIN - Split intervals at reference breakpoints
   SELECT * FROM DISJOIN(target, reference := refs)
+  -- target may also be a CTE defined in an enclosing WITH clause
 
 Set Quantifiers
 ---------------
