@@ -22,15 +22,18 @@ pass closes with a validation boundary (:func:`validate_operator_refs`) that
 asserts every operator slot carries well-formed resolution metadata, mirroring
 ``sqlglot``'s ``validate_qualify_columns`` and Spark's ``CheckAnalysis``.
 
-Scope note (epic #114, steps 1-2)
+Scope note (epic #114, steps 1-3)
 ---------------------------------
 The pass is behavior-preserving. DISJOIN's emitter
-(``BaseGIQLGenerator.giqldisjoin_sql``) consumes the attached metadata (step 2);
-the remaining operators still use the generator's legacy resolver paths and
-ignore everything attached here until their port issues land. The resolution
-semantics computed for the table-shaped reference slots mirror the generator's
-historical ``_resolve_target_table`` / ``_resolve_disjoin_reference`` /
-``_enclosing_cte_names`` behavior exactly (the latter two now live only here).
+(``BaseGIQLGenerator.giqldisjoin_sql``, step 2) and NEAREST's emitter
+(``BaseGIQLGenerator.giqlnearest_sql``, step 3) consume the attached metadata;
+DISTANCE and the spatial predicates still use the generator's legacy resolver
+paths and ignore everything attached here until their port issues land. The
+resolution semantics computed here mirror the generator's historical
+``_resolve_target_table`` / ``_resolve_disjoin_reference`` /
+``_enclosing_cte_names`` (DISJOIN) and ``_resolve_nearest_reference`` /
+``_find_outer_table_in_lateral_join`` (NEAREST) behavior exactly; all of those
+helpers now live only here.
 
 Two consequences of the zero-behavior-change constraint shape the
 implementation:
@@ -40,17 +43,19 @@ implementation:
   prefix, unsupported reference shape) the pass simply leaves that slot
   unresolved and the generator raises its existing error exactly as before.
   Promoting these into GIQL-level diagnostics is a later epic step.
-* Only *reference slots* — slots whose accepted shapes are the table
-  trichotomy (DISJOIN ``this``/``reference`` and NEAREST ``this``) — are
-  resolved to a :class:`ResolvedRef` here. The column / literal /
-  implicit-outer slots of NEAREST, DISTANCE, and the spatial predicates are
-  declared on the expression classes but their resolution metadata type is
-  designed by the per-operator port issues (#118, #119, #120).
+* Table-shaped *reference slots* (DISJOIN ``this``/``reference`` and NEAREST
+  ``this``) resolve to a :class:`ResolvedRef`. NEAREST's ``reference`` slot —
+  whose accepted shapes are the non-table literal-range / column /
+  implicit-outer forms — resolves to a :class:`ResolvedInterval` (epic #114,
+  step 3). DISTANCE and the spatial predicates still declare their column /
+  literal slots but defer resolution to their port issues (#119, #120), which
+  reuse :class:`ResolvedInterval` and :class:`SlotDeferral`.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from dataclasses import field
 from dataclasses import replace
 from typing import Literal
 
@@ -61,6 +66,7 @@ from sqlglot.optimizer.scope import traverse_scope
 from giql.constants import DEFAULT_CHROM_COL
 from giql.constants import DEFAULT_END_COL
 from giql.constants import DEFAULT_START_COL
+from giql.constants import DEFAULT_STRAND_COL
 from giql.expressions import Contains
 from giql.expressions import GIQLDisjoin
 from giql.expressions import GIQLDistance
@@ -69,13 +75,17 @@ from giql.expressions import Intersects
 from giql.expressions import SlotSpec
 from giql.expressions import SpatialSetPredicate
 from giql.expressions import Within
+from giql.range_parser import RangeParser
 from giql.table import Table
 from giql.table import Tables
 
 __all__ = [
     "META_KEY",
     "RefKind",
+    "IntervalKind",
     "ResolvedRef",
+    "ResolvedInterval",
+    "SlotDeferral",
     "OperatorResolution",
     "ResolutionError",
     "resolve_operator_refs",
@@ -90,6 +100,14 @@ META_KEY = "giql"
 #: The kinds a resolved reference slot can take — the registered-table / CTE /
 #: subquery trichotomy that ``sqlglot``'s ``scope.sources`` distinguishes.
 RefKind = Literal["registered_table", "cte", "subquery"]
+
+#: The kinds a resolved *interval* slot can take. Unlike a :data:`RefKind`, an
+#: interval slot does not resolve to a whole relation but to a column-qualified
+#: genomic interval (``column`` / ``implicit_outer``) or a parsed literal range
+#: (``literal_range``). These are the non-table shapes NEAREST's ``reference``
+#: slot accepts; DISTANCE and the spatial predicates (#119/#120) resolve the
+#: same shapes onto the same :class:`ResolvedInterval` type.
+IntervalKind = Literal["literal_range", "column", "implicit_outer"]
 
 #: Canonical default genomic column names. A CTE or subquery reference is
 #: assumed (in the existing generator and here) to expose canonical
@@ -159,6 +177,96 @@ class ResolvedRef:
 
 
 @dataclass(frozen=True, slots=True)
+class ResolvedInterval:
+    """Resolved metadata for one non-table interval operator slot.
+
+    Where :class:`ResolvedRef` resolves a slot to a whole relation, a
+    ``ResolvedInterval`` resolves a slot to a single genomic interval expressed
+    as SQL fragments — either column references qualified by a relation alias
+    (``column`` / ``implicit_outer``) or the literal endpoints of a parsed
+    genomic range (``literal_range``). NEAREST's ``reference`` slot is the first
+    consumer; DISTANCE's two operands and the spatial predicates' column / range
+    slots (#119, #120) resolve onto this same type.
+
+    Coordinate canonicalization deliberately stays in the emitter for now
+    (epic #114 step 8 / #123). The ``start`` / ``end`` fields therefore carry
+    the *raw, un-canonicalized* column SQL for the ``column`` /
+    ``implicit_outer`` kinds — the emitter wraps them with
+    :func:`giql.canonical.canonical_start` / ``canonical_end`` using
+    :attr:`table`. For the ``literal_range`` kind the endpoints are already
+    canonical 0-based half-open integer literals (parsed via
+    :meth:`~giql.range_parser.ParsedRange.to_zero_based_half_open`) and
+    :attr:`table` is ``None``; the emitter uses them verbatim.
+
+    Attributes
+    ----------
+    kind : IntervalKind
+        Whether the interval came from a literal range, an explicit column
+        reference, or an implicit LATERAL outer relation.
+    chrom : str
+        SQL fragment for the chromosome — a quoted literal (``'chr1'``) for a
+        ``literal_range`` or a qualified column (``alias."chrom"``) otherwise.
+    start : str
+        SQL fragment for the start endpoint. Canonical literal for a
+        ``literal_range``; raw column SQL (to be canonicalized by the emitter)
+        otherwise.
+    end : str
+        SQL fragment for the end endpoint, mirroring :attr:`start`.
+    strand : str | None
+        SQL fragment for the strand — a quoted literal for a ``literal_range``
+        (``None`` when the range carries no strand), a qualified column for an
+        explicit ``column`` reference (always present), or a qualified column
+        for an ``implicit_outer`` reference only when the outer table declares a
+        strand column (``None`` otherwise). The emitter reads it only in
+        stranded mode.
+    table : Table | None
+        The :class:`~giql.table.Table` config backing a ``column`` /
+        ``implicit_outer`` interval, carried so the emitter can canonicalize the
+        endpoints; ``None`` for a ``literal_range`` (already canonical) or when
+        the qualifier resolves to no registered table.
+    """
+
+    kind: IntervalKind
+    chrom: str
+    start: str
+    end: str
+    strand: str | None
+    table: Table | None
+
+
+@dataclass(frozen=True, slots=True)
+class SlotDeferral:
+    """Why a slot was left unresolved, so the emitter raises the right error.
+
+    The resolver is behavior-preserving during the epic #114 migration: when a
+    slot cannot be resolved it is *deferred* and the generator re-raises its
+    historical diagnostic. Some of those diagnostics need information the
+    emitter can no longer recompute on its own (the resolver moved the relevant
+    scope/ancestor walk out of the generator). A ``SlotDeferral`` carries that
+    information forward.
+
+    NEAREST's implicit-outer reference is the motivating case: distinguishing
+    "no outer relation found in the LATERAL context" from "outer relation found
+    but not registered" requires the ancestor walk that now lives in this pass,
+    so the resolver records which failure occurred and, for the latter, the
+    offending relation label. DISTANCE and the spatial predicates (#119/#120)
+    reuse this channel for their own deferred-shape diagnostics.
+
+    Attributes
+    ----------
+    reason : str
+        A stable machine token naming the deferral cause (e.g.
+        ``"implicit_outer_missing"``, ``"implicit_outer_unregistered"``).
+    detail : str | None
+        Optional supporting datum for the emitter's message (e.g. the outer
+        relation label for ``"implicit_outer_unregistered"``).
+    """
+
+    reason: str
+    detail: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class OperatorResolution:
     """Resolution metadata attached to a single GIQL operator node.
 
@@ -166,19 +274,31 @@ class OperatorResolution:
     ----------
     operator : str
         The operator expression class name (e.g. ``"GIQLDisjoin"``).
-    slots : dict[str, ResolvedRef]
+    slots : dict[str, ResolvedRef | ResolvedInterval]
         Mapping from a slot's :attr:`~giql.expressions.SlotSpec.arg` key to its
-        resolved :class:`ResolvedRef`. Only successfully resolved reference
-        slots appear; a slot left out was either not a reference slot or could
-        not be resolved (and the generator will raise its existing error).
+        resolved metadata — a :class:`ResolvedRef` for a table-shaped reference
+        slot, or a :class:`ResolvedInterval` for an interval slot. Only
+        successfully resolved slots appear; a slot left out was either not a
+        resolvable slot or could not be resolved (and the generator raises its
+        existing error, possibly aided by :attr:`deferrals`).
+    deferrals : dict[str, SlotDeferral]
+        Mapping from a slot key to a :class:`SlotDeferral` recording why the
+        slot was deferred, when the emitter needs that context to raise the
+        historical diagnostic verbatim. Empty for slots that resolved or whose
+        deferral the emitter can reclassify unaided.
     """
 
     operator: str
-    slots: dict[str, ResolvedRef]
+    slots: dict[str, ResolvedRef | ResolvedInterval]
+    deferrals: dict[str, SlotDeferral] = field(default_factory=dict)
 
-    def slot(self, arg: str) -> ResolvedRef | None:
-        """Return the resolved reference for slot *arg*, or ``None``."""
+    def slot(self, arg: str) -> ResolvedRef | ResolvedInterval | None:
+        """Return the resolved metadata for slot *arg*, or ``None``."""
         return self.slots.get(arg)
+
+    def deferral(self, arg: str) -> SlotDeferral | None:
+        """Return the deferral recorded for slot *arg*, or ``None``."""
+        return self.deferrals.get(arg)
 
 
 def resolve_operator_refs(expression: exp.Expression, tables: Tables) -> exp.Expression:
@@ -244,7 +364,8 @@ def _resolve_operator(
     node: exp.Expression, tables: Tables, cte_names: frozenset[str]
 ) -> None:
     """Resolve *node*'s reference slots and attach an :class:`OperatorResolution`."""
-    slots: dict[str, ResolvedRef] = {}
+    slots: dict[str, ResolvedRef | ResolvedInterval] = {}
+    deferrals: dict[str, SlotDeferral] = {}
 
     if isinstance(node, GIQLDisjoin):
         target_ref = _resolve_target(node.this, tables)
@@ -258,11 +379,20 @@ def _resolve_operator(
         target_ref = _resolve_target(node.this, tables)
         if target_ref is not None:
             slots["this"] = target_ref
+        # The reference slot resolves independently of the target — a literal
+        # range parses without any registered table, and an implicit-outer
+        # reference resolves against the enclosing scope. The interval and the
+        # deferral are mutually exclusive (one is always ``None``).
+        interval, deferral = _resolve_nearest_reference(node, tables)
+        if interval is not None:
+            slots["reference"] = interval
+        if deferral is not None:
+            deferrals["reference"] = deferral
     # DISTANCE and the spatial predicates declare only column / literal slots,
     # whose resolution metadata is designed by their port issues; the pass
     # attaches an (empty-slot) resolution so every operator carries metadata.
 
-    node.meta[META_KEY] = OperatorResolution(type(node).__name__, slots)
+    node.meta[META_KEY] = OperatorResolution(type(node).__name__, slots, deferrals)
 
 
 def _target_name(target: exp.Expression) -> str:
@@ -367,6 +497,237 @@ def _resolve_disjoin_reference(
     return None
 
 
+def _resolve_nearest_reference(
+    node: GIQLNearest, tables: Tables
+) -> tuple[ResolvedInterval | None, SlotDeferral | None]:
+    """Resolve a NEAREST ``reference`` slot to a :class:`ResolvedInterval`.
+
+    Ported here (epic #114, step 3) from the generator's historical
+    ``_resolve_nearest_reference`` / ``_find_outer_table_in_lateral_join``. The
+    accepted shapes are declarative on :class:`giql.expressions.GIQLNearest`:
+
+    * **literal range** — a quoted genomic-range string, parsed to canonical
+      0-based half-open literal endpoints.
+    * **column reference** — an explicit ``alias.col`` interval, resolved
+      against the enclosing SELECT's ``FROM`` / ``JOIN`` aliases exactly as the
+      generator's ``select_sql`` builds ``_alias_to_table`` / ``_current_table``.
+    * **implicit LATERAL outer** — no reference given, resolved to the outer
+      relation of the enclosing ``CROSS JOIN LATERAL`` via the same ancestor
+      walk the generator used.
+
+    Returns ``(interval, None)`` on success or ``(None, deferral)`` when the
+    slot cannot be resolved; the generator then re-raises its historical error
+    (a ``None`` deferral means the emitter reclassifies the failure unaided, as
+    for a literal range that fails to parse).
+    """
+    reference = node.args.get("reference")
+
+    if reference is None:
+        return _resolve_implicit_outer(node, tables)
+
+    # Literal genomic-range string (e.g. 'chr1:1000-2000'). sqlglot parses it as
+    # a string Literal; the generator detected it by the leading quote on the
+    # rendered SQL.
+    if isinstance(reference, exp.Literal) and reference.is_string:
+        return _resolve_literal_range(reference.name)
+
+    # Explicit column reference (e.g. peaks.interval).
+    if isinstance(reference, exp.Column):
+        return _resolve_column_interval(node, reference.table or None, tables)
+
+    # Fallback for any other shape: mirror the generator's string-level
+    # classification on the rendered reference (quote prefix => literal,
+    # otherwise a possibly-qualified column).
+    rendered = reference.sql()
+    if rendered.startswith("'") or rendered.startswith('"'):
+        return _resolve_literal_range(rendered.strip("'\""))
+    qualifier = rendered.rsplit(".", 1)[0] if "." in rendered else None
+    return _resolve_column_interval(node, qualifier, tables)
+
+
+def _resolve_literal_range(
+    range_str: str,
+) -> tuple[ResolvedInterval | None, SlotDeferral | None]:
+    """Resolve a literal genomic-range reference to canonical literal endpoints.
+
+    Defers (``(None, None)``) when the range fails to parse; the generator
+    re-parses and raises the historical "Could not parse reference genomic
+    range" diagnostic with the original exception text.
+    """
+    try:
+        parsed = RangeParser.parse(range_str).to_zero_based_half_open()
+    except Exception:
+        return None, None
+    strand = f"'{parsed.strand}'" if parsed.strand else None
+    return (
+        ResolvedInterval(
+            kind="literal_range",
+            chrom=f"'{parsed.chromosome}'",
+            start=str(parsed.start),
+            end=str(parsed.end),
+            strand=strand,
+            table=None,
+        ),
+        None,
+    )
+
+
+def _resolve_column_interval(
+    node: GIQLNearest, qualifier: str | None, tables: Tables
+) -> tuple[ResolvedInterval, None]:
+    """Resolve an explicit column reference to a column :class:`ResolvedInterval`.
+
+    Mirrors the generator's ``_get_column_refs`` / ``_resolve_table`` for an
+    explicit reference: the *qualifier* (the column's relation alias) is kept
+    verbatim for output, while the backing :class:`~giql.table.Table` — and thus
+    the physical column names and coordinate system — is looked up by resolving
+    that alias through the enclosing SELECT's alias map. An unresolved qualifier
+    falls back to default column names and no table (so the emitter applies no
+    canonicalization), exactly as the generator did. The strand column is always
+    emitted for an explicit reference, matching ``include_strand=True``.
+    """
+    table = _lookup_aliased_table(node, qualifier, tables)
+    chrom_col = table.chrom_col if table else DEFAULT_CHROM_COL
+    start_col = table.start_col if table else DEFAULT_START_COL
+    end_col = table.end_col if table else DEFAULT_END_COL
+    strand_col = table.strand_col if (table and table.strand_col) else DEFAULT_STRAND_COL
+    prefix = f"{qualifier}." if qualifier else ""
+    return (
+        ResolvedInterval(
+            kind="column",
+            chrom=f'{prefix}"{chrom_col}"',
+            start=f'{prefix}"{start_col}"',
+            end=f'{prefix}"{end_col}"',
+            strand=f'{prefix}"{strand_col}"',
+            table=table,
+        ),
+        None,
+    )
+
+
+def _resolve_implicit_outer(
+    node: GIQLNearest, tables: Tables
+) -> tuple[ResolvedInterval | None, SlotDeferral | None]:
+    """Resolve an implicit-outer reference from the enclosing LATERAL join.
+
+    Mirrors the generator's ``_find_outer_table_in_lateral_join`` followed by
+    its outer-table column resolution: the outer relation's label (alias or
+    name) qualifies the emitted columns, while the backing table is resolved by
+    mapping that label through the enclosing SELECT's alias map. Unlike an
+    explicit reference, the strand column is emitted only when the outer table
+    declares one — preserving the generator's divergent strand handling between
+    the two paths.
+
+    Defers with a :class:`SlotDeferral` when no outer relation is found
+    (``implicit_outer_missing``) or the outer relation is unregistered
+    (``implicit_outer_unregistered``, carrying the offending label); the
+    generator raises the matching historical diagnostic.
+    """
+    outer_label = _find_outer_table(node)
+    if outer_label is None:
+        return None, SlotDeferral("implicit_outer_missing")
+
+    alias_map, _current = _enclosing_alias_map(node)
+    actual_name = alias_map.get(outer_label, outer_label)
+    table = tables.get(actual_name)
+    if table is None:
+        return None, SlotDeferral("implicit_outer_unregistered", outer_label)
+
+    strand = f'{outer_label}."{table.strand_col}"' if table.strand_col else None
+    return (
+        ResolvedInterval(
+            kind="implicit_outer",
+            chrom=f'{outer_label}."{table.chrom_col}"',
+            start=f'{outer_label}."{table.start_col}"',
+            end=f'{outer_label}."{table.end_col}"',
+            strand=strand,
+            table=table,
+        ),
+        None,
+    )
+
+
+def _lookup_aliased_table(
+    node: GIQLNearest, qualifier: str | None, tables: Tables
+) -> Table | None:
+    """Resolve the :class:`~giql.table.Table` backing a qualified column.
+
+    Replicates the generator's ``_resolve_table`` / ``_resolve_table_name``: a
+    dotted reference's *qualifier* is mapped to a registered-table name through
+    the enclosing SELECT's alias map (with ``_current_table`` as the FROM-clause
+    fallback); an unqualified reference resolves to no table.
+    """
+    if not qualifier:
+        return None
+    alias_map, current_table = _enclosing_alias_map(node)
+    table_name = alias_map.get(qualifier, current_table)
+    return tables.get(table_name) if table_name else None
+
+
+def _enclosing_alias_map(node: exp.Expression) -> tuple[dict[str, str], str | None]:
+    """Build the alias->table map of *node*'s enclosing SELECT.
+
+    Mirrors ``BaseGIQLGenerator.select_sql`` exactly: the FROM-clause table and
+    every JOIN-clause table contribute an ``(alias or name) -> name`` entry, and
+    the FROM-clause table name is the ``_current_table`` fallback. Only direct
+    ``exp.Table`` operands participate (a LATERAL/derived join contributes
+    nothing), matching the generator. CTE and derived-table aliasing is out of
+    scope here because NEAREST column references resolve against physical
+    relations, exactly as the generator's hand-rolled map did.
+    """
+    select = node.parent_select
+    alias_to_table: dict[str, str] = {}
+    current_table: str | None = None
+    if isinstance(select, exp.Select):
+        from_ = select.args.get("from_")
+        if from_ is not None and isinstance(from_.this, exp.Table):
+            current_table = from_.this.name
+            if from_.this.alias:
+                alias_to_table[from_.this.alias] = current_table
+            else:
+                alias_to_table[current_table] = current_table
+        for join in select.args.get("joins") or []:
+            if isinstance(join.this, exp.Table):
+                name = join.this.name
+                if join.this.alias:
+                    alias_to_table[join.this.alias] = name
+                else:
+                    alias_to_table[name] = name
+    return alias_to_table, current_table
+
+
+def _find_outer_table(node: exp.Expression) -> str | None:
+    """Find the outer relation label of *node*'s enclosing LATERAL join.
+
+    Walks up from the NEAREST node through the enclosing ``exp.Lateral`` to the
+    ``exp.Join``, then reads the join-owning SELECT's FROM-clause relation,
+    returning its alias or name. A byte-for-byte port of the generator's
+    ``_find_outer_table_in_lateral_join``; returns ``None`` when no such outer
+    relation exists (e.g. a standalone NEAREST).
+    """
+    current: exp.Expression | None = node
+    while current is not None:
+        parent = current.parent
+        if parent is None:
+            break
+        if isinstance(parent, exp.Lateral):
+            current = parent
+            continue
+        if isinstance(parent, exp.Join):
+            select = parent.parent
+            if isinstance(select, exp.Select):
+                from_ = select.args.get("from_")
+                if from_ is not None:
+                    table_expr = from_.this
+                    if isinstance(table_expr, exp.Table):
+                        return table_expr.alias or table_expr.name
+                    elif isinstance(table_expr, exp.Alias):
+                        return table_expr.alias
+            break
+        current = parent
+    return None
+
+
 def validate_operator_refs(expression: exp.Expression) -> None:
     """Assert every GIQL operator carries well-formed resolution metadata.
 
@@ -407,14 +768,41 @@ def validate_operator_refs(expression: exp.Expression) -> None:
 
         specs: tuple[SlotSpec, ...] = getattr(node, "GIQL_SLOTS", ())
         for spec in specs:
-            if not spec.is_ref_slot:
+            resolved = resolution.slots.get(spec.arg)
+            if resolved is None:
+                # Deferred: an unresolved slot is handled by the generator on
+                # its existing path (and may carry a SlotDeferral).
                 continue
-            ref = resolution.slots.get(spec.arg)
-            if ref is None:
-                # Deferred: unresolved reference slots are handled by the
-                # generator on its existing path in step 1.
-                continue
-            _validate_ref(ref, spec, type(node).__name__)
+            if spec.is_ref_slot:
+                _validate_ref(resolved, spec, type(node).__name__)
+            else:
+                _validate_interval(resolved, spec, type(node).__name__)
+
+
+def _validate_interval(interval: object, spec: SlotSpec, operator: str) -> None:
+    """Assert a single resolved interval is well-formed against its slot spec."""
+    if not isinstance(interval, ResolvedInterval):
+        raise ResolutionError(
+            f"{operator} slot {spec.arg!r} carries {type(interval).__name__}, "
+            "expected ResolvedInterval."
+        )
+    if interval.kind not in spec.accepts:
+        raise ResolutionError(
+            f"{operator} slot {spec.arg!r} resolved to kind {interval.kind!r}, "
+            f"which is not accepted by the slot (accepts {sorted(spec.accepts)})."
+        )
+    if not all(
+        isinstance(part, str) for part in (interval.chrom, interval.start, interval.end)
+    ):
+        raise ResolutionError(
+            f"{operator} slot {spec.arg!r} has malformed interval endpoints; "
+            "expected SQL fragment strings for chrom/start/end."
+        )
+    if interval.kind == "literal_range" and interval.table is not None:
+        raise ResolutionError(
+            f"{operator} slot {spec.arg!r} resolved to a literal_range but "
+            "carries a Table config; literal ranges are already canonical."
+        )
 
 
 def _validate_ref(ref: object, spec: SlotSpec, operator: str) -> None:

@@ -20,7 +20,9 @@ from giql.range_parser import ParsedRange
 from giql.range_parser import RangeParser
 from giql.resolver import META_KEY
 from giql.resolver import OperatorResolution
+from giql.resolver import ResolvedInterval
 from giql.resolver import ResolvedRef
+from giql.resolver import resolve_operator_refs
 from giql.table import Table
 from giql.table import Tables
 
@@ -135,13 +137,42 @@ class BaseGIQLGenerator(Generator):
         # Detect mode
         mode = self._detect_nearest_mode(expression)
 
-        # Resolve target table
-        table_name, (target_chrom, target_start, target_end) = (
-            self._resolve_target_table(expression)
-        )
+        # Unpack the resolution metadata attached by ResolveOperatorRefs (pass 1).
+        resolution = self._nearest_resolution(expression)
 
-        # Resolve reference
-        ref_chrom, ref_start, ref_end = self._resolve_nearest_reference(expression, mode)
+        # Target (already a registered-table ResolvedRef from the pass). An
+        # unresolved target means it is not a registered table; raise the
+        # historical diagnostic.
+        target_ref = resolution.slot("this") if resolution is not None else None
+        if not isinstance(target_ref, ResolvedRef):
+            target = expression.this
+            if isinstance(target, exp.Table):
+                target_name = target.name
+            elif isinstance(target, exp.Column):
+                target_name = target.table if target.table else str(target.this)
+            else:
+                target_name = str(target)
+            raise ValueError(
+                f"Target table '{target_name}' not found in tables. "
+                "Register the table before transpiling."
+            )
+        table_name = target_ref.name
+        target_chrom, target_start, target_end = target_ref.cols
+        target_table = target_ref.table
+
+        # Reference interval (a ResolvedInterval from the pass). An unresolved
+        # reference re-raises the generator's historical diagnostic.
+        ref = resolution.slot("reference")
+        if not isinstance(ref, ResolvedInterval):
+            self._raise_nearest_reference_error(expression, mode, resolution)
+        if ref.kind == "literal_range":
+            # Literal endpoints are already canonical 0-based half-open.
+            ref_chrom, ref_start, ref_end = ref.chrom, ref.start, ref.end
+        else:
+            # Column / implicit-outer endpoints are raw; canonicalize here.
+            ref_chrom = ref.chrom
+            ref_start = canonical_start(ref.start, ref.table)
+            ref_end = canonical_end(ref.end, ref.table)
 
         # Extract parameters
         k = expression.args.get("k")
@@ -153,43 +184,14 @@ class BaseGIQLGenerator(Generator):
         is_stranded = self._extract_bool_param(expression.args.get("stranded"))
         is_signed = self._extract_bool_param(expression.args.get("signed"))
 
-        target_table = self.tables.get(table_name) if self.tables else None
-
-        # Resolve strand columns if stranded mode
+        # Resolve strand columns if stranded mode. The reference strand is
+        # carried on the resolved interval (a literal's strand, an explicit
+        # column's strand, or the outer table's strand for an implicit
+        # reference — already gated to preserve the historical divergence).
         ref_strand = None
         target_strand = None
         if is_stranded:
-            # Get strand column for reference
-            reference = expression.args.get("reference")
-            if reference:
-                reference_sql = self.sql(reference)
-
-                # Check if reference is a literal string or column reference
-                if reference_sql.startswith("'") or reference_sql.startswith('"'):
-                    # Literal reference - parse for strand
-                    range_str = reference_sql.strip("'\"")
-                    from giql.range_parser import RangeParser
-
-                    parsed_range = RangeParser.parse(range_str).to_zero_based_half_open()
-                    if parsed_range.strand:
-                        ref_strand = f"'{parsed_range.strand}'"
-                else:
-                    # Column reference - get strand column
-                    ref_cols = self._get_column_refs(
-                        reference_sql, None, include_strand=True
-                    )
-                    if len(ref_cols) == 4:
-                        ref_strand = ref_cols[3]
-            else:
-                # Implicit reference in correlated mode - get strand from outer table
-                outer_table = self._find_outer_table_in_lateral_join(expression)
-                if outer_table and self.tables:
-                    actual_table = self._alias_to_table.get(outer_table, outer_table)
-                    table = self.tables.get(actual_table)
-                    if table and table.strand_col:
-                        ref_strand = f'{outer_table}."{table.strand_col}"'
-
-            # Get strand column for target table
+            ref_strand = ref.strand
             if target_table and target_table.strand_col:
                 target_strand = f'{table_name}."{target_table.strand_col}"'
 
@@ -729,186 +731,86 @@ class BaseGIQLGenerator(Generator):
         # (validation will catch missing reference errors later)
         return "correlated"
 
-    def _find_outer_table_in_lateral_join(self, expression: GIQLNearest) -> str | None:
-        """Find the outer table name in a LATERAL join context.
+    def _nearest_resolution(self, expression: GIQLNearest) -> OperatorResolution | None:
+        """Return the NEAREST resolution attached by ResolveOperatorRefs (pass 1).
 
-        Walks up the AST to find the JOIN clause and extracts the outer table
-        that the LATERAL subquery is correlated with.
+        The transpile pipeline attaches an
+        :class:`~giql.resolver.OperatorResolution` before generation, and it
+        survives the generator's defensive tree copy. Direct callers that invoke
+        ``generate`` / ``giqlnearest_sql`` without running the pass (notably unit
+        tests) get the metadata resolved lazily here against this generator's
+        registered tables, so the emit path always reads resolved metadata.
 
         :param expression:
             GIQLNearest expression node
         :return:
-            Table name or alias of the outer table, or None if not found
+            The attached :class:`~giql.resolver.OperatorResolution`, or ``None``
+            if resolution did not produce one.
         """
-        # Walk up the AST to find the JOIN
-        current = expression
-        while current:
-            parent = current.parent
-            if not parent:
-                break
+        resolution = expression.meta.get(META_KEY)
+        if not isinstance(resolution, OperatorResolution):
+            resolve_operator_refs(expression.root(), self.tables)
+            resolution = expression.meta.get(META_KEY)
+        return resolution if isinstance(resolution, OperatorResolution) else None
 
-            # Check if parent is a Lateral expression
-            if isinstance(parent, exp.Lateral):
-                # Continue up to find the Join
-                current = parent
-                continue
+    def _raise_nearest_reference_error(
+        self,
+        expression: GIQLNearest,
+        mode: str,
+        resolution: OperatorResolution | None,
+    ) -> None:
+        """Raise the historical diagnostic for an unresolved NEAREST reference.
 
-            # Check if parent is a Join
-            if isinstance(parent, exp.Join):
-                # The outer table is in the parent Select's FROM clause
-                # or in previous joins
-                select = parent.parent
-                if isinstance(select, exp.Select):
-                    # Get the FROM clause
-                    from_expr = select.args.get("from_")
-                    if from_expr:
-                        # Extract table from FROM
-                        table_expr = from_expr.this
-                        if isinstance(table_expr, exp.Table):
-                            # Return alias if it exists, otherwise table name
-                            return table_expr.alias or table_expr.name
-                        elif isinstance(table_expr, exp.Alias):
-                            return table_expr.alias
-                break
-
-            current = parent
-
-        return None
-
-    def _resolve_nearest_reference(
-        self, expression: GIQLNearest, mode: str
-    ) -> tuple[str, str, str] | tuple[str, str, str, str]:
-        """Resolve the reference position for NEAREST queries.
+        ResolveOperatorRefs (pass 1) defers a reference slot it cannot resolve;
+        this re-raises the generator's pre-pass error verbatim. The implicit-
+        outer failures rely on the :class:`~giql.resolver.SlotDeferral` the pass
+        records (the ancestor walk that distinguished them now lives in the
+        pass); a literal-range parse failure is reproduced by re-parsing.
 
         :param expression:
             GIQLNearest expression node
         :param mode:
             "standalone" or "correlated"
-        :return:
-            Tuple of (chromosome, start, end) or (chromosome, start, end, strand)
-            Returns SQL expressions (column refs for correlated, literals for standalone)
-            Endpoints are canonicalized to 0-based half-open: literal references via
-            :meth:`~giql.range_parser.RangeParser.to_zero_based_half_open`, column
-            references via :func:`giql.canonical.canonical_start` /
-            :func:`giql.canonical.canonical_end`.
+        :param resolution:
+            The attached resolution metadata, if any
         :raises ValueError:
-            If reference is missing in standalone mode or invalid format
+            Always — with the matching historical message
         """
         reference = expression.args.get("reference")
 
-        if mode == "standalone":
-            if not reference:
+        if reference is None:
+            # Implicit-outer reference: standalone mode (unreachable in practice,
+            # since an absent reference is classified as correlated) keeps the
+            # historical message; otherwise consult the recorded deferral.
+            if mode == "standalone":
                 raise ValueError(
                     "NEAREST in standalone mode requires explicit reference parameter"
                 )
-
-            # Get SQL representation of reference
-            reference_sql = self.sql(reference)
-
-            # Check if it's a literal range string
-            if reference_sql.startswith("'") or reference_sql.startswith('"'):
-                # Parse literal genomic range
-                range_str = reference_sql.strip("'\"")
-                try:
-                    parsed_range = RangeParser.parse(range_str).to_zero_based_half_open()
-                    # Return as SQL literals
-                    return (
-                        f"'{parsed_range.chromosome}'",
-                        str(parsed_range.start),
-                        str(parsed_range.end),
-                    )
-                except Exception as e:
-                    raise ValueError(
-                        f"Could not parse reference genomic range: "
-                        f"{range_str}. Error: {e}"
-                    )
-            else:
-                # Column reference - resolve and canonicalize
-                chrom, start, end = self._get_column_refs(reference_sql, None)
-                ref_table = self._resolve_table(reference_sql)
-                return (
-                    chrom,
-                    canonical_start(start, ref_table),
-                    canonical_end(end, ref_table),
+            deferral = (
+                resolution.deferral("reference") if resolution is not None else None
+            )
+            if deferral is not None and deferral.reason == "implicit_outer_unregistered":
+                raise ValueError(
+                    f"Outer table '{deferral.detail}' not found in tables. "
+                    "Please specify reference parameter explicitly."
                 )
-
-        else:  # correlated mode
-            if reference:
-                # Explicit reference in correlated mode (e.g., peaks.interval)
-                reference_sql = self.sql(reference)
-                chrom, start, end = self._get_column_refs(reference_sql, None)
-                ref_table = self._resolve_table(reference_sql)
-                return (
-                    chrom,
-                    canonical_start(start, ref_table),
-                    canonical_end(end, ref_table),
-                )
-            else:
-                # Implicit reference - resolve from outer table in LATERAL join
-                outer_table = self._find_outer_table_in_lateral_join(expression)
-                if not outer_table:
-                    raise ValueError(
-                        "Could not find outer table in LATERAL join context. "
-                        "Please specify reference parameter explicitly."
-                    )
-
-                # Look up the table to find the genomic column
-                # Check if outer_table is an alias
-                actual_table = self._alias_to_table.get(outer_table, outer_table)
-                table = self.tables.get(actual_table)
-
-                if not table:
-                    raise ValueError(
-                        f"Outer table '{outer_table}' not found in tables. "
-                        "Please specify reference parameter explicitly."
-                    )
-
-                # Build column references using the outer table and genomic column
-                reference_sql = f"{outer_table}.{table.genomic_col}"
-                chrom, start, end = self._get_column_refs(reference_sql, None)
-                return (
-                    chrom,
-                    canonical_start(start, table),
-                    canonical_end(end, table),
-                )
-
-    def _resolve_target_table(
-        self, expression: GIQLNearest
-    ) -> tuple[str, tuple[str, str, str]]:
-        """Resolve the target table name and its genomic column references.
-
-        DISJOIN reads its target from the ResolveOperatorRefs metadata instead
-        (see :meth:`_disjoin_resolution`); this helper remains for NEAREST
-        until its port (epic #114, step 3).
-
-        :param expression:
-            GIQLNearest expression node
-        :return:
-            Tuple of (table_name, (chromosome_col, start_col, end_col))
-        :raises ValueError:
-            If target table is not found or doesn't have genomic columns
-        """
-        # Extract target table from 'this' argument
-        target = expression.this
-
-        if isinstance(target, exp.Table):
-            table_name = target.name
-        elif isinstance(target, exp.Column):
-            # If it's a column reference, extract table name
-            table_name = target.table if target.table else str(target.this)
-        else:
-            # Try to extract as string
-            table_name = str(target)
-
-        table = self.tables.get(table_name)
-        if not table:
             raise ValueError(
-                f"Target table '{table_name}' not found in tables. "
-                "Register the table before transpiling."
+                "Could not find outer table in LATERAL join context. "
+                "Please specify reference parameter explicitly."
             )
 
-        # Get physical column names from table config
-        return table_name, (table.chrom_col, table.start_col, table.end_col)
+        # An explicit reference that deferred is a literal range that failed to
+        # parse (column references always resolve). Re-parse to surface the
+        # original parse error in the historical message.
+        reference_sql = self.sql(reference)
+        range_str = reference_sql.strip("'\"")
+        try:
+            RangeParser.parse(range_str).to_zero_based_half_open()
+        except Exception as e:
+            raise ValueError(
+                f"Could not parse reference genomic range: {range_str}. Error: {e}"
+            )
+        raise ValueError(f"Could not parse reference genomic range: {range_str}.")
 
     def _disjoin_resolution(
         self, expression: GIQLDisjoin

@@ -18,6 +18,7 @@ from giql.expressions import SpatialSetPredicate
 from giql.resolver import META_KEY
 from giql.resolver import OperatorResolution
 from giql.resolver import ResolutionError
+from giql.resolver import ResolvedInterval
 from giql.resolver import ResolvedRef
 from giql.resolver import resolve_operator_refs
 from giql.resolver import validate_operator_refs
@@ -45,6 +46,11 @@ def _tables(*names: str) -> Tables:
 def _disjoin_node(ast: exp.Expression) -> GIQLDisjoin:
     """Return the single GIQLDisjoin node reachable from an annotated AST."""
     return next(n for n in ast.walk() if isinstance(n, GIQLDisjoin))
+
+
+def _nearest_node(ast: exp.Expression) -> GIQLNearest:
+    """Return the single GIQLNearest node reachable from an annotated AST."""
+    return next(n for n in ast.walk() if isinstance(n, GIQLNearest))
 
 
 class TestResolveOperatorRefs:
@@ -278,6 +284,226 @@ class TestResolveOperatorRefs:
         assert ref.kind == "registered_table"
         assert ref.name == "genes"
 
+    def test_resolve_operator_refs_resolves_nearest_literal_reference(self):
+        """Test that a NEAREST literal-range reference resolves to canonical literals.
+
+        Given:
+            A standalone NEAREST with a literal genomic-range reference.
+        When:
+            Running the resolve pass.
+        Then:
+            It should attach a literal_range ResolvedInterval carrying quoted
+            chrom and canonical 0-based half-open endpoint literals and no Table.
+        """
+        # Arrange
+        ast = parse_one(
+            "SELECT * FROM NEAREST(genes, reference := 'chr1:1000-2000', k := 3)",
+            dialect=GIQLDialect,
+        )
+
+        # Act
+        resolve_operator_refs(ast, _tables("genes"))
+
+        # Assert
+        ref = _nearest_node(ast).meta[META_KEY].slot("reference")
+        assert ref == ResolvedInterval(
+            kind="literal_range",
+            chrom="'chr1'",
+            start="1000",
+            end="2000",
+            strand=None,
+            table=None,
+        )
+
+    def test_resolve_operator_refs_resolves_nearest_stranded_literal(self):
+        """Test that a stranded literal-range reference carries its strand literal.
+
+        Given:
+            A standalone NEAREST whose literal reference encodes a strand.
+        When:
+            Running the resolve pass.
+        Then:
+            It should attach a literal_range ResolvedInterval carrying the strand
+            as a quoted literal.
+        """
+        # Arrange
+        ast = parse_one(
+            "SELECT * FROM NEAREST(genes, reference := 'chr1:1000-2000:+', k := 3)",
+            dialect=GIQLDialect,
+        )
+
+        # Act
+        resolve_operator_refs(ast, _tables("genes"))
+
+        # Assert
+        ref = _nearest_node(ast).meta[META_KEY].slot("reference")
+        assert ref.kind == "literal_range"
+        assert ref.strand == "'+'"
+
+    def test_resolve_operator_refs_defers_unparseable_literal_reference(self):
+        """Test that an unparseable literal reference is deferred without a record.
+
+        Given:
+            A standalone NEAREST whose literal reference cannot be parsed.
+        When:
+            Running the resolve pass.
+        Then:
+            It should leave the reference slot unresolved with no deferral
+            record, so the generator re-parses and raises its historical error.
+        """
+        # Arrange
+        ast = parse_one(
+            "SELECT * FROM NEAREST(genes, reference := 'invalid_range', k := 3)",
+            dialect=GIQLDialect,
+        )
+
+        # Act
+        resolve_operator_refs(ast, _tables("genes"))
+
+        # Assert
+        resolution = _nearest_node(ast).meta[META_KEY]
+        assert resolution.slot("reference") is None
+        assert resolution.deferral("reference") is None
+
+    def test_resolve_operator_refs_resolves_nearest_column_reference(self):
+        """Test that an explicit column reference resolves to qualified columns.
+
+        Given:
+            A correlated NEAREST whose reference is an aliased outer column
+            (``p.interval`` where ``p`` aliases a registered table).
+        When:
+            Running the resolve pass.
+        Then:
+            It should attach a column ResolvedInterval whose endpoints keep the
+            alias verbatim and whose Table config comes from the aliased table.
+        """
+        # Arrange
+        ast = parse_one(
+            "SELECT * FROM peaks AS p "
+            "CROSS JOIN LATERAL NEAREST(genes, reference := p.interval, k := 3)",
+            dialect=GIQLDialect,
+        )
+
+        # Act
+        resolve_operator_refs(ast, _tables("peaks", "genes"))
+
+        # Assert
+        ref = _nearest_node(ast).meta[META_KEY].slot("reference")
+        assert ref.kind == "column"
+        assert ref.chrom == 'p."chrom"'
+        assert ref.start == 'p."start"'
+        assert ref.end == 'p."end"'
+        assert ref.strand == 'p."strand"'
+        assert ref.table is not None and ref.table.name == "peaks"
+
+    def test_resolve_operator_refs_resolves_implicit_outer_reference(self):
+        """Test that an omitted reference resolves to the LATERAL outer relation.
+
+        Given:
+            A correlated NEAREST with no reference inside a CROSS JOIN LATERAL
+            over a registered outer table.
+        When:
+            Running the resolve pass.
+        Then:
+            It should attach an implicit_outer ResolvedInterval qualified by the
+            outer relation and backed by the outer table's config.
+        """
+        # Arrange
+        ast = parse_one(
+            "SELECT * FROM peaks CROSS JOIN LATERAL NEAREST(genes, k := 3)",
+            dialect=GIQLDialect,
+        )
+
+        # Act
+        resolve_operator_refs(ast, _tables("peaks", "genes"))
+
+        # Assert
+        ref = _nearest_node(ast).meta[META_KEY].slot("reference")
+        assert ref.kind == "implicit_outer"
+        assert ref.chrom == 'peaks."chrom"'
+        assert ref.strand == 'peaks."strand"'
+        assert ref.table is not None and ref.table.name == "peaks"
+
+    def test_resolve_operator_refs_implicit_outer_omits_strand_without_column(self):
+        """Test that an implicit-outer reference omits strand when the table has none.
+
+        Given:
+            A correlated NEAREST over an outer table configured without a strand
+            column.
+        When:
+            Running the resolve pass.
+        Then:
+            It should attach an implicit_outer ResolvedInterval whose strand is
+            None, preserving the generator's divergent strand handling.
+        """
+        # Arrange
+        tables = Tables()
+        tables.register("nostr", Table("nostr", strand_col=None))
+        tables.register("genes", Table("genes"))
+        ast = parse_one(
+            "SELECT * FROM nostr CROSS JOIN LATERAL NEAREST(genes, k := 1)",
+            dialect=GIQLDialect,
+        )
+
+        # Act
+        resolve_operator_refs(ast, tables)
+
+        # Assert
+        ref = _nearest_node(ast).meta[META_KEY].slot("reference")
+        assert ref.kind == "implicit_outer"
+        assert ref.strand is None
+
+    def test_resolve_operator_refs_defers_implicit_outer_missing(self):
+        """Test that a missing LATERAL outer relation records a deferral.
+
+        Given:
+            A NEAREST with no reference and no enclosing LATERAL outer relation.
+        When:
+            Running the resolve pass.
+        Then:
+            It should leave the reference unresolved and record an
+            implicit_outer_missing deferral for the generator's error.
+        """
+        # Arrange
+        ast = parse_one(
+            "SELECT * FROM NEAREST(genes, k := 3)",
+            dialect=GIQLDialect,
+        )
+
+        # Act
+        resolve_operator_refs(ast, _tables("genes"))
+
+        # Assert
+        resolution = _nearest_node(ast).meta[META_KEY]
+        assert resolution.slot("reference") is None
+        assert resolution.deferral("reference").reason == "implicit_outer_missing"
+
+    def test_resolve_operator_refs_defers_implicit_outer_unregistered(self):
+        """Test that an unregistered LATERAL outer relation records its label.
+
+        Given:
+            A NEAREST with no reference whose enclosing LATERAL outer relation is
+            found but not registered.
+        When:
+            Running the resolve pass.
+        Then:
+            It should record an implicit_outer_unregistered deferral carrying the
+            offending outer-relation label.
+        """
+        # Arrange
+        ast = parse_one(
+            "SELECT * FROM unknown_table CROSS JOIN LATERAL NEAREST(genes, k := 3)",
+            dialect=GIQLDialect,
+        )
+
+        # Act
+        resolve_operator_refs(ast, _tables("genes"))
+
+        # Assert
+        deferral = _nearest_node(ast).meta[META_KEY].deferral("reference")
+        assert deferral.reason == "implicit_outer_unregistered"
+        assert deferral.detail == "unknown_table"
+
     def test_resolve_operator_refs_returns_same_expression(self):
         """Test that the pass annotates and returns the same AST in place.
 
@@ -372,15 +598,17 @@ class TestResolveOperatorRefs:
         assert predicate.meta[META_KEY].slots == {}
 
     def test_resolve_operator_refs_unregistered_nearest_target_left_unresolved(self):
-        """Test that an unregistered NEAREST target leaves the slot unresolved.
+        """Test that an unregistered NEAREST target leaves the target slot unresolved.
 
         Given:
-            A NEAREST whose target table is not registered.
+            A NEAREST whose target table is not registered (its literal-range
+            reference resolves independently of the target).
         When:
             Running the resolve pass.
         Then:
-            It should attach an OperatorResolution with no resolved slots,
-            deferring the error to the generator.
+            It should attach an OperatorResolution whose target slot is
+            unresolved, deferring the target error to the generator, while the
+            literal reference still resolves.
         """
         # Arrange
         ast = parse_one(
@@ -393,7 +621,8 @@ class TestResolveOperatorRefs:
 
         # Assert
         nearest = next(n for n in ast.walk() if isinstance(n, GIQLNearest))
-        assert nearest.meta[META_KEY].slots == {}
+        assert nearest.meta[META_KEY].slot("this") is None
+        assert nearest.meta[META_KEY].slot("reference").kind == "literal_range"
 
     @settings(max_examples=50)
     @given(names=st.lists(_identifiers, min_size=4, max_size=4, unique=True))
@@ -614,4 +843,94 @@ class TestValidateOperatorRefs:
 
         # Act & assert
         with pytest.raises(ResolutionError, match="expected ResolvedRef"):
+            validate_operator_refs(ast)
+
+    def test_validate_operator_refs_accepts_resolved_interval(self):
+        """Test that validation accepts a well-formed interval slot.
+
+        Given:
+            A NEAREST annotated by the resolve pass with a resolved interval
+            reference.
+        When:
+            Running validation over it.
+        Then:
+            It should not raise.
+        """
+        # Arrange
+        ast = parse_one(
+            "SELECT * FROM NEAREST(genes, reference := 'chr1:1000-2000', k := 3)",
+            dialect=GIQLDialect,
+        )
+        resolve_operator_refs(ast, _tables("genes"))
+
+        # Act & assert
+        validate_operator_refs(ast)
+
+    def test_validate_operator_refs_rejects_disallowed_interval_kind(self):
+        """Test that validation rejects an interval slot of a disallowed kind.
+
+        Given:
+            A NEAREST reference slot annotated with a ResolvedInterval whose kind
+            (a table-shaped ``registered_table``) the slot does not accept.
+        When:
+            Running validation over the tree.
+        Then:
+            It should raise a ResolutionError naming the rejected kind.
+        """
+        # Arrange
+        ast = parse_one(
+            "SELECT * FROM NEAREST(genes, reference := 'chr1:1000-2000', k := 3)",
+            dialect=GIQLDialect,
+        )
+        node = _nearest_node(ast)
+        node.meta[META_KEY] = OperatorResolution(
+            "GIQLNearest",
+            {
+                "reference": ResolvedInterval(
+                    kind="registered_table",
+                    chrom="'chr1'",
+                    start="1000",
+                    end="2000",
+                    strand=None,
+                    table=None,
+                )
+            },
+        )
+
+        # Act & assert
+        with pytest.raises(ResolutionError, match="not accepted"):
+            validate_operator_refs(ast)
+
+    def test_validate_operator_refs_rejects_non_resolvedinterval_slot_value(self):
+        """Test that validation rejects an interval slot holding the wrong type.
+
+        Given:
+            A NEAREST reference slot whose resolution metadata holds a
+            ResolvedRef instead of a ResolvedInterval.
+        When:
+            Running validation over the tree.
+        Then:
+            It should raise a ResolutionError naming the expected type.
+        """
+        # Arrange
+        ast = parse_one(
+            "SELECT * FROM NEAREST(genes, reference := 'chr1:1000-2000', k := 3)",
+            dialect=GIQLDialect,
+        )
+        node = _nearest_node(ast)
+        node.meta[META_KEY] = OperatorResolution(
+            "GIQLNearest",
+            {
+                "reference": ResolvedRef(
+                    kind="registered_table",
+                    name="genes",
+                    cols=("chrom", "start", "end"),
+                    table=Table("genes"),
+                    coverage_skippable=False,
+                )
+            },
+        )
+
+        # Act & assert
+        with pytest.raises(ResolutionError, match="expected ResolvedInterval"):
             validate_operator_refs(ast)
