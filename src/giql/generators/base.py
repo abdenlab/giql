@@ -18,6 +18,9 @@ from giql.expressions import SpatialSetPredicate
 from giql.expressions import Within
 from giql.range_parser import ParsedRange
 from giql.range_parser import RangeParser
+from giql.resolver import META_KEY
+from giql.resolver import OperatorResolution
+from giql.resolver import ResolvedRef
 from giql.table import Table
 from giql.table import Tables
 
@@ -283,30 +286,14 @@ class BaseGIQLGenerator(Generator):
         :return:
             SQL string (a parenthesized WITH-CTE subquery) for the DISJOIN table
         """
-        # Resolve the target table and its genomic columns.
-        target_name, (target_chrom, target_start, target_end) = (
-            self._resolve_target_table(expression)
-        )
-        target_table = self.tables.get(target_name)
-
-        # The __giql_dj_ prefix names the operator's internal CTEs; a target
-        # table using it would collide with them.
-        if target_name.startswith("__giql_dj_"):
-            raise ValueError(
-                f"DISJOIN target {target_name!r} uses the reserved "
-                "'__giql_dj_' prefix, which names the operator's internal "
-                "CTEs. Rename the table."
-            )
-
-        # Resolve the reference relation (defaults to the target set).
-        ref_from, ref_chrom, ref_start, ref_end, ref_table, is_self_reference = (
-            self._resolve_disjoin_reference(
-                expression,
-                target_name,
-                (target_chrom, target_start, target_end),
-                target_table,
-            )
-        )
+        # Unpack the resolution metadata attached by ResolveOperatorRefs (pass 1).
+        target_ref, ref, ref_from = self._disjoin_resolution(expression)
+        target_name = target_ref.name
+        target_chrom, target_start, target_end = target_ref.cols
+        target_table = target_ref.table
+        ref_chrom, ref_start, ref_end = ref.cols
+        ref_table = ref.table
+        is_self_reference = ref.coverage_skippable
 
         # Canonical target endpoints, qualified by the __giql_dj_tgt alias.
         t_chrom = f't."{target_chrom}"'
@@ -886,12 +873,16 @@ class BaseGIQLGenerator(Generator):
                 )
 
     def _resolve_target_table(
-        self, expression: GIQLNearest | GIQLDisjoin
+        self, expression: GIQLNearest
     ) -> tuple[str, tuple[str, str, str]]:
         """Resolve the target table name and its genomic column references.
 
+        DISJOIN reads its target from the ResolveOperatorRefs metadata instead
+        (see :meth:`_disjoin_resolution`); this helper remains for NEAREST
+        until its port (epic #114, step 3).
+
         :param expression:
-            GIQLNearest or GIQLDisjoin expression node
+            GIQLNearest expression node
         :return:
             Tuple of (table_name, (chromosome_col, start_col, end_col))
         :raises ValueError:
@@ -919,112 +910,85 @@ class BaseGIQLGenerator(Generator):
         # Get physical column names from table config
         return table_name, (table.chrom_col, table.start_col, table.end_col)
 
-    def _resolve_disjoin_reference(
-        self,
-        expression: GIQLDisjoin,
-        target_name: str,
-        target_cols: tuple[str, str, str],
-        target_table: Table | None,
-    ) -> tuple[str, str, str, str, Table | None, bool]:
-        """Resolve the reference relation for a DISJOIN query.
+    def _disjoin_resolution(
+        self, expression: GIQLDisjoin
+    ) -> tuple[ResolvedRef, ResolvedRef, str]:
+        """Unpack the DISJOIN resolution attached by ResolveOperatorRefs (pass 1).
 
-        The reference contributes the breakpoints at which target intervals are
-        cut. When ``reference`` is omitted it defaults to the target set.
+        Reads the :class:`~giql.resolver.OperatorResolution` from
+        ``expression.meta`` and returns ``(target_ref, ref, ref_from)`` where
+        ``ref_from`` is the text following ``FROM`` inside the ``__giql_dj_ref``
+        CTE. A subquery reference carries no name, so it is rendered from the
+        AST node as an aliased derived table; registered tables and CTEs are
+        selected from by name.
 
-        A bare reference name is resolved against the query's CTEs first: a
-        name defined by an enclosing ``WITH`` clause shadows a registered table
-        of the same name (matching SQL scoping) and is assumed to expose
-        canonical 0-based half-open ``chrom`` / ``start`` / ``end`` columns. A
-        name with no such CTE but a registered table contributes that table's
-        column names and coordinate system. A name that is neither is an error.
+        The resolver pass deliberately leaves unresolvable slots unresolved
+        (unregistered target; unsupported reference node type; reference name
+        using the reserved ``__giql_dj_`` prefix or matching neither a
+        registered table nor an in-query CTE). For those, and for a target name
+        using the reserved prefix (which the resolver does resolve), this
+        re-raises the generator's historical diagnostics verbatim.
 
         :param expression:
             GIQLDisjoin expression node
-        :param target_name:
-            Resolved target table name (the default reference)
-        :param target_cols:
-            ``(chrom, start, end)`` column names of the target table
-        :param target_table:
-            Table config of the target (the default reference config)
         :return:
-            Tuple of ``(from_clause, chrom_col, start_col, end_col, table,
-            is_self_reference)`` where ``from_clause`` is the text following
-            ``FROM`` inside the ``__giql_dj_ref`` CTE. A subquery or CTE
-            reference is assumed to expose canonical 0-based half-open
-            ``chrom`` / ``start`` / ``end`` columns, so ``table`` is ``None``
-            for those. ``is_self_reference`` is ``True`` only when the
-            reference provably resolves to the same registered relation as the
-            target (omitted reference, or a bare name equal to the target name
-            that is not shadowed by an enclosing CTE and maps to the same
-            registered table). It is ``False`` in all other cases, including
-            subquery and CTE references that may textually duplicate the
-            target.
+            Tuple of ``(target_ref, ref, ref_from)``
         :raises ValueError:
-            If the reference is not a table name, a CTE, or a subquery, or if
-            a bare name resolves to neither a registered table nor a CTE.
+            If the target or reference slot is unresolved, or a resolved name
+            uses the reserved ``__giql_dj_`` prefix.
         """
-        reference = expression.args.get("reference")
-        tc, ts, te = target_cols
+        resolution = expression.meta.get(META_KEY)
+        target_ref = (
+            resolution.slot("this")
+            if isinstance(resolution, OperatorResolution)
+            else None
+        )
 
-        # No reference: default to the target set (single-mode).
-        if reference is None:
-            return target_name, tc, ts, te, target_table, True
-
-        # Subquery reference: inline it as an aliased derived table. The
-        # subquery may textually duplicate the target, but proving equivalence
-        # is out of scope, so treat it as a distinct relation.
-        if isinstance(reference, (exp.Subquery, exp.Select, exp.Union)):
-            from_clause = f"{self.sql(reference)} AS __giql_dj_rs"
-            return (
-                from_clause,
-                DEFAULT_CHROM_COL,
-                DEFAULT_START_COL,
-                DEFAULT_END_COL,
-                None,
-                False,
+        # An unresolved target means it is not a registered table.
+        if target_ref is None:
+            target = expression.this
+            if isinstance(target, exp.Table):
+                target_name = target.name
+            elif isinstance(target, exp.Column):
+                target_name = target.table if target.table else str(target.this)
+            else:
+                target_name = str(target)
+            raise ValueError(
+                f"Target table '{target_name}' not found in tables. "
+                "Register the table before transpiling."
             )
 
-        # Anything that is not a bare table/CTE name is unsupported.
+        # The __giql_dj_ prefix names the operator's internal CTEs; a target
+        # table using it would collide with them.
+        if target_ref.name.startswith("__giql_dj_"):
+            raise ValueError(
+                f"DISJOIN target {target_ref.name!r} uses the reserved "
+                "'__giql_dj_' prefix, which names the operator's internal "
+                "CTEs. Rename the table."
+            )
+
+        reference = expression.args.get("reference")
+        ref = resolution.slot("reference")
+        if ref is not None:
+            if ref.kind == "subquery":
+                return target_ref, ref, f"{self.sql(reference)} AS __giql_dj_rs"
+            return target_ref, ref, ref.name
+
+        # Unresolved reference: re-classify it and raise the matching
+        # historical diagnostic. An omitted reference always resolves (to the
+        # target set), so reference is non-None here.
         if not isinstance(reference, (exp.Table, exp.Column, exp.Identifier)):
             raise ValueError(
                 "DISJOIN reference must be a table name, a CTE, or a "
                 f"(SELECT ...) subquery; got {type(reference).__name__}: "
                 f"{reference}"
             )
-
         ref_name = reference.name
-
-        # The __giql_dj_ prefix names the operator's internal CTEs.
         if ref_name.startswith("__giql_dj_"):
             raise ValueError(
                 f"DISJOIN reference {ref_name!r} uses the reserved "
                 "'__giql_dj_' prefix, which names the operator's internal "
                 "CTEs. Rename the reference relation."
-            )
-
-        # A CTE from an enclosing WITH shadows a registered table of the same
-        # name; it is assumed to expose canonical default columns. A CTE may
-        # contain rows distinct from any same-named registered table, so it is
-        # never treated as a self-reference.
-        if ref_name in self._enclosing_cte_names(expression):
-            return (
-                ref_name,
-                DEFAULT_CHROM_COL,
-                DEFAULT_START_COL,
-                DEFAULT_END_COL,
-                None,
-                False,
-            )
-
-        ref_table = self.tables.get(ref_name)
-        if ref_table:
-            return (
-                ref_name,
-                ref_table.chrom_col,
-                ref_table.start_col,
-                ref_table.end_col,
-                ref_table,
-                ref_name == target_name and ref_table is target_table,
             )
         raise ValueError(
             f"DISJOIN reference {ref_name!r} is neither a registered table "
@@ -1045,26 +1009,6 @@ class BaseGIQLGenerator(Generator):
             return param_expr.this
         else:
             return str(param_expr).upper() in ("TRUE", "1", "YES")
-
-    @staticmethod
-    def _enclosing_cte_names(expression: exp.Expression) -> set[str]:
-        """Collect CTE names visible to an expression from enclosing WITH clauses.
-
-        Walks the ancestor chain and gathers the aliases of every ``WITH``-clause
-        CTE, so a DISJOIN reference can be recognized as an in-query CTE rather
-        than a registered table.
-        """
-        names: set[str] = set()
-        node: exp.Expression | None = expression
-        while node is not None:
-            if isinstance(node, exp.Select):
-                with_clause = node.args.get("with_") or node.args.get("with")
-                if with_clause is not None:
-                    for cte in with_clause.expressions:
-                        if cte.alias:
-                            names.add(cte.alias)
-            node = node.parent
-        return names
 
     def _get_column_refs(
         self,
