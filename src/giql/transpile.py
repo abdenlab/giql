@@ -11,6 +11,7 @@ from typing import overload
 
 from sqlglot import parse_one
 
+from giql.canonicalizer import canonicalize_coordinates
 from giql.dialect import GIQLDialect
 from giql.generators import BaseGIQLGenerator
 from giql.resolver import resolve_operator_refs
@@ -178,6 +179,13 @@ def transpile(
     # use the generator's legacy resolver paths until their ports land.
     with _reraise_as_value_error("Resolution error"):
         ast = resolve_operator_refs(ast, tables_container)
+
+    # Pass 2 of the normalization pipeline (epic #114): synthesize canonical
+    # __giql_canon_* wrapper CTEs for non-canonical interval operands of
+    # opted-in operators (GIQL_CANONICALIZE). No operator opts in yet, so this
+    # is a strict no-op until the per-operator port issues (#122, #123) land.
+    with _reraise_as_value_error("Canonicalization error"):
+        ast = canonicalize_coordinates(ast)
 
     with _reraise_as_value_error("Transpilation error"):
         sql = generator.generate(ast)
