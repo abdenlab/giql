@@ -47,9 +47,11 @@ implementation:
   ``this``) resolve to a :class:`ResolvedRef`. NEAREST's ``reference`` slot —
   whose accepted shapes are the non-table literal-range / column /
   implicit-outer forms — resolves to a :class:`ResolvedInterval` (epic #114,
-  step 3). DISTANCE and the spatial predicates still declare their column /
-  literal slots but defer resolution to their port issues (#119, #120), which
-  reuse :class:`ResolvedInterval` and :class:`SlotDeferral`.
+  step 3). DISTANCE's two *column* operands (``this`` / ``expression``) are
+  resolved to a :class:`ResolvedColumn` and attached through the separate
+  :attr:`OperatorResolution.columns` channel (epic #114, step 4). The spatial
+  predicates still declare their column / literal slots but defer resolution to
+  their port issue (#120), which reuses these resolved-metadata types.
 """
 
 from __future__ import annotations
@@ -85,6 +87,7 @@ __all__ = [
     "IntervalKind",
     "ResolvedRef",
     "ResolvedInterval",
+    "ResolvedColumn",
     "SlotDeferral",
     "OperatorResolution",
     "ResolutionError",
@@ -235,6 +238,52 @@ class ResolvedInterval:
 
 
 @dataclass(frozen=True, slots=True)
+class ResolvedColumn:
+    """Resolved metadata for one column-shaped interval operand.
+
+    Models the resolution of a DISTANCE operand (``a.interval``) — an
+    ``exp.Column`` qualified by a table alias — into the physical genomic
+    columns it references, qualified by that alias. Unlike a
+    :class:`ResolvedRef` (which names a whole relation), a column operand
+    resolves to concrete SQL column expressions ready to drop into the
+    emitter's distance arithmetic.
+
+    Coordinate canonicalization stays in the emitter (epic #114 defers its
+    removal to step 8 / issue #123); this metadata therefore carries the
+    backing :class:`~giql.table.Table` so the emitter keeps wrapping the
+    endpoints with :func:`giql.canonical.canonical_start` /
+    :func:`giql.canonical.canonical_end` exactly as before.
+
+    Attributes
+    ----------
+    chrom : str
+        The chromosome column qualified by the operand's alias, e.g.
+        ``a."chrom"``.
+    start : str
+        The start column qualified by the operand's alias, e.g. ``a."start"``.
+    end : str
+        The end column qualified by the operand's alias, e.g. ``a."end"``.
+    strand : str | None
+        The strand column qualified by the operand's alias, e.g.
+        ``a."strand"``. Always resolved when the operand is a column (mirroring
+        the generator's ``_get_column_refs(..., include_strand=True)``); the
+        emitter consumes it only in stranded mode.
+    table : Table | None
+        The :class:`~giql.table.Table` config backing the operand's relation
+        (carrying its coordinate system), or ``None`` when the alias does not
+        resolve to a registered table (an unregistered relation is assumed
+        canonical, exactly as the generator's ``_resolve_table`` returns
+        ``None``).
+    """
+
+    chrom: str
+    start: str
+    end: str
+    strand: str | None
+    table: Table | None
+
+
+@dataclass(frozen=True, slots=True)
 class SlotDeferral:
     """Why a slot was left unresolved, so the emitter raises the right error.
 
@@ -286,11 +335,17 @@ class OperatorResolution:
         slot was deferred, when the emitter needs that context to raise the
         historical diagnostic verbatim. Empty for slots that resolved or whose
         deferral the emitter can reclassify unaided.
+    columns : dict[str, ResolvedColumn]
+        Mapping from a *column* operand's arg key to its resolved
+        :class:`ResolvedColumn`. Carries DISTANCE's two interval operands; an
+        operand the pass could not resolve (a literal range, or an unqualified
+        column) is left out and the generator raises its existing error.
     """
 
     operator: str
     slots: dict[str, ResolvedRef | ResolvedInterval]
     deferrals: dict[str, SlotDeferral] = field(default_factory=dict)
+    columns: dict[str, ResolvedColumn] = field(default_factory=dict)
 
     def slot(self, arg: str) -> ResolvedRef | ResolvedInterval | None:
         """Return the resolved metadata for slot *arg*, or ``None``."""
@@ -299,6 +354,10 @@ class OperatorResolution:
     def deferral(self, arg: str) -> SlotDeferral | None:
         """Return the deferral recorded for slot *arg*, or ``None``."""
         return self.deferrals.get(arg)
+
+    def column(self, arg: str) -> ResolvedColumn | None:
+        """Return the resolved column operand for *arg*, or ``None``."""
+        return self.columns.get(arg)
 
 
 def resolve_operator_refs(expression: exp.Expression, tables: Tables) -> exp.Expression:
@@ -335,8 +394,8 @@ def resolve_operator_refs(expression: exp.Expression, tables: Tables) -> exp.Exp
 
     # Fallback for any operator a scope walk did not reach (e.g. if scope
     # construction failed). Resolving with no visible CTE names keeps the pass
-    # behavior-preserving: a missed CTE reference simply stays unresolved and
-    # the generator handles it on its existing path.
+    # behavior-preserving: a missed CTE reference or column operand simply stays
+    # unresolved and the generator handles it on its existing path.
     for node in expression.walk():
         if isinstance(node, _OPERATORS) and id(node) not in seen:
             seen.add(id(node))
@@ -363,9 +422,10 @@ def _safe_traverse_scope(expression: exp.Expression) -> list[Scope]:
 def _resolve_operator(
     node: exp.Expression, tables: Tables, cte_names: frozenset[str]
 ) -> None:
-    """Resolve *node*'s reference slots and attach an :class:`OperatorResolution`."""
+    """Resolve *node*'s slots and attach an :class:`OperatorResolution`."""
     slots: dict[str, ResolvedRef | ResolvedInterval] = {}
     deferrals: dict[str, SlotDeferral] = {}
+    columns: dict[str, ResolvedColumn] = {}
 
     if isinstance(node, GIQLDisjoin):
         target_ref = _resolve_target(node.this, tables)
@@ -388,11 +448,15 @@ def _resolve_operator(
             slots["reference"] = interval
         if deferral is not None:
             deferrals["reference"] = deferral
-    # DISTANCE and the spatial predicates declare only column / literal slots,
-    # whose resolution metadata is designed by their port issues; the pass
+    elif isinstance(node, GIQLDistance):
+        columns = _resolve_distance_columns(node, tables)
+    # The spatial predicates declare only column / literal slots, whose
+    # resolution metadata is designed by their port issue (#120); the pass
     # attaches an (empty-slot) resolution so every operator carries metadata.
 
-    node.meta[META_KEY] = OperatorResolution(type(node).__name__, slots, deferrals)
+    node.meta[META_KEY] = OperatorResolution(
+        type(node).__name__, slots, deferrals, columns
+    )
 
 
 def _target_name(target: exp.Expression) -> str:
@@ -423,6 +487,92 @@ def _resolve_target(target: exp.Expression, tables: Tables) -> ResolvedRef | Non
         cols=(table.chrom_col, table.start_col, table.end_col),
         table=table,
         coverage_skippable=False,
+    )
+
+
+def _resolve_distance_columns(
+    node: GIQLDistance, tables: Tables
+) -> dict[str, ResolvedColumn]:
+    """Resolve DISTANCE's two interval operands to :class:`ResolvedColumn`\\s.
+
+    DISTANCE's ``this`` and ``expression`` operands are both column refs (per
+    its :attr:`~giql.expressions.GIQLDistance.GIQL_SLOTS`). Each is resolved
+    against the operand's table alias, mirroring the generator's historical
+    ``_get_column_refs`` / ``_resolve_table`` path: the alias's physical
+    genomic columns (from the registered :class:`~giql.table.Table` config, or
+    the canonical defaults) qualified by that alias, plus the backing table
+    config for the emitter's canonicalization wrapping.
+
+    An operand the pass cannot resolve — a literal range, or an unqualified
+    column — is omitted; the generator then raises its historical
+    "Literal range as ... argument not yet supported" error.
+    """
+    alias_map, current_table = _enclosing_alias_map(node)
+    columns: dict[str, ResolvedColumn] = {}
+    for arg in ("this", "expression"):
+        operand = node.args.get(arg)
+        resolved = _resolve_column_operand(operand, tables, alias_map, current_table)
+        if resolved is not None:
+            columns[arg] = resolved
+    return columns
+
+
+def _resolve_column_operand(
+    operand: exp.Expression | None,
+    tables: Tables,
+    alias_map: dict[str, str],
+    current_table: str | None,
+) -> ResolvedColumn | None:
+    """Resolve a single column operand, or ``None`` if it is not a column ref.
+
+    Mirrors the generator's ``_get_column_refs`` / ``_resolve_table`` exactly:
+    the operand's alias is resolved to an underlying table name via the alias
+    map (with the current FROM table as fallback), the physical column names
+    come from that table's config (or the canonical defaults), and every column
+    is qualified by the operand's alias.
+
+    Returns ``None`` for an operand that is not a qualified column (a literal
+    range or an unaliased column), deferring the diagnostic to the generator.
+    """
+    if not isinstance(operand, exp.Column):
+        return None
+    alias = operand.table
+    if not alias:
+        # An unqualified column has no alias to qualify by; the generator
+        # treats it as a literal range and raises its existing error.
+        return None
+
+    table_name = alias_map.get(alias, current_table)
+    table = tables.get(table_name) if table_name else None
+    chrom_col, start_col, end_col, strand_col = _physical_cols(table)
+    return ResolvedColumn(
+        chrom=f'{alias}."{chrom_col}"',
+        start=f'{alias}."{start_col}"',
+        end=f'{alias}."{end_col}"',
+        strand=f'{alias}."{strand_col}"',
+        table=table,
+    )
+
+
+def _physical_cols(table: Table | None) -> tuple[str, str, str, str]:
+    """Return the ``(chrom, start, end, strand)`` physical column names.
+
+    Mirrors ``_get_column_refs``: the canonical defaults unless the registered
+    :class:`~giql.table.Table` overrides them, with the strand column falling
+    back to the default when the table declares none.
+    """
+    if table is None:
+        return (
+            DEFAULT_CHROM_COL,
+            DEFAULT_START_COL,
+            DEFAULT_END_COL,
+            DEFAULT_STRAND_COL,
+        )
+    return (
+        table.chrom_col,
+        table.start_col,
+        table.end_col,
+        table.strand_col or DEFAULT_STRAND_COL,
     )
 
 
@@ -769,14 +919,19 @@ def validate_operator_refs(expression: exp.Expression) -> None:
         specs: tuple[SlotSpec, ...] = getattr(node, "GIQL_SLOTS", ())
         for spec in specs:
             resolved = resolution.slots.get(spec.arg)
-            if resolved is None:
-                # Deferred: an unresolved slot is handled by the generator on
-                # its existing path (and may carry a SlotDeferral).
+            if resolved is not None:
+                if spec.is_ref_slot:
+                    _validate_ref(resolved, spec, type(node).__name__)
+                else:
+                    _validate_interval(resolved, spec, type(node).__name__)
                 continue
-            if spec.is_ref_slot:
-                _validate_ref(resolved, spec, type(node).__name__)
-            else:
-                _validate_interval(resolved, spec, type(node).__name__)
+            # A column operand (DISTANCE) resolves through the separate columns
+            # channel rather than the slots map; validate it there.
+            column = resolution.columns.get(spec.arg)
+            if column is not None:
+                _validate_column(column, spec, type(node).__name__)
+            # Otherwise deferred: an unresolved slot is handled by the generator
+            # on its existing path (and may carry a SlotDeferral).
 
 
 def _validate_interval(interval: object, spec: SlotSpec, operator: str) -> None:
@@ -802,6 +957,33 @@ def _validate_interval(interval: object, spec: SlotSpec, operator: str) -> None:
         raise ResolutionError(
             f"{operator} slot {spec.arg!r} resolved to a literal_range but "
             "carries a Table config; literal ranges are already canonical."
+        )
+
+
+def _validate_column(column: object, spec: SlotSpec, operator: str) -> None:
+    """Assert a single resolved column operand is well-formed against its slot.
+
+    DISTANCE's two interval operands resolve to a :class:`ResolvedColumn` in the
+    :attr:`OperatorResolution.columns` channel. A column operand is only ever
+    attached for a slot whose declared shapes include ``"column"``; the endpoint
+    fragments must be SQL strings ready to drop into the emitter's arithmetic.
+    """
+    if not isinstance(column, ResolvedColumn):
+        raise ResolutionError(
+            f"{operator} slot {spec.arg!r} carries {type(column).__name__}, "
+            "expected ResolvedColumn."
+        )
+    if "column" not in spec.accepts:
+        raise ResolutionError(
+            f"{operator} slot {spec.arg!r} resolved to a column operand, which is "
+            f"not accepted by the slot (accepts {sorted(spec.accepts)})."
+        )
+    if not all(
+        isinstance(part, str) for part in (column.chrom, column.start, column.end)
+    ):
+        raise ResolutionError(
+            f"{operator} slot {spec.arg!r} has malformed column endpoints; "
+            "expected SQL fragment strings for chrom/start/end."
         )
 
 
