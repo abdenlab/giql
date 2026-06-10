@@ -566,6 +566,31 @@ class TestBaseGIQLGenerator:
         )
         assert output == expected
 
+    def test_giqlnearest_sql_implicit_outer_without_strand_column(self):
+        """
+        GIVEN a stranded NEAREST whose implicit-outer table declares no strand
+            column
+        WHEN the query is generated
+        THEN no strand filtering is emitted, preserving the divergence between
+            the explicit-column and implicit-outer reference paths.
+        """
+        # Arrange
+        tables = Tables()
+        tables.register("nostr", Table("nostr", strand_col=None))
+        tables.register("genes", Table("genes"))
+        sql = (
+            "SELECT * FROM nostr "
+            "CROSS JOIN LATERAL NEAREST(genes, k := 1, stranded := true)"
+        )
+        ast = parse_one(sql, dialect=GIQLDialect)
+
+        # Act
+        output = BaseGIQLGenerator(tables=tables).generate(ast)
+
+        # Assert
+        assert "strand" not in output
+        assert 'nostr."chrom" = genes."chrom"' in output
+
     def test_giqlnearest_sql_signed(self, tables_with_peaks_and_genes):
         """
         GIVEN a GIQLNearest with signed := true
@@ -914,8 +939,7 @@ class TestBaseGIQLGenerator:
         tables = Tables()
         tables.register("genes_closed", Table("genes_closed", interval_type="closed"))
         sql = (
-            "SELECT * FROM NEAREST("
-            "genes_closed, reference := 'chr1:1000-2000', k := 3)"
+            "SELECT * FROM NEAREST(genes_closed, reference := 'chr1:1000-2000', k := 3)"
         )
         ast = parse_one(sql, dialect=GIQLDialect)
         generator = BaseGIQLGenerator(tables=tables)
@@ -981,24 +1005,22 @@ class TestBaseGIQLGenerator:
 
     def test_giqlnearest_sql_outer_table_not_in_tables(self):
         """
-        GIVEN a GIQLNearest in correlated mode where outer table is not registered
-        WHEN giqlnearest_sql is called
+        GIVEN a NEAREST whose implicit-outer relation is found but not registered
+        WHEN the query is generated
         THEN ValueError is raised listing the issue.
         """
         tables = Tables()
         tables.register("genes", Table("genes"))
 
-        nearest = GIQLNearest(
-            this=exp.Table(this=exp.Identifier(this="genes")),
-            k=exp.Literal.number(3),
-        )
+        # The outer relation (unknown_table) is present in the LATERAL context
+        # but is not a registered table, so the implicit-outer reference defers.
+        sql = "SELECT * FROM unknown_table CROSS JOIN LATERAL NEAREST(genes, k := 3)"
+        ast = parse_one(sql, dialect=GIQLDialect)
 
         generator = BaseGIQLGenerator(tables=tables)
-        generator._alias_to_table = {"unknown_table": "unknown_table"}
-        generator._find_outer_table_in_lateral_join = lambda x: "unknown_table"
 
         with pytest.raises(ValueError, match="not found in tables"):
-            generator.giqlnearest_sql(nearest)
+            generator.generate(ast)
 
     def test_giqlnearest_sql_invalid_reference_range(self, tables_with_peaks_and_genes):
         """
@@ -1261,8 +1283,7 @@ class TestBaseGIQLGenerator:
 
         # Assert
         expected = (
-            "SELECT * FROM variants WHERE "
-            f"(\"chrom\" = 'chr1' AND {expected_predicate})"
+            f"SELECT * FROM variants WHERE (\"chrom\" = 'chr1' AND {expected_predicate})"
         )
         assert output == expected
 
@@ -1318,8 +1339,7 @@ class TestBaseGIQLGenerator:
 
         # Assert
         expected = (
-            "SELECT * FROM variants WHERE "
-            f"(\"chrom\" = 'chr1' AND {expected_predicate})"
+            f"SELECT * FROM variants WHERE (\"chrom\" = 'chr1' AND {expected_predicate})"
         )
         assert output == expected
 
@@ -1375,8 +1395,7 @@ class TestBaseGIQLGenerator:
 
         # Assert
         expected = (
-            "SELECT * FROM variants WHERE "
-            f"(\"chrom\" = 'chr1' AND {expected_predicate})"
+            f"SELECT * FROM variants WHERE (\"chrom\" = 'chr1' AND {expected_predicate})"
         )
         assert output == expected
 
@@ -1545,24 +1564,39 @@ class TestBaseGIQLGenerator:
         "coordinate_system, interval_type, start_a, end_a, start_b, end_b",
         [
             pytest.param(
-                "0based", "half_open",
-                'a."start"', 'a."end"', 'b."start"', 'b."end"',
+                "0based",
+                "half_open",
+                'a."start"',
+                'a."end"',
+                'b."start"',
+                'b."end"',
                 id="0based-half_open",
             ),
             pytest.param(
-                "0based", "closed",
-                'a."start"', '(a."end" + 1)', 'b."start"', '(b."end" + 1)',
+                "0based",
+                "closed",
+                'a."start"',
+                '(a."end" + 1)',
+                'b."start"',
+                '(b."end" + 1)',
                 id="0based-closed",
             ),
             pytest.param(
-                "1based", "half_open",
-                '(a."start" - 1)', '(a."end" - 1)',
-                '(b."start" - 1)', '(b."end" - 1)',
+                "1based",
+                "half_open",
+                '(a."start" - 1)',
+                '(a."end" - 1)',
+                '(b."start" - 1)',
+                '(b."end" - 1)',
                 id="1based-half_open",
             ),
             pytest.param(
-                "1based", "closed",
-                '(a."start" - 1)', 'a."end"', '(b."start" - 1)', 'b."end"',
+                "1based",
+                "closed",
+                '(a."start" - 1)',
+                'a."end"',
+                '(b."start" - 1)',
+                'b."end"',
                 id="1based-closed",
             ),
         ],
@@ -1660,23 +1694,31 @@ class TestBaseGIQLGenerator:
         "coordinate_system, interval_type, target_start, target_end",
         [
             pytest.param(
-                "0based", "half_open",
-                'genes."start"', 'genes."end"',
+                "0based",
+                "half_open",
+                'genes."start"',
+                'genes."end"',
                 id="0based-half_open",
             ),
             pytest.param(
-                "0based", "closed",
-                'genes."start"', '(genes."end" + 1)',
+                "0based",
+                "closed",
+                'genes."start"',
+                '(genes."end" + 1)',
                 id="0based-closed",
             ),
             pytest.param(
-                "1based", "half_open",
-                '(genes."start" - 1)', '(genes."end" - 1)',
+                "1based",
+                "half_open",
+                '(genes."start" - 1)',
+                '(genes."end" - 1)',
                 id="1based-half_open",
             ),
             pytest.param(
-                "1based", "closed",
-                '(genes."start" - 1)', 'genes."end"',
+                "1based",
+                "closed",
+                '(genes."start" - 1)',
+                'genes."end"',
                 id="1based-closed",
             ),
         ],
@@ -1715,9 +1757,7 @@ class TestBaseGIQLGenerator:
 
         # Assert — distance CASE expression uses canonicalized target endpoints
         # against the (already-canonical) literal reference [1000, 2000).
-        assert (
-            f"WHEN 1000 < {target_end} AND 2000 > {target_start} THEN 0" in output
-        )
+        assert f"WHEN 1000 < {target_end} AND 2000 > {target_start} THEN 0" in output
         assert f"WHEN 2000 <= {target_start} THEN ({target_start} - 2000)" in output
         assert f"ELSE (1000 - {target_end})" in output
 
@@ -1769,9 +1809,7 @@ class TestBaseGIQLGenerator:
             leaving end raw — while leaving bed_a's target columns raw.
         """
         # Arrange
-        sql = (
-            "SELECT * FROM vcf_b CROSS JOIN LATERAL NEAREST(bed_a, k := 1)"
-        )
+        sql = "SELECT * FROM vcf_b CROSS JOIN LATERAL NEAREST(bed_a, k := 1)"
         ast = parse_one(sql, dialect=GIQLDialect)
         generator = BaseGIQLGenerator(tables=tables_mixed_conventions)
 
