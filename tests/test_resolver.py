@@ -11,10 +11,13 @@ from sqlglot import exp
 from sqlglot import parse_one
 
 from giql.dialect import GIQLDialect
+from giql.expressions import Contains
 from giql.expressions import GIQLDisjoin
 from giql.expressions import GIQLDistance
 from giql.expressions import GIQLNearest
+from giql.expressions import Intersects
 from giql.expressions import SpatialSetPredicate
+from giql.expressions import Within
 from giql.resolver import META_KEY
 from giql.resolver import OperatorResolution
 from giql.resolver import ResolutionError
@@ -57,6 +60,11 @@ def _nearest_node(ast: exp.Expression) -> GIQLNearest:
 def _distance_node(ast: exp.Expression) -> GIQLDistance:
     """Return the single GIQLDistance node reachable from an annotated AST."""
     return next(n for n in ast.walk() if isinstance(n, GIQLDistance))
+
+
+def _predicate_node(ast: exp.Expression, node_type) -> exp.Expression:
+    """Return the single predicate node of *node_type* reachable from the AST."""
+    return next(n for n in ast.walk() if isinstance(n, node_type))
 
 
 class TestResolveOperatorRefs:
@@ -891,6 +899,223 @@ class TestResolveDistanceColumns:
 
         # Act & assert
         validate_operator_refs(ast)
+
+
+class TestResolvePredicateColumns:
+    """Tests for spatial-predicate column-operand resolution."""
+
+    def test_resolve_aliased_literal_predicate_qualifies_columns(self):
+        """Test that an aliased literal-range predicate qualifies its column.
+
+        Given:
+            A literal-range INTERSECTS over an aliased FROM table.
+        When:
+            Running the resolve pass.
+        Then:
+            It should resolve the left operand to alias-qualified physical
+            columns carrying the table config, and attach no expression column.
+        """
+        # Arrange
+        ast = parse_one(
+            "SELECT * FROM variants AS v WHERE v.interval INTERSECTS 'chr1:1000-2000'",
+            dialect=GIQLDialect,
+        )
+
+        # Act
+        resolve_operator_refs(ast, _tables("variants"))
+
+        # Assert
+        node = _predicate_node(ast, Intersects)
+        column = node.meta[META_KEY].column("this")
+        assert column == ResolvedColumn(
+            chrom='v."chrom"',
+            start='v."start"',
+            end='v."end"',
+            strand='v."strand"',
+            table=_tables("variants").get("variants"),
+        )
+        assert node.meta[META_KEY].column("expression") is None
+
+    def test_resolve_undotted_predicate_uses_current_table(self):
+        """Test that an undotted predicate operand resolves to the FROM table.
+
+        Given:
+            A literal-range CONTAINS whose left operand is the bare genomic
+            pseudo-column over a single-table FROM clause.
+        When:
+            Running the resolve pass.
+        Then:
+            It should resolve the operand to unqualified physical columns backed
+            by the FROM-clause table config.
+        """
+        # Arrange
+        ast = parse_one(
+            "SELECT * FROM peaks WHERE interval CONTAINS 'chr1:1500'",
+            dialect=GIQLDialect,
+        )
+
+        # Act
+        resolve_operator_refs(ast, _tables("peaks"))
+
+        # Assert
+        column = _predicate_node(ast, Contains).meta[META_KEY].column("this")
+        assert column.chrom == '"chrom"'
+        assert column.start == '"start"'
+        assert column.end == '"end"'
+        assert column.table.name == "peaks"
+
+    def test_resolve_custom_columns_in_predicate(self):
+        """Test that a predicate operand carries the table's custom column names.
+
+        Given:
+            A literal-range WITHIN over a table configured with custom genomic
+            column names.
+        When:
+            Running the resolve pass.
+        Then:
+            It should resolve the operand fragments to the custom physical
+            columns.
+        """
+        # Arrange
+        tables = Tables()
+        tables.register(
+            "peaks",
+            Table(
+                "peaks",
+                chrom_col="chromosome",
+                start_col="start_pos",
+                end_col="end_pos",
+                strand_col="sense",
+            ),
+        )
+        ast = parse_one(
+            "SELECT * FROM peaks WHERE interval WITHIN 'chr1:1000-2000'",
+            dialect=GIQLDialect,
+        )
+
+        # Act
+        resolve_operator_refs(ast, tables)
+
+        # Assert
+        column = _predicate_node(ast, Within).meta[META_KEY].column("this")
+        assert column.chrom == '"chromosome"'
+        assert column.start == '"start_pos"'
+        assert column.end == '"end_pos"'
+        assert column.strand == '"sense"'
+
+    def test_resolve_column_to_column_predicate_resolves_both_operands(self):
+        """Test that a column-to-column predicate resolves both operands.
+
+        Given:
+            A column-to-column WITHIN joining two aliased tables (a shape the
+            binned-join transformer leaves untouched, so it reaches the pass).
+        When:
+            Running the resolve pass.
+        Then:
+            It should resolve both operands through the alias map to their
+            respective table configs.
+        """
+        # Arrange
+        ast = parse_one(
+            "SELECT a.name, b.name FROM intervals_a a, intervals_b b "
+            "WHERE a.interval WITHIN b.interval",
+            dialect=GIQLDialect,
+        )
+
+        # Act
+        resolve_operator_refs(ast, _tables("intervals_a", "intervals_b"))
+
+        # Assert
+        resolution = _predicate_node(ast, Within).meta[META_KEY]
+        this_col = resolution.column("this")
+        expr_col = resolution.column("expression")
+        assert this_col.chrom == 'a."chrom"'
+        assert this_col.table.name == "intervals_a"
+        assert expr_col.chrom == 'b."chrom"'
+        assert expr_col.table.name == "intervals_b"
+
+    def test_resolve_set_predicate_resolves_left_operand(self):
+        """Test that a set predicate resolves only its left column operand.
+
+        Given:
+            An INTERSECTS ANY set predicate over a single FROM table.
+        When:
+            Running the resolve pass.
+        Then:
+            It should resolve the left operand to the FROM table's columns and
+            attach no per-range column metadata.
+        """
+        # Arrange
+        ast = parse_one(
+            "SELECT * FROM peaks "
+            "WHERE interval INTERSECTS ANY('chr1:1000-2000', 'chr2:500-1000')",
+            dialect=GIQLDialect,
+        )
+
+        # Act
+        resolve_operator_refs(ast, _tables("peaks"))
+
+        # Assert
+        resolution = _predicate_node(ast, SpatialSetPredicate).meta[META_KEY]
+        assert resolution.column("this").chrom == '"chrom"'
+        assert set(resolution.columns) == {"this"}
+
+    def test_resolve_predicate_over_unregistered_table_uses_defaults(self):
+        """Test that a predicate over an unregistered table defers to defaults.
+
+        Given:
+            A literal-range INTERSECTS over a FROM table that is not registered.
+        When:
+            Running the resolve pass with no table configs.
+        Then:
+            It should resolve the operand to canonical default columns with no
+            backing table config.
+        """
+        # Arrange
+        ast = parse_one(
+            "SELECT * FROM peaks WHERE interval INTERSECTS 'chr1:1000-2000'",
+            dialect=GIQLDialect,
+        )
+
+        # Act
+        resolve_operator_refs(ast, Tables())
+
+        # Assert
+        column = _predicate_node(ast, Intersects).meta[META_KEY].column("this")
+        assert column == ResolvedColumn(
+            chrom='"chrom"',
+            start='"start"',
+            end='"end"',
+            strand='"strand"',
+            table=None,
+        )
+
+    def test_resolve_predicate_without_base_from_table_defers(self):
+        """Test that an undotted predicate with no base FROM table resolves to defaults.
+
+        Given:
+            A literal-range INTERSECTS in a SELECT whose FROM clause is a derived
+            table, so the enclosing scope exposes no base FROM table.
+        When:
+            Running the resolve pass.
+        Then:
+            It should resolve the undotted operand to unqualified default
+            columns with no backing table config.
+        """
+        # Arrange
+        ast = parse_one(
+            "SELECT * FROM (SELECT * FROM peaks) AS d "
+            "WHERE interval INTERSECTS 'chr1:1000-2000'",
+            dialect=GIQLDialect,
+        )
+
+        # Act
+        resolve_operator_refs(ast, _tables("peaks"))
+
+        # Assert
+        column = _predicate_node(ast, Intersects).meta[META_KEY].column("this")
+        assert column.chrom == '"chrom"'
+        assert column.table is None
 
 
 class TestValidateOperatorRefs:

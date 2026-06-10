@@ -557,6 +557,42 @@ class BaseGIQLGenerator(Generator):
             f"ELSE ({start_a} - {end_b}) END END"
         )
 
+    def _predicate_operand(
+        self, expression: exp.Expression, arg: str, ctx_table: str | None
+    ) -> ResolvedColumn:
+        """Return the :class:`ResolvedColumn` for a spatial predicate operand.
+
+        Reads the column resolution attached to *expression* by the
+        ``ResolveOperatorRefs`` pass (the metadata-driven path used by the full
+        transpile pipeline). When the pass did not annotate the node — e.g. a
+        generator invoked on a bare AST without running pass 1 — it falls back to
+        the generator's historical ``_current_table`` / alias-map resolution so
+        direct ``generate()`` callers keep their existing behavior. Both paths
+        format physical column references identically, so the emitted SQL is the
+        same regardless of which produced the :class:`ResolvedColumn`.
+
+        :param expression:
+            The spatial predicate node carrying the resolution metadata.
+        :param arg:
+            The operand slot key (``"this"`` or ``"expression"``).
+        :param ctx_table:
+            The current-table resolution context for the fallback path —
+            ``self._current_table`` for a literal-range operand, ``None`` for a
+            column-to-column operand.
+        :return:
+            The resolved column metadata.
+        """
+        resolution = expression.meta.get(META_KEY)
+        if isinstance(resolution, OperatorResolution):
+            resolved = resolution.column(arg)
+            if resolved is not None:
+                return resolved
+
+        column_ref = self.sql(expression, arg)
+        chrom, start, end = self._get_column_refs(column_ref, ctx_table)
+        table = self._resolve_table(column_ref, ctx_table)
+        return ResolvedColumn(chrom=chrom, start=start, end=end, strand="", table=table)
+
     def _generate_spatial_op(self, expression: exp.Binary, op_type: str) -> str:
         """Generate SQL for a spatial operation.
 
@@ -567,18 +603,20 @@ class BaseGIQLGenerator(Generator):
         :return:
             SQL predicate string
         """
-        left = self.sql(expression, "this")
         right_raw = self.sql(expression, "expression")
 
         # Check if right side is a column reference or a literal range string
         if "." in right_raw and not right_raw.startswith("'"):
             # Column-to-column join (e.g., a.interval INTERSECTS b.interval)
-            return self._generate_column_join(left, right_raw, op_type)
+            left = self._predicate_operand(expression, "this", None)
+            right = self._predicate_operand(expression, "expression", None)
+            return self._generate_column_join(left, right, op_type)
         else:
             # Literal range string (e.g., interval INTERSECTS 'chr1:1000-2000')
             try:
                 range_str = right_raw.strip("'\"")
                 parsed_range = RangeParser.parse(range_str).to_zero_based_half_open()
+                left = self._predicate_operand(expression, "this", self._current_table)
                 return self._generate_range_predicate(left, parsed_range, op_type)
             except Exception as e:
                 raise ValueError(
@@ -587,14 +625,15 @@ class BaseGIQLGenerator(Generator):
 
     def _generate_range_predicate(
         self,
-        column_ref: str,
+        column: ResolvedColumn,
         parsed_range: ParsedRange,
         op_type: str,
     ) -> str:
         """Generate SQL predicate for a range operation.
 
-        :param column_ref:
-            Column reference (e.g., 'v.interval' or 'interval')
+        :param column:
+            Resolved column operand (physical chrom/start/end fragments plus the
+            backing :class:`~giql.table.Table` config for canonicalization).
         :param parsed_range:
             Parsed genomic range
         :param op_type:
@@ -602,13 +641,12 @@ class BaseGIQLGenerator(Generator):
         :return:
             SQL predicate string
         """
-        # Get column references
-        chrom_col, raw_start_col, raw_end_col = self._get_column_refs(
-            column_ref, self._current_table
-        )
-        table = self._resolve_table(column_ref, self._current_table)
-        start_col = canonical_start(raw_start_col, table)
-        end_col = canonical_end(raw_end_col, table)
+        # Canonicalize the raw physical endpoints to 0-based half-open. The
+        # alias-qualified column fragments come pre-resolved on the
+        # ResolvedColumn; canonicalization stays here (epic #114 step #123).
+        chrom_col = column.chrom
+        start_col = canonical_start(column.start, column.table)
+        end_col = canonical_end(column.end, column.table)
 
         chrom = parsed_range.chromosome
         start = parsed_range.start
@@ -648,28 +686,28 @@ class BaseGIQLGenerator(Generator):
 
         raise ValueError(f"Unknown operation: {op_type}")
 
-    def _generate_column_join(self, left_col: str, right_col: str, op_type: str) -> str:
+    def _generate_column_join(
+        self, left: ResolvedColumn, right: ResolvedColumn, op_type: str
+    ) -> str:
         """Generate SQL for column-to-column spatial joins.
 
-        :param left_col:
-            Left column reference (e.g., 'a.interval')
-        :param right_col:
-            Right column reference (e.g., 'b.interval')
+        :param left:
+            Resolved left column operand (e.g., for 'a.interval').
+        :param right:
+            Resolved right column operand (e.g., for 'b.interval').
         :param op_type:
             'intersects', 'contains', or 'within'
         :return:
             SQL predicate string
         """
-        # Get column references for both sides
-        # Pass None to let _get_column_refs extract and resolve table from column ref
-        l_chrom, raw_l_start, raw_l_end = self._get_column_refs(left_col, None)
-        r_chrom, raw_r_start, raw_r_end = self._get_column_refs(right_col, None)
-        l_table = self._resolve_table(left_col)
-        r_table = self._resolve_table(right_col)
-        l_start = canonical_start(raw_l_start, l_table)
-        l_end = canonical_end(raw_l_end, l_table)
-        r_start = canonical_start(raw_r_start, r_table)
-        r_end = canonical_end(raw_r_end, r_table)
+        # Canonicalize each side's raw physical endpoints; the alias-qualified
+        # chrom/start/end fragments come pre-resolved on the ResolvedColumns.
+        l_chrom = left.chrom
+        r_chrom = right.chrom
+        l_start = canonical_start(left.start, left.table)
+        l_end = canonical_end(left.end, left.table)
+        r_start = canonical_start(right.start, right.table)
+        r_end = canonical_end(right.end, right.table)
 
         if op_type == "intersects":
             # Ranges overlap if: chrom1 = chrom2 AND start1 < end2 AND end1 > start2
@@ -709,10 +747,14 @@ class BaseGIQLGenerator(Generator):
         :return:
             SQL predicate string
         """
-        column_ref = self.sql(expression, "this")
         operator = expression.args["operator"]
         quantifier = expression.args["quantifier"]
         ranges = expression.args["ranges"]
+
+        # Resolve the (single) left column operand once; every range condition
+        # compares against the same column. The set predicate's ranges are
+        # always literals, so only this operand needs resolution.
+        column = self._predicate_operand(expression, "this", self._current_table)
 
         # Parse all ranges
         parsed_ranges = []
@@ -726,7 +768,7 @@ class BaseGIQLGenerator(Generator):
         # Generate conditions for each range
         conditions = []
         for parsed_range in parsed_ranges:
-            condition = self._generate_range_predicate(column_ref, parsed_range, op_type)
+            condition = self._generate_range_predicate(column, parsed_range, op_type)
             conditions.append(condition)
 
         # Combine with AND (for ALL) or OR (for ANY)

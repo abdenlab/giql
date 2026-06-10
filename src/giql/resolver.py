@@ -50,8 +50,12 @@ implementation:
   step 3). DISTANCE's two *column* operands (``this`` / ``expression``) are
   resolved to a :class:`ResolvedColumn` and attached through the separate
   :attr:`OperatorResolution.columns` channel (epic #114, step 4). The spatial
-  predicates still declare their column / literal slots but defer resolution to
-  their port issue (#120), which reuses these resolved-metadata types.
+  predicates' column operands (:class:`~giql.expressions.Intersects` /
+  ``Contains`` / ``Within`` ``this`` and column-shaped ``expression``, and
+  ``SpatialSetPredicate`` ``this``) resolve onto the same
+  :class:`ResolvedColumn` type through that columns channel (epic #114,
+  step #120); a literal-range ``expression`` slot stays deferred and the emitter
+  parses it on its existing path.
 """
 
 from __future__ import annotations
@@ -337,9 +341,11 @@ class OperatorResolution:
         deferral the emitter can reclassify unaided.
     columns : dict[str, ResolvedColumn]
         Mapping from a *column* operand's arg key to its resolved
-        :class:`ResolvedColumn`. Carries DISTANCE's two interval operands; an
-        operand the pass could not resolve (a literal range, or an unqualified
-        column) is left out and the generator raises its existing error.
+        :class:`ResolvedColumn`. Carries DISTANCE's two interval operands and
+        the spatial predicates' column operands; an operand the pass could not
+        resolve (a literal range, or an unqualified column outside a
+        current-table context) is left out and the generator raises its existing
+        error.
     """
 
     operator: str
@@ -450,9 +456,8 @@ def _resolve_operator(
             deferrals["reference"] = deferral
     elif isinstance(node, GIQLDistance):
         columns = _resolve_distance_columns(node, tables)
-    # The spatial predicates declare only column / literal slots, whose
-    # resolution metadata is designed by their port issue (#120); the pass
-    # attaches an (empty-slot) resolution so every operator carries metadata.
+    elif isinstance(node, (Intersects, Contains, Within, SpatialSetPredicate)):
+        columns = _resolve_predicate_columns(node, tables)
 
     node.meta[META_KEY] = OperatorResolution(
         type(node).__name__, slots, deferrals, columns
@@ -515,6 +520,129 @@ def _resolve_distance_columns(
         if resolved is not None:
             columns[arg] = resolved
     return columns
+
+
+def _resolve_predicate_columns(
+    node: exp.Expression, tables: Tables
+) -> dict[str, ResolvedColumn]:
+    """Resolve a spatial predicate's column operands to :class:`ResolvedColumn`.
+
+    Mirrors the generator's historical ``_generate_spatial_op`` operand handling
+    exactly so the emitted SQL is byte-identical:
+
+    * A literal-range predicate (``column INTERSECTS 'chr1:...'``) and every
+      ``SpatialSetPredicate`` resolve only their left ``this`` operand, against
+      the FROM-clause current table — matching ``_generate_range_predicate``,
+      which passes ``self._current_table`` as the resolution context.
+    * A column-to-column predicate (``a.interval CONTAINS b.interval``) resolves
+      both ``this`` and ``expression`` with *no* current-table context, so each
+      operand resolves through the alias map — matching ``_generate_column_join``,
+      which passes ``None`` as the context for both sides.
+
+    Most column-to-column ``INTERSECTS`` joins never reach here: the
+    :class:`~giql.transformer.IntersectsBinnedJoinTransformer` rewrites them into
+    binned equi-joins before this pass runs, deleting the ``Intersects`` node.
+    Column-to-column ``CONTAINS`` / ``WITHIN`` (which that transformer leaves
+    untouched) and non-join ``INTERSECTS`` shapes still reach the emitter, so the
+    column-join branch is exercised.
+
+    Reuses the shared ``_enclosing_alias_map`` (FROM/JOIN alias derivation) and
+    ``_physical_cols`` helpers; the predicate-specific bit lives in
+    :func:`_resolve_predicate_column`, whose current-table-vs-alias-only
+    precedence differs from DISTANCE's ``_resolve_column_operand``.
+    """
+    alias_map, current_table = _enclosing_alias_map(node)
+    this_node = node.this
+
+    if isinstance(node, SpatialSetPredicate):
+        if not isinstance(this_node, exp.Column):
+            return {}
+        return {
+            "this": _resolve_predicate_column(
+                this_node, current_table, alias_map, current_table, tables
+            )
+        }
+
+    right = node.args.get("expression")
+    if isinstance(right, exp.Column) and right.table:
+        # Column-to-column: resolve both operands with no current-table context,
+        # so each resolves through the alias map.
+        columns: dict[str, ResolvedColumn] = {}
+        if isinstance(this_node, exp.Column):
+            columns["this"] = _resolve_predicate_column(
+                this_node, None, alias_map, current_table, tables
+            )
+        columns["expression"] = _resolve_predicate_column(
+            right, None, alias_map, current_table, tables
+        )
+        return columns
+
+    # Literal-range predicate: resolve only the left operand, anchored to the
+    # FROM-clause current table.
+    if not isinstance(this_node, exp.Column):
+        return {}
+    return {
+        "this": _resolve_predicate_column(
+            this_node, current_table, alias_map, current_table, tables
+        )
+    }
+
+
+def _resolve_predicate_column(
+    column: exp.Column,
+    ctx_table: str | None,
+    alias_map: dict[str, str],
+    current_table: str | None,
+    tables: Tables,
+) -> ResolvedColumn:
+    """Resolve one spatial-predicate column operand to a :class:`ResolvedColumn`.
+
+    Replicates the generator's ``_get_column_refs`` / ``_resolve_table`` (and the
+    ``_resolve_table_name`` precedence underneath them) exactly:
+
+    * the operand's table qualifier is kept verbatim for output formatting;
+    * the *config* table name is resolved by precedence — an explicit
+      ``ctx_table`` (the caller-supplied current table) wins; otherwise a
+      qualified operand resolves through the alias map (falling back to
+      ``current_table``), and an unqualified operand resolves to no table;
+    * physical column names come from the resolved :class:`~giql.table.Table`
+      config via the shared ``_physical_cols`` helper, or the canonical defaults
+      when no table backs the operand.
+
+    This is the minimal predicate-specific layer DISTANCE's
+    ``_resolve_column_operand`` cannot serve: it formats unqualified operands
+    (bare ``interval``) and lets the literal-range path anchor to ``ctx_table``
+    directly, where ``_resolve_column_operand`` requires a qualifier and always
+    routes through the alias map.
+    """
+    alias = column.table or ""
+    qualified = bool(alias)
+
+    if ctx_table:
+        table_name: str | None = ctx_table
+    elif qualified:
+        table_name = alias_map.get(alias, current_table)
+    else:
+        table_name = None
+
+    table = tables.get(table_name) if table_name else None
+    chrom_col, start_col, end_col, strand_col = _physical_cols(table)
+
+    if qualified:
+        return ResolvedColumn(
+            chrom=f'{alias}."{chrom_col}"',
+            start=f'{alias}."{start_col}"',
+            end=f'{alias}."{end_col}"',
+            strand=f'{alias}."{strand_col}"',
+            table=table,
+        )
+    return ResolvedColumn(
+        chrom=f'"{chrom_col}"',
+        start=f'"{start_col}"',
+        end=f'"{end_col}"',
+        strand=f'"{strand_col}"',
+        table=table,
+    )
 
 
 def _resolve_column_operand(
