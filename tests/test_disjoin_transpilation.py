@@ -505,6 +505,63 @@ class TestDisjoinTranspilation:
         # Assert
         assert sql.count("EXISTS (") == 1
 
+    @pytest.mark.parametrize(
+        ("query", "tables", "skips_exists"),
+        [
+            ("SELECT * FROM DISJOIN(features)", ["features"], True),
+            (
+                "SELECT * FROM DISJOIN(features, reference := features)",
+                ["features"],
+                True,
+            ),
+            (
+                "SELECT * FROM DISJOIN(features, reference := refs)",
+                ["features", "refs"],
+                False,
+            ),
+            (
+                "WITH refs AS (SELECT 1) "
+                "SELECT * FROM DISJOIN(features, reference := refs)",
+                ["features"],
+                False,
+            ),
+            (
+                "SELECT * FROM DISJOIN(features, reference := (SELECT * FROM refs))",
+                ["features", "refs"],
+                False,
+            ),
+        ],
+        ids=[
+            "omitted-reference",
+            "same-name-registered-table",
+            "distinct-registered-table",
+            "in-query-cte",
+            "subquery",
+        ],
+    )
+    def test_giqldisjoin_sql_should_pin_coverage_skippable_across_reference_shapes(
+        self, query, tables, skips_exists
+    ):
+        """Test that the coverage EXISTS skip-vs-keep is preserved per shape.
+
+        Given:
+            A DISJOIN call across each reference shape — omitted, same-name
+            registered table, distinct registered table, in-query CTE, and
+            subquery — whose ResolvedRef.coverage_skippable drives the EXISTS
+            decision.
+        When:
+            Transpiling to SQL.
+        Then:
+            It should omit the coverage EXISTS subquery exactly for the
+            provable self-reference shapes and emit it for every shape that may
+            hold rows distinct from the target.
+        """
+        # Arrange & act
+        sql = transpile(query, tables=tables)
+
+        # Assert
+        assert ("EXISTS (" not in sql) is skips_exists
+
     def test_giqldisjoin_sql_should_emit_exists_clause_when_enclosing_cte_shadows_target_from_outer_scope(
         self,
     ):
@@ -532,3 +589,109 @@ class TestDisjoinTranspilation:
 
         # Assert
         assert sql.count("EXISTS (") == 1
+
+    def test_giqldisjoin_sql_should_resolve_recursive_cte_reference(self):
+        """Test that a WITH RECURSIVE CTE reference resolves to the CTE.
+
+        Given:
+            A DISJOIN reference naming a CTE declared by WITH RECURSIVE, with
+            a same-named registered table whose 1-based closed encoding would
+            shift coordinates if the table were (wrongly) selected.
+        When:
+            Transpiling to SQL.
+        Then:
+            It should resolve the reference to the CTE — selecting from it by
+            name, keeping the coverage EXISTS, and applying no coordinate
+            shift.
+        """
+        # Arrange & act
+        sql = transpile(
+            "WITH RECURSIVE refs AS (SELECT 1 UNION ALL SELECT 2) "
+            "SELECT * FROM DISJOIN(features, reference := refs)",
+            tables=[
+                "features",
+                Table("refs", coordinate_system="1based", interval_type="closed"),
+            ],
+        )
+
+        # Assert
+        assert "__giql_dj_ref AS (SELECT * FROM refs)" in sql
+        assert "EXISTS (" in sql
+        assert '("start" - 1)' not in sql
+
+    def test_giqldisjoin_sql_should_resolve_set_operation_attached_cte_reference(self):
+        """Test that a WITH attached to a set operation is visible to DISJOIN.
+
+        Given:
+            A UNION ALL query whose WITH clause hangs on the set-operation
+            node and whose first branch passes the CTE name as a DISJOIN
+            reference, with no same-named registered table.
+        When:
+            Transpiling to SQL.
+        Then:
+            It should resolve the reference to the CTE per SQL scoping — the
+            scope-based resolver sees set-operation-attached WITH clauses,
+            matching how the engine resolves the emitted name at execution
+            time.
+        """
+        # Arrange & act
+        sql = transpile(
+            "WITH refs AS (SELECT 1) "
+            "SELECT * FROM DISJOIN(features, reference := refs) "
+            "UNION ALL "
+            "SELECT * FROM DISJOIN(features)",
+            tables=["features"],
+        )
+
+        # Assert
+        assert "__giql_dj_ref AS (SELECT * FROM refs)" in sql
+        assert sql.count("EXISTS (") == 1
+
+    def test_giqldisjoin_sql_should_resolve_redeclared_inner_cte_reference(self):
+        """Test that an inner WITH redeclaring an outer CTE name still resolves.
+
+        Given:
+            A nested query where both the outer query and the inner derived
+            table declare a CTE named ``refs``, and the DISJOIN inside the
+            inner scope passes ``refs`` as its reference.
+        When:
+            Transpiling to SQL.
+        Then:
+            It should resolve the reference to the (shadowing) CTE — selecting
+            from it by name and keeping the coverage EXISTS.
+        """
+        # Arrange & act
+        sql = transpile(
+            "WITH refs AS (SELECT 1) "
+            "SELECT * FROM ("
+            "WITH refs AS (SELECT 2) "
+            "SELECT * FROM DISJOIN(features, reference := refs)"
+            ") AS sub",
+            tables=["features"],
+        )
+
+        # Assert
+        assert "__giql_dj_ref AS (SELECT * FROM refs)" in sql
+        assert sql.count("EXISTS (") == 1
+
+    def test_giqldisjoin_sql_should_not_see_cte_declared_in_sibling_derived_table(
+        self,
+    ):
+        """Test that a CTE declared inside a sibling derived table stays invisible.
+
+        Given:
+            An outer DISJOIN whose reference names a CTE declared only inside
+            a sibling derived table, with no registered table of that name.
+        When:
+            Transpiling to SQL.
+        Then:
+            It should raise the unknown-reference ValueError — inner WITH
+            clauses are not in scope for the outer query.
+        """
+        # Arrange, act, & assert
+        with pytest.raises(ValueError, match="neither a registered table"):
+            transpile(
+                "SELECT * FROM DISJOIN(features, reference := refs), "
+                "(WITH refs AS (SELECT 1) SELECT * FROM refs) AS sub",
+                tables=["features"],
+            )

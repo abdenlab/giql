@@ -22,13 +22,15 @@ pass closes with a validation boundary (:func:`validate_operator_refs`) that
 asserts every operator slot carries well-formed resolution metadata, mirroring
 ``sqlglot``'s ``validate_qualify_columns`` and Spark's ``CheckAnalysis``.
 
-Scope note (epic #114, step 1)
-------------------------------
-This is *scaffolding*: it lands with **zero behavior change**. The generator
-still uses its existing resolver paths and ignores everything attached here. The
-resolution semantics computed for the table-shaped reference slots mirror the
-generator's existing ``_resolve_target_table`` / ``_resolve_disjoin_reference``
-/ ``_enclosing_cte_names`` behavior exactly.
+Scope note (epic #114, steps 1-2)
+---------------------------------
+The pass is behavior-preserving. DISJOIN's emitter
+(``BaseGIQLGenerator.giqldisjoin_sql``) consumes the attached metadata (step 2);
+the remaining operators still use the generator's legacy resolver paths and
+ignore everything attached here until their port issues land. The resolution
+semantics computed for the table-shaped reference slots mirror the generator's
+historical ``_resolve_target_table`` / ``_resolve_disjoin_reference`` /
+``_enclosing_cte_names`` behavior exactly (the latter two now live only here).
 
 Two consequences of the zero-behavior-change constraint shape the
 implementation:
@@ -302,12 +304,11 @@ def _resolve_disjoin_reference(
 ) -> ResolvedRef | None:
     """Resolve a DISJOIN ``reference`` slot.
 
-    Mirrors ``BaseGIQLGenerator._resolve_disjoin_reference`` exactly, with one
-    deliberate difference: CTE visibility comes from the operator's scope
-    (``scope.cte_sources``) rather than the hand-rolled ``_enclosing_cte_names``
-    ancestor walk, as epic #114 specifies. The two agree on every supported
-    shape; any divergence on exotic constructs is invisible in step 1 because
-    the generator ignores this metadata.
+    Mirrors the generator's historical ``_resolve_disjoin_reference`` exactly
+    (ported here in epic #114, step 2), with one deliberate difference: CTE
+    visibility comes from the operator's scope (``scope.cte_sources``) rather
+    than the hand-rolled ``_enclosing_cte_names`` ancestor walk, as epic #114
+    specifies. The two agree on every supported shape.
 
     Returns ``None`` for the unresolvable shapes (reserved prefix, unknown
     name, unsupported node type); the generator raises its existing error.

@@ -173,9 +173,9 @@ def transpile(
         ast = cluster_transformer.transform(ast)
 
     # Pass 1 of the normalization pipeline (epic #114): attach resolution
-    # metadata to every GIQL operator slot ahead of generation. Behavior-
-    # preserving in step 1 — the generator still uses its existing resolver
-    # paths and ignores this metadata.
+    # metadata to every GIQL operator slot ahead of generation. DISJOIN's
+    # emitter consumes this metadata (step 2); the remaining operators still
+    # use the generator's legacy resolver paths until their ports land.
     with _reraise_as_value_error("Resolution error"):
         ast = resolve_operator_refs(ast, tables_container)
 
