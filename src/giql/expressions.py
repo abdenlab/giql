@@ -1,10 +1,78 @@
 """Custom AST expression nodes for genomic operations.
 
 This module defines custom SQLGlot expression nodes for GIQL spatial operators.
+
+It also declares the per-operator :class:`SlotSpec` descriptors that the
+``ResolveOperatorRefs`` normalization pass (:mod:`giql.resolver`) consumes. Each
+operator class carries a ``GIQL_SLOTS`` tuple naming the slots the operator
+resolves (``this`` / ``reference`` / ``expression`` / ``ranges``) together with
+the AST shapes that slot accepts. Keeping the acceptance rules declarative on the
+expression class — rather than duplicated across resolver code — is the structural
+change epic #114 is built around.
 """
+
+from dataclasses import dataclass
+from typing import Literal
 
 from sqlglot import exp
 from sqlglot.errors import ParseError
+
+# The shapes an operator slot may accept. The first three form the
+# "registered table / CTE / subquery" trichotomy that ``sqlglot``'s scope
+# machinery distinguishes natively and that :class:`giql.resolver.ResolvedRef`
+# models; the remaining three describe the column / literal / implicit-outer
+# forms used by NEAREST, DISTANCE, and the spatial predicates.
+SlotShape = Literal[
+    "registered_table",
+    "cte",
+    "subquery",
+    "literal_range",
+    "column",
+    "implicit_outer",
+]
+
+# The subset of slot shapes that resolve to a table-shaped relation and are
+# therefore representable as a :class:`giql.resolver.ResolvedRef`. A slot whose
+# accepted shapes are a subset of these is a "reference slot" that the
+# ``ResolveOperatorRefs`` pass resolves and attaches metadata for.
+TABLE_SHAPES: frozenset[SlotShape] = frozenset({"registered_table", "cte", "subquery"})
+
+
+@dataclass(frozen=True, slots=True)
+class SlotSpec:
+    """Declarative description of one resolvable operator slot.
+
+    Parameters
+    ----------
+    arg : str
+        The :attr:`arg_types` key naming the slot on the operator expression
+        (e.g. ``"this"``, ``"reference"``, ``"expression"``, ``"ranges"``).
+    accepts : frozenset[SlotShape]
+        The AST shapes the slot accepts.
+    required : bool
+        Whether the slot must be present on a well-formed operator.
+    is_sequence : bool
+        Whether the slot holds a list of expressions (e.g. the ``ranges`` slot
+        of :class:`SpatialSetPredicate`) rather than a single expression.
+    """
+
+    arg: str
+    accepts: frozenset[SlotShape]
+    required: bool = False
+    is_sequence: bool = False
+
+    @property
+    def is_ref_slot(self) -> bool:
+        """Whether this slot resolves to a table-shaped :class:`ResolvedRef`.
+
+        A reference slot is one whose accepted shapes are all drawn from the
+        registered-table / CTE / subquery trichotomy. These are the slots for
+        which the ``ResolveOperatorRefs`` pass resolves and attaches a
+        :class:`giql.resolver.ResolvedRef`; column / literal / implicit
+        slots are declared but their resolution is deferred to later epic #114
+        migration steps.
+        """
+        return bool(self.accepts) and self.accepts <= TABLE_SHAPES
 
 
 class GenomicRange(exp.Expression):
@@ -37,7 +105,10 @@ class Intersects(SpatialPredicate):
     Example: column INTERSECTS 'chr1:1000-2000'
     """
 
-    pass
+    GIQL_SLOTS = (
+        SlotSpec("this", frozenset({"column"}), required=True),
+        SlotSpec("expression", frozenset({"literal_range", "column"}), required=True),
+    )
 
 
 class Contains(SpatialPredicate):
@@ -46,7 +117,10 @@ class Contains(SpatialPredicate):
     Example: column CONTAINS 'chr1:1500'
     """
 
-    pass
+    GIQL_SLOTS = (
+        SlotSpec("this", frozenset({"column"}), required=True),
+        SlotSpec("expression", frozenset({"literal_range", "column"}), required=True),
+    )
 
 
 class Within(SpatialPredicate):
@@ -55,7 +129,10 @@ class Within(SpatialPredicate):
     Example: column WITHIN 'chr1:1000-5000'
     """
 
-    pass
+    GIQL_SLOTS = (
+        SlotSpec("this", frozenset({"column"}), required=True),
+        SlotSpec("expression", frozenset({"literal_range", "column"}), required=True),
+    )
 
 
 class SpatialSetPredicate(exp.Expression):
@@ -72,6 +149,16 @@ class SpatialSetPredicate(exp.Expression):
         "quantifier": True,
         "ranges": True,
     }
+
+    GIQL_SLOTS = (
+        SlotSpec("this", frozenset({"column"}), required=True),
+        SlotSpec(
+            "ranges",
+            frozenset({"literal_range"}),
+            required=True,
+            is_sequence=True,
+        ),
+    )
 
 
 def _split_named_and_positional(args):
@@ -114,8 +201,7 @@ class GIQLCluster(exp.Func):
             kwargs["distance"] = positional_args[1]
         if "this" not in kwargs:
             raise ParseError(
-                "CLUSTER requires a genomic interval column as its first "
-                "argument."
+                "CLUSTER requires a genomic interval column as its first argument."
             )
         return cls(**kwargs)
 
@@ -147,8 +233,7 @@ class GIQLMerge(exp.Func):
             kwargs["distance"] = positional_args[1]
         if "this" not in kwargs:
             raise ParseError(
-                "MERGE requires a genomic interval column as its first "
-                "argument."
+                "MERGE requires a genomic interval column as its first argument."
             )
         return cls(**kwargs)
 
@@ -173,6 +258,11 @@ class GIQLDistance(exp.Func):
         "stranded": False,  # Optional: boolean for strand-specific distance
         "signed": False,  # Optional: boolean for directional distance
     }
+
+    GIQL_SLOTS = (
+        SlotSpec("this", frozenset({"column"}), required=True),
+        SlotSpec("expression", frozenset({"column"}), required=True),
+    )
 
     @classmethod
     def from_arg_list(cls, args):
@@ -206,15 +296,21 @@ class GIQLNearest(exp.Func):
         "signed": False,  # Optional: directional distance
     }
 
+    GIQL_SLOTS = (
+        SlotSpec("this", frozenset({"registered_table"}), required=True),
+        SlotSpec(
+            "reference",
+            frozenset({"literal_range", "column", "implicit_outer"}),
+        ),
+    )
+
     @classmethod
     def from_arg_list(cls, args):
         kwargs, positional_args = _split_named_and_positional(args)
         if len(positional_args) >= 1:
             kwargs["this"] = positional_args[0]
         if "this" not in kwargs:
-            raise ParseError(
-                "NEAREST requires a target table as its first argument."
-            )
+            raise ParseError("NEAREST requires a target table as its first argument.")
         return cls(**kwargs)
 
 
@@ -240,6 +336,14 @@ class GIQLDisjoin(exp.Func):
         "reference": False,  # Optional: reference table/CTE name or subquery
     }
 
+    GIQL_SLOTS = (
+        SlotSpec("this", frozenset({"registered_table"}), required=True),
+        SlotSpec(
+            "reference",
+            frozenset({"registered_table", "cte", "subquery"}),
+        ),
+    )
+
     @classmethod
     def from_arg_list(cls, args):
         kwargs, positional_args = _split_named_and_positional(args)
@@ -258,7 +362,5 @@ class GIQLDisjoin(exp.Func):
         if len(positional_args) >= 1:
             kwargs["this"] = positional_args[0]
         if "this" not in kwargs:
-            raise ParseError(
-                "DISJOIN requires a target table as its first argument."
-            )
+            raise ParseError("DISJOIN requires a target table as its first argument.")
         return cls(**kwargs)

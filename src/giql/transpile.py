@@ -13,6 +13,7 @@ from sqlglot import parse_one
 
 from giql.dialect import GIQLDialect
 from giql.generators import BaseGIQLGenerator
+from giql.resolver import resolve_operator_refs
 from giql.table import Table
 from giql.table import Tables
 from giql.transformer import ClusterTransformer
@@ -170,6 +171,13 @@ def transpile(
         ast = intersects_transformer.transform(ast)
         ast = merge_transformer.transform(ast)
         ast = cluster_transformer.transform(ast)
+
+    # Pass 1 of the normalization pipeline (epic #114): attach resolution
+    # metadata to every GIQL operator slot ahead of generation. Behavior-
+    # preserving in step 1 — the generator still uses its existing resolver
+    # paths and ignores this metadata.
+    with _reraise_as_value_error("Resolution error"):
+        ast = resolve_operator_refs(ast, tables_container)
 
     with _reraise_as_value_error("Transpilation error"):
         sql = generator.generate(ast)
