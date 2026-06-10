@@ -115,7 +115,9 @@ class TestDisjoinTranspilation:
         When:
             Transpiling a DISJOIN query.
         Then:
-            It should shift the start to canonical 0-based coordinates.
+            It should shift the start to canonical 0-based coordinates in a
+            synthesized __giql_canon_ wrapper CTE, with no inline shift left in
+            the emitter's cut arithmetic.
         """
         # Arrange & act
         sql = transpile(
@@ -130,7 +132,11 @@ class TestDisjoinTranspilation:
         )
 
         # Assert
-        assert '(t."start" - 1)' in sql
+        # Canonicalization now lives in the CanonicalizeCoordinates wrapper CTE,
+        # not as inline emitter arithmetic.
+        assert "__giql_canon_" in sql
+        assert '("start" - 1) AS "start"' in sql
+        assert '(t."start" - 1)' not in sql
 
     def test_giqldisjoin_sql_should_emit_disjoin_start_in_target_encoding(self):
         """Test that disjoin_start is emitted in the target's encoding.
@@ -403,8 +409,8 @@ class TestDisjoinTranspilation:
         When:
             Transpiling to SQL.
         Then:
-            It should omit the coverage EXISTS subquery and still emit the
-            canonical 0-based shift on the target endpoints.
+            It should omit the coverage EXISTS subquery and still apply the
+            canonical 0-based shift on the target endpoints in the wrapper CTE.
         """
         # Arrange & act
         sql = transpile(
@@ -420,7 +426,7 @@ class TestDisjoinTranspilation:
 
         # Assert
         assert "EXISTS (" not in sql
-        assert '(t."start" - 1)' in sql
+        assert '("start" - 1) AS "start"' in sql
 
     def test_giqldisjoin_sql_should_skip_exists_clause_when_target_uses_custom_column_names(
         self,
@@ -460,8 +466,9 @@ class TestDisjoinTranspilation:
         When:
             Transpiling to SQL.
         Then:
-            It should omit the coverage EXISTS subquery and still emit the
-            canonical 0-based shift on the breakpoint CTE endpoints.
+            It should omit the coverage EXISTS subquery and still apply the
+            canonical 0-based shift in the wrapper CTE shared by target and
+            (self-)reference.
         """
         # Arrange & act
         sql = transpile(
@@ -477,7 +484,11 @@ class TestDisjoinTranspilation:
 
         # Assert
         assert "EXISTS (" not in sql
-        assert '("start" - 1)' in sql
+        assert '("start" - 1) AS "start"' in sql
+        # Target and explicit self-reference dedupe to a single wrapper CTE: one
+        # CTE definition plus the two FROM references (target + reference).
+        assert sql.count("__giql_canon_") == 3
+        assert "SELECT * REPLACE" in sql
 
     def test_giqldisjoin_sql_should_emit_one_exists_clause_when_query_mixes_self_and_distinct_reference_disjoins(
         self,
@@ -695,3 +706,129 @@ class TestDisjoinTranspilation:
                 "(WITH refs AS (SELECT 1) SELECT * FROM refs) AS sub",
                 tables=["features"],
             )
+
+
+class TestDisjoinCanonicalization:
+    """DISJOIN consumes CanonicalizeCoordinates (pass 2) output (issue #122)."""
+
+    def test_giqldisjoin_sql_should_wrap_non_canonical_target_in_canon_cte(self):
+        """Test that a non-canonical target is wrapped by the canonicalize pass.
+
+        Given:
+            A self-mode DISJOIN over a 1-based closed target.
+        When:
+            Transpiling to SQL.
+        Then:
+            It should synthesize a __giql_canon_ wrapper CTE doing the canonical
+            shift via a star REPLACE, with no canonicalization arithmetic left
+            inline in the emitter's cut/breakpoint expressions.
+        """
+        # Arrange & act
+        sql = transpile(
+            "SELECT * FROM DISJOIN(features)",
+            tables=[
+                Table("features", coordinate_system="1based", interval_type="closed")
+            ],
+        )
+
+        # Assert
+        assert "__giql_canon_" in sql
+        assert "SELECT * REPLACE" in sql
+        assert '("start" - 1) AS "start"' in sql
+        # No inline canonicalization arithmetic survives in the emitter output.
+        assert '(t."start" - 1)' not in sql
+        assert '("start" - 1) AS pos' not in sql
+
+    def test_giqldisjoin_sql_should_wrap_non_canonical_reference_in_canon_cte(self):
+        """Test that a non-canonical explicit reference is wrapped by the pass.
+
+        Given:
+            A two-table DISJOIN whose distinct reference table is 1-based closed
+            and whose target is canonical.
+        When:
+            Transpiling to SQL.
+        Then:
+            It should wrap the reference in a __giql_canon_ CTE and emit no inline
+            shift on the breakpoint endpoints.
+        """
+        # Arrange & act
+        sql = transpile(
+            "SELECT * FROM DISJOIN(features, reference := refs)",
+            tables=[
+                "features",
+                Table("refs", coordinate_system="1based", interval_type="closed"),
+            ],
+        )
+
+        # Assert
+        assert "__giql_canon_" in sql
+        assert "SELECT * REPLACE" in sql
+        # The breakpoint CTE reads the canonical endpoints verbatim, no inline shift.
+        assert '("start" - 1) AS pos' not in sql
+
+    def test_giqldisjoin_sql_should_not_wrap_canonical_target(self):
+        """Test that a canonical target produces no wrapper CTE (identity fast path).
+
+        Given:
+            A self-mode DISJOIN over a canonical 0-based half-open target.
+        When:
+            Transpiling to SQL.
+        Then:
+            It should synthesize no __giql_canon_ wrapper CTE and pass the row
+            through as a plain ``t.*`` with no star REPLACE.
+        """
+        # Arrange & act
+        sql = transpile("SELECT * FROM DISJOIN(features)", tables=["features"])
+
+        # Assert
+        assert "__giql_canon_" not in sql
+        assert "REPLACE" not in sql
+        assert "t.*," in sql
+
+    def test_giqldisjoin_sql_should_dedupe_self_reference_to_one_canon_cte(self):
+        """Test that an omitted self-reference shares one wrapper with the target.
+
+        Given:
+            A self-mode (omitted reference) DISJOIN over a 1-based closed target,
+            where target and defaulted reference resolve to the same relation.
+        When:
+            Transpiling to SQL.
+        Then:
+            It should synthesize exactly one canonical wrapper CTE, referenced by
+            both the target and the reference CTEs (one definition plus two FROM
+            references).
+        """
+        # Arrange & act
+        sql = transpile(
+            "SELECT * FROM DISJOIN(features)",
+            tables=[
+                Table("features", coordinate_system="1based", interval_type="closed")
+            ],
+        )
+
+        # Assert
+        assert sql.count("AS (SELECT * REPLACE") == 1
+        assert sql.count("__giql_canon_") == 3
+
+    def test_giqldisjoin_sql_should_emit_passthrough_interval_in_target_encoding(self):
+        """Test that the passed-through interval is de-canonicalized to the target.
+
+        Given:
+            A self-mode DISJOIN over a 1-based closed target whose row passes
+            through canonical inside the wrapper CTE.
+        When:
+            Transpiling to SQL.
+        Then:
+            It should de-canonicalize the passed-through start/end back into the
+            target's encoding via a star REPLACE on the final projection.
+        """
+        # Arrange & act
+        sql = transpile(
+            "SELECT * FROM DISJOIN(features)",
+            tables=[
+                Table("features", coordinate_system="1based", interval_type="closed")
+            ],
+        )
+
+        # Assert
+        assert 't.* REPLACE ((t."start" + 1) AS "start", t."end" AS "end")' in sql

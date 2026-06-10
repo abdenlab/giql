@@ -346,12 +346,23 @@ class OperatorResolution:
         resolve (a literal range, or an unqualified column outside a
         current-table context) is left out and the generator raises its existing
         error.
+    output_tables : dict[str, Table]
+        Mapping from a slot's arg key to the *original* :class:`~giql.table.Table`
+        whose declared encoding that slot carried before
+        :func:`giql.canonicalizer.canonicalize_coordinates` (pass 2) wrapped it
+        in a canonical CTE and blanked its ``ResolvedRef.table``. The pass
+        populates this for every slot it wraps so the operator's emitter can
+        round-trip *synthesized* output columns (DISJOIN's ``disjoin_*`` and its
+        passed-through interval) back into that encoding — columns that do not
+        exist as AST in pass 2 and that a ``SELECT *`` consumer hides from any
+        outer-projection rewrite. Empty until pass 2 wraps a slot.
     """
 
     operator: str
     slots: dict[str, ResolvedRef | ResolvedInterval]
     deferrals: dict[str, SlotDeferral] = field(default_factory=dict)
     columns: dict[str, ResolvedColumn] = field(default_factory=dict)
+    output_tables: dict[str, Table] = field(default_factory=dict)
 
     def slot(self, arg: str) -> ResolvedRef | ResolvedInterval | None:
         """Return the resolved metadata for slot *arg*, or ``None``."""

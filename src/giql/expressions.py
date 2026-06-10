@@ -336,6 +336,15 @@ class GIQLDisjoin(exp.Func):
         "reference": False,  # Optional: reference table/CTE name or subquery
     }
 
+    #: Opt DISJOIN into the CanonicalizeCoordinates pass (epic #114 step 7,
+    #: issue #122). With this flag set, pass 2 wraps every non-canonical
+    #: interval-bearing operand in a canonical ``__giql_canon_*`` CTE and
+    #: rewrites the slot to point at it, so the emitter consumes already-canonical
+    #: 0-based half-open columns instead of canonicalizing inline. Identity
+    #: (0-based half-open) operands are left unwrapped and the emitted SQL stays
+    #: byte-identical.
+    GIQL_CANONICALIZE = True
+
     GIQL_SLOTS = (
         SlotSpec("this", frozenset({"registered_table"}), required=True),
         SlotSpec(

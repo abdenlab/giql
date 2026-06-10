@@ -173,6 +173,23 @@ If your data uses 1-based coordinates (like VCF or GFF), configure the
        ],
    )
 
+.. note::
+
+   **Non-canonical encodings currently require a DuckDB-compatible engine.**
+   When a table declares an encoding other than the default 0-based half-open
+   (for example ``coordinate_system="1based"`` or ``interval_type="closed"``),
+   GIQL canonicalizes its coordinates by wrapping the relation in a hidden CTE
+   that uses ``SELECT * REPLACE (...)`` syntax. That syntax is supported by
+   DuckDB, BigQuery, Snowflake, and ClickHouse, but **not** by PostgreSQL,
+   SQLite, or DataFusion. Tables in the default 0-based half-open encoding are
+   unaffected -- they take an identity fast path that emits portable SQL.
+
+   To target a non-``REPLACE`` engine today, store your data in 0-based
+   half-open form, or convert it explicitly in a CTE and reference that CTE
+   (which GIQL treats as already canonical). Making canonicalization emit
+   portable SQL on every engine is tracked in
+   `#132 <https://github.com/abdenlab/giql/issues/132>`_.
+
 Working with Point Features
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
