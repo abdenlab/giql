@@ -108,18 +108,20 @@ class TestNoOpWhenFlagsOff:
         assert actual == expected
         assert CANON_PREFIX not in actual
 
-    def test_non_canonical_table_sql_unchanged(self):
+    def test_non_canonical_table_sql_unchanged(self, monkeypatch):
         """Test that a non-canonical table's SQL is byte-identical through the pass.
 
         Given:
-            A DISJOIN over a non-canonical (1based/closed) registered table and no
-            operator opted into canonicalization.
+            A DISJOIN over a non-canonical (1based/closed) registered table with
+            its GIQL_CANONICALIZE flag explicitly toggled off (the gating an
+            unmigrated operator relies on).
         When:
             Transpiling the query and comparing against a pass-bypassed run.
         Then:
             No wrapper CTE is synthesized and the SQL is unchanged.
         """
         # Arrange
+        monkeypatch.setattr(GIQLDisjoin, "GIQL_CANONICALIZE", False, raising=False)
         query = "SELECT * FROM DISJOIN(variants)"
         variants = Table("variants", coordinate_system="1based", interval_type="closed")
         tables = Tables()
@@ -134,17 +136,19 @@ class TestNoOpWhenFlagsOff:
         assert actual == expected
         assert CANON_PREFIX not in actual
 
-    def test_pass_returns_expression_with_no_with_added(self):
+    def test_pass_returns_expression_with_no_with_added(self, monkeypatch):
         """Test that the no-op pass adds no WITH clause to the AST.
 
         Given:
-            A non-canonical DISJOIN AST and no operator opted in.
+            A non-canonical DISJOIN AST with its GIQL_CANONICALIZE flag explicitly
+            toggled off.
         When:
             Running canonicalize_coordinates directly.
         Then:
             No canonical CTE is present on the returned tree.
         """
         # Arrange
+        monkeypatch.setattr(GIQLDisjoin, "GIQL_CANONICALIZE", False, raising=False)
         tables = _tables(("1based", "closed"))
 
         # Act
@@ -175,8 +179,8 @@ class TestProjectionArithmetic:
 
         # Assert
         body = _canon_ctes(ast)[0].this.sql()
-        assert "start AS start" in body
-        assert "(end + 1) AS end" in body
+        assert '"start" AS "start"' in body
+        assert '("end" + 1) AS "end"' in body
 
     def test_one_based_half_open_projection(self, disjoin_opted_in):
         """Test the canonical projection for a 1based/half_open table.
@@ -196,8 +200,8 @@ class TestProjectionArithmetic:
 
         # Assert
         body = _canon_ctes(ast)[0].this.sql()
-        assert "(start - 1) AS start" in body
-        assert "(end - 1) AS end" in body
+        assert '("start" - 1) AS "start"' in body
+        assert '("end" - 1) AS "end"' in body
 
     def test_one_based_closed_projection(self, disjoin_opted_in):
         """Test the canonical projection for a 1based/closed table.
@@ -217,8 +221,8 @@ class TestProjectionArithmetic:
 
         # Assert
         body = _canon_ctes(ast)[0].this.sql()
-        assert "(start - 1) AS start" in body
-        assert "end AS end" in body
+        assert '("start" - 1) AS "start"' in body
+        assert '"end" AS "end"' in body
 
     def test_projection_preserves_custom_column_names(self, disjoin_opted_in):
         """Test the projection uses a table's physical column names.
@@ -228,7 +232,8 @@ class TestProjectionArithmetic:
         When:
             Running pass 2.
         Then:
-            The wrapper exposes the canonical interval under those same names.
+            The wrapper exposes the canonical interval under those same names;
+            chrom (never offset) flows through the star untouched.
         """
         # Arrange
         variants = Table(
@@ -247,9 +252,9 @@ class TestProjectionArithmetic:
 
         # Assert
         body = _canon_ctes(ast)[0].this.sql()
-        assert "chr AS chr" in body
-        assert "(lo - 1) AS lo" in body
-        assert "hi AS hi" in body
+        assert body.startswith("SELECT *")
+        assert '("lo" - 1) AS "lo"' in body
+        assert '"hi" AS "hi"' in body
 
 
 class TestPassThrough:
@@ -548,8 +553,10 @@ class TestEncodingInvariants:
             wrapped slot always becomes a Table-free CTE ref.
         """
         # Arrange
-        # A plain try/finally toggles the class flag: @given re-runs the body
-        # many times under one function-scoped fixture, so monkeypatch is unsafe.
+        # DISJOIN is opted into canonicalization by default (issue #122); a plain
+        # save/restore toggle pins it on, since @given re-runs the body many times
+        # under one function-scoped fixture, making monkeypatch unsafe.
+        previous = GIQLDisjoin.GIQL_CANONICALIZE
         GIQLDisjoin.GIQL_CANONICALIZE = True
         tables = _tables((coordinate_system, interval_type))
         is_canonical = coordinate_system == "0based" and interval_type == "half_open"
@@ -558,7 +565,7 @@ class TestEncodingInvariants:
         try:
             ast = _prepare("SELECT * FROM DISJOIN(variants)", tables)
         finally:
-            del GIQLDisjoin.GIQL_CANONICALIZE
+            GIQLDisjoin.GIQL_CANONICALIZE = previous
 
         # Assert
         ctes = _canon_ctes(ast)
@@ -580,18 +587,26 @@ class TestEncodingInvariants:
         """Test that the pass never mutates the tree while flags are off.
 
         Given:
-            A DISJOIN over a registered table with any encoding and no operator
-            opted in.
+            A DISJOIN over a registered table with any encoding and its
+            GIQL_CANONICALIZE flag explicitly toggled off (the gating an
+            unmigrated operator relies on).
         When:
             Running passes 1 and 2.
         Then:
             No canonical CTE is ever synthesized.
         """
         # Arrange
+        # Save/restore the class flag off: @given re-runs the body many times
+        # under one function-scoped fixture, making monkeypatch unsafe.
+        previous = GIQLDisjoin.GIQL_CANONICALIZE
+        GIQLDisjoin.GIQL_CANONICALIZE = False
         tables = _tables((coordinate_system, interval_type))
 
         # Act
-        ast = _prepare("SELECT * FROM DISJOIN(variants)", tables)
+        try:
+            ast = _prepare("SELECT * FROM DISJOIN(variants)", tables)
+        finally:
+            GIQLDisjoin.GIQL_CANONICALIZE = previous
 
         # Assert
         assert _canon_ctes(ast) == []
