@@ -18,6 +18,7 @@ from giql.expressions import SpatialSetPredicate
 from giql.resolver import META_KEY
 from giql.resolver import OperatorResolution
 from giql.resolver import ResolutionError
+from giql.resolver import ResolvedColumn
 from giql.resolver import ResolvedInterval
 from giql.resolver import ResolvedRef
 from giql.resolver import resolve_operator_refs
@@ -51,6 +52,11 @@ def _disjoin_node(ast: exp.Expression) -> GIQLDisjoin:
 def _nearest_node(ast: exp.Expression) -> GIQLNearest:
     """Return the single GIQLNearest node reachable from an annotated AST."""
     return next(n for n in ast.walk() if isinstance(n, GIQLNearest))
+
+
+def _distance_node(ast: exp.Expression) -> GIQLDistance:
+    """Return the single GIQLDistance node reachable from an annotated AST."""
+    return next(n for n in ast.walk() if isinstance(n, GIQLDistance))
 
 
 class TestResolveOperatorRefs:
@@ -653,6 +659,237 @@ class TestResolveOperatorRefs:
         # Assert
         ref = _disjoin_node(ast).meta[META_KEY].slot("this")
         assert ref.cols == (chrom, start, end)
+        validate_operator_refs(ast)
+
+
+class TestResolveDistanceColumns:
+    """Tests for DISTANCE interval-operand (column) resolution."""
+
+    def test_resolve_distance_columns_resolves_aliased_operands(self):
+        """Test that DISTANCE operands resolve to alias-qualified default columns.
+
+        Given:
+            A DISTANCE over two aliased registered tables with default columns.
+        When:
+            Running the resolve pass.
+        Then:
+            It should attach a ResolvedColumn per operand, qualified by the
+            operand alias and backed by the registered Table config.
+        """
+        # Arrange
+        tables = _tables("intervals_a", "intervals_b")
+        ast = parse_one(
+            "SELECT DISTANCE(a.interval, b.interval) AS dist "
+            "FROM intervals_a a, intervals_b b",
+            dialect=GIQLDialect,
+        )
+
+        # Act
+        resolve_operator_refs(ast, tables)
+
+        # Assert
+        resolution = _distance_node(ast).meta[META_KEY]
+        assert resolution.column("this") == ResolvedColumn(
+            chrom='a."chrom"',
+            start='a."start"',
+            end='a."end"',
+            strand='a."strand"',
+            table=tables.get("intervals_a"),
+        )
+        assert resolution.column("expression") == ResolvedColumn(
+            chrom='b."chrom"',
+            start='b."start"',
+            end='b."end"',
+            strand='b."strand"',
+            table=tables.get("intervals_b"),
+        )
+
+    def test_resolve_distance_columns_honors_custom_column_names(self):
+        """Test that DISTANCE operands pick up a table's custom column names.
+
+        Given:
+            A DISTANCE whose operand's registered table declares custom
+            chrom/start/end column names.
+        When:
+            Running the resolve pass.
+        Then:
+            The resolved column should carry the custom physical names,
+            qualified by the operand alias.
+        """
+        # Arrange
+        tables = Tables()
+        tables.register(
+            "features_a",
+            Table("features_a", chrom_col="chr", start_col="lo", end_col="hi"),
+        )
+        tables.register("features_b", Table("features_b"))
+        ast = parse_one(
+            "SELECT DISTANCE(a.interval, b.interval) FROM features_a a, features_b b",
+            dialect=GIQLDialect,
+        )
+
+        # Act
+        resolve_operator_refs(ast, tables)
+
+        # Assert
+        col = _distance_node(ast).meta[META_KEY].column("this")
+        assert col.chrom == 'a."chr"'
+        assert col.start == 'a."lo"'
+        assert col.end == 'a."hi"'
+        assert col.table is tables.get("features_a")
+
+    def test_resolve_distance_columns_resolves_custom_strand_column(self):
+        """Test that a DISTANCE operand resolves a table's custom strand column.
+
+        Given:
+            A DISTANCE whose operand's table declares a custom strand column.
+        When:
+            Running the resolve pass.
+        Then:
+            The resolved column's strand member should name that custom column,
+            qualified by the operand alias.
+        """
+        # Arrange
+        tables = Tables()
+        tables.register(
+            "features_a",
+            Table("features_a", strand_col="dir"),
+        )
+        tables.register("features_b", Table("features_b"))
+        ast = parse_one(
+            "SELECT DISTANCE(a.interval, b.interval) FROM features_a a, features_b b",
+            dialect=GIQLDialect,
+        )
+
+        # Act
+        resolve_operator_refs(ast, tables)
+
+        # Assert
+        col = _distance_node(ast).meta[META_KEY].column("this")
+        assert col.strand == 'a."dir"'
+
+    def test_resolve_distance_columns_defaults_when_table_strandless(self):
+        """Test that a strandless table still yields a default strand column.
+
+        Given:
+            A DISTANCE operand whose table declares no strand column.
+        When:
+            Running the resolve pass.
+        Then:
+            The resolved column's strand should fall back to the default
+            strand name, mirroring the generator's _get_column_refs.
+        """
+        # Arrange
+        tables = Tables()
+        tables.register("features_a", Table("features_a", strand_col=None))
+        tables.register("features_b", Table("features_b"))
+        ast = parse_one(
+            "SELECT DISTANCE(a.interval, b.interval) FROM features_a a, features_b b",
+            dialect=GIQLDialect,
+        )
+
+        # Act
+        resolve_operator_refs(ast, tables)
+
+        # Assert
+        col = _distance_node(ast).meta[META_KEY].column("this")
+        assert col.strand == 'a."strand"'
+
+    def test_resolve_distance_columns_unregistered_alias_has_no_table(self):
+        """Test that an operand over an unregistered relation carries no Table.
+
+        Given:
+            A DISTANCE over subquery-derived relations that are not registered
+            tables.
+        When:
+            Running the resolve pass.
+        Then:
+            The resolved column should carry default column names and a None
+            Table config, so the emitter applies no canonicalization.
+        """
+        # Arrange
+        ast = parse_one(
+            "SELECT DISTANCE(a.interval, b.interval) FROM "
+            "(SELECT 1) AS a, (SELECT 1) AS b",
+            dialect=GIQLDialect,
+        )
+
+        # Act
+        resolve_operator_refs(ast, Tables())
+
+        # Assert
+        col = _distance_node(ast).meta[META_KEY].column("this")
+        assert col.chrom == 'a."chrom"'
+        assert col.table is None
+
+    def test_resolve_distance_columns_defers_literal_range_operand(self):
+        """Test that a literal-range operand is left unresolved.
+
+        Given:
+            A DISTANCE whose second operand is a literal genomic range string.
+        When:
+            Running the resolve pass.
+        Then:
+            It should resolve the column operand but leave the literal operand
+            unresolved, deferring the diagnostic to the generator.
+        """
+        # Arrange
+        ast = parse_one(
+            "SELECT DISTANCE(a.interval, 'chr1:1000-2000') FROM features_a a",
+            dialect=GIQLDialect,
+        )
+
+        # Act
+        resolve_operator_refs(ast, _tables("features_a"))
+
+        # Assert
+        resolution = _distance_node(ast).meta[META_KEY]
+        assert resolution.column("this") is not None
+        assert resolution.column("expression") is None
+
+    def test_resolve_distance_columns_defers_unqualified_column(self):
+        """Test that an unqualified column operand is left unresolved.
+
+        Given:
+            A DISTANCE whose first operand is a column with no table qualifier.
+        When:
+            Running the resolve pass.
+        Then:
+            It should leave that operand unresolved, deferring to the generator
+            (which treats an unqualified operand as a literal range).
+        """
+        # Arrange
+        ast = parse_one(
+            "SELECT DISTANCE(interval, b.interval) FROM features_a a, features_b b",
+            dialect=GIQLDialect,
+        )
+
+        # Act
+        resolve_operator_refs(ast, _tables("features_a", "features_b"))
+
+        # Assert
+        resolution = _distance_node(ast).meta[META_KEY]
+        assert resolution.column("this") is None
+        assert resolution.column("expression") is not None
+
+    def test_resolve_distance_columns_pass_validates(self):
+        """Test that a DISTANCE-annotated tree passes the validation boundary.
+
+        Given:
+            A DISTANCE annotated with resolved column metadata.
+        When:
+            Running the validation boundary.
+        Then:
+            It should not raise (column operands are not ref slots).
+        """
+        # Arrange
+        ast = parse_one(
+            "SELECT DISTANCE(a.interval, b.interval) FROM features_a a, features_b b",
+            dialect=GIQLDialect,
+        )
+        resolve_operator_refs(ast, _tables("features_a", "features_b"))
+
+        # Act & assert
         validate_operator_refs(ast)
 
 
