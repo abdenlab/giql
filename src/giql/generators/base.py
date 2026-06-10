@@ -1,8 +1,6 @@
 from sqlglot import exp
 from sqlglot.generator import Generator
 
-from giql.canonical import canonical_end
-from giql.canonical import canonical_start
 from giql.canonical import decanonical_end
 from giql.canonical import decanonical_start
 from giql.constants import DEFAULT_CHROM_COL
@@ -159,21 +157,29 @@ class BaseGIQLGenerator(Generator):
             )
         table_name = target_ref.name
         target_chrom, target_start, target_end = target_ref.cols
-        target_table = target_ref.table
+
+        # The target's *declared* encoding, which the passed-through target row
+        # (SELECT {table_name}.*) must round-trip back into. CanonicalizeCoordinates
+        # (pass 2) preserves it on the resolution when it wraps a non-canonical
+        # target in a __giql_canon_* CTE (the slot's own Table is then None); a
+        # canonical target is left unwrapped and its slot Table carries the
+        # (identity) encoding. The synthesized `distance` column is encoding-
+        # invariant (a count of bases) and needs no round-trip.
+        output_table = self._nearest_output_encoding(expression, target_ref)
+        passthrough = self._nearest_passthrough(
+            table_name, target_start, target_end, output_table
+        )
 
         # Reference interval (a ResolvedInterval from the pass). An unresolved
-        # reference re-raises the generator's historical diagnostic.
+        # reference re-raises the generator's historical diagnostic. Input
+        # canonicalization is owned by CanonicalizeCoordinates (pass 2, issue
+        # #123): a literal range is already canonical, and a column / implicit-
+        # outer reference's endpoints are canonicalized in place by the pass, so
+        # the emitter consumes the fragments verbatim with no canonicalization.
         ref = resolution.slot("reference")
         if not isinstance(ref, ResolvedInterval):
             self._raise_nearest_reference_error(expression, mode, resolution)
-        if ref.kind == "literal_range":
-            # Literal endpoints are already canonical 0-based half-open.
-            ref_chrom, ref_start, ref_end = ref.chrom, ref.start, ref.end
-        else:
-            # Column / implicit-outer endpoints are raw; canonicalize here.
-            ref_chrom = ref.chrom
-            ref_start = canonical_start(ref.start, ref.table)
-            ref_end = canonical_end(ref.end, ref.table)
+        ref_chrom, ref_start, ref_end = ref.chrom, ref.start, ref.end
 
         # Extract parameters
         k = expression.args.get("k")
@@ -193,14 +199,23 @@ class BaseGIQLGenerator(Generator):
         target_strand = None
         if is_stranded:
             ref_strand = ref.strand
-            if target_table and target_table.strand_col:
-                target_strand = f'{table_name}."{target_table.strand_col}"'
+            # When pass 2 wraps a non-canonical target its slot Table is blanked,
+            # so the strand column name comes from the *declared* encoding the
+            # pass preserved (output_table). The canon CTE's SELECT * REPLACE
+            # passes the strand column through unchanged under its physical name,
+            # so the qualifier stays the relation NEAREST selects from.
+            if output_table and output_table.strand_col:
+                target_strand = f'{table_name}."{output_table.strand_col}"'
 
-        # Distance math below assumes 0-based half-open.
-        target_start_expr = canonical_start(
-            f'{table_name}."{target_start}"', target_table
-        )
-        target_end_expr = canonical_end(f'{table_name}."{target_end}"', target_table)
+        # Distance math below assumes 0-based half-open. Input canonicalization
+        # is owned by CanonicalizeCoordinates (pass 2, issue #123): a
+        # non-canonical target is rewritten to a canonical __giql_canon_* CTE
+        # before generation (table_name then names the CTE), so the target
+        # endpoints are consumed verbatim with no in-emitter canonicalization. The
+        # output round-trip of the passed-through target row stays here (see the
+        # SELECT projection below).
+        target_start_expr = f'{table_name}."{target_start}"'
+        target_end_expr = f'{table_name}."{target_end}"'
 
         # Build distance calculation using CASE expression
         # For NEAREST: ORDER BY absolute distance, but RETURN signed distance
@@ -239,7 +254,7 @@ class BaseGIQLGenerator(Generator):
             # Standalone mode: direct ORDER BY + LIMIT
             # Return signed distance, but order by absolute distance
             sql = f"""(
-                SELECT {table_name}.*, {distance_expr} AS distance
+                SELECT {passthrough}, {distance_expr} AS distance
                 FROM {table_name}
                 WHERE {where_sql}
                 ORDER BY {abs_distance_expr}
@@ -261,7 +276,7 @@ class BaseGIQLGenerator(Generator):
             # LATERAL mode: subquery for k-nearest neighbors
             # Return signed distance, but order by absolute distance
             sql = f"""(
-                SELECT {table_name}.*, {distance_expr} AS distance
+                SELECT {passthrough}, {distance_expr} AS distance
                 FROM {table_name}
                 WHERE {where_sql}
                 ORDER BY {abs_distance_expr}
@@ -269,6 +284,77 @@ class BaseGIQLGenerator(Generator):
             )"""
 
         return sql.strip()
+
+    def _nearest_output_encoding(
+        self, expression: GIQLNearest, target_ref: ResolvedRef
+    ) -> Table | None:
+        """Return the target's declared encoding for NEAREST's row passthrough.
+
+        ``CanonicalizeCoordinates`` (pass 2) records the original
+        :class:`~giql.table.Table` on the resolution when it wraps a non-canonical
+        target in a ``__giql_canon_*`` CTE (blanking the slot's own ``table``).
+        For an unwrapped target — a canonical registered table, or any target when
+        the pass did not run — the slot's own ``table`` carries the (identity)
+        encoding.
+
+        :param expression:
+            GIQLNearest expression node
+        :param target_ref:
+            The resolved target reference (post pass 2)
+        :return:
+            The target's declared :class:`~giql.table.Table`, or ``None``
+        """
+        resolution = expression.meta.get(META_KEY)
+        if isinstance(resolution, OperatorResolution):
+            preserved = resolution.output_tables.get("this")
+            if preserved is not None:
+                return preserved
+        return target_ref.table
+
+    def _nearest_passthrough(
+        self,
+        table_name: str,
+        target_start: str,
+        target_end: str,
+        output_table: Table | None,
+    ) -> str:
+        """Project the target's full row, de-canonicalizing the interval columns.
+
+        NEAREST passes the whole target row through (``SELECT {table_name}.*``)
+        alongside the synthesized, encoding-invariant ``distance`` column. When the
+        target's declared encoding is canonical 0-based half-open the row passes
+        through as a plain ``{table_name}.*`` — the byte-identical identity fast
+        path. When it is non-canonical the interval columns, canonical inside the
+        ``__giql_canon_*`` CTE the target was rewritten to, are de-canonicalized
+        back into that encoding via a star ``REPLACE`` so the passed-through
+        interval matches the target's own convention. (Only non-canonical targets
+        are wrapped, so the ``REPLACE`` appears only where a canonical CTE already
+        shapes the SQL.)
+
+        :param table_name:
+            The relation the row is selected from (the canon CTE name when wrapped,
+            else the registered table name) — also the column qualifier.
+        :param target_start:
+            Physical start column name
+        :param target_end:
+            Physical end column name
+        :param output_table:
+            The target's declared :class:`~giql.table.Table`, or ``None``
+        :return:
+            The passthrough projection fragment (``{table_name}.*`` or a star
+            ``REPLACE``)
+        """
+        if output_table is None or (
+            output_table.coordinate_system == "0based"
+            and output_table.interval_type == "half_open"
+        ):
+            return f"{table_name}.*"
+        pt_start = decanonical_start(f'{table_name}."{target_start}"', output_table)
+        pt_end = decanonical_end(f'{table_name}."{target_end}"', output_table)
+        return (
+            f"{table_name}.* REPLACE "
+            f'({pt_start} AS "{target_start}", {pt_end} AS "{target_end}")'
+        )
 
     def giqldisjoin_sql(self, expression: GIQLDisjoin) -> str:
         """Generate SQL for the DISJOIN table function.
@@ -475,21 +561,22 @@ class BaseGIQLGenerator(Generator):
         strand_a = col_a.strand if stranded else None
         strand_b = col_b.strand if stranded else None
 
-        # Distance math below assumes 0-based half-open.
-        start_a = canonical_start(col_a.start, col_a.table)
-        end_a = canonical_end(col_a.end, col_a.table)
-        start_b = canonical_start(col_b.start, col_b.table)
-        end_b = canonical_end(col_b.end, col_b.table)
+        # Distance math below assumes 0-based half-open. Input canonicalization is
+        # owned by CanonicalizeCoordinates (pass 2, issue #123): each operand's
+        # start/end fragments are canonicalized in place by the pass, so the
+        # emitter consumes them verbatim with no in-emitter canonicalization. The
+        # returned distance is an encoding-invariant base count, so it needs no
+        # output de-canonicalization.
 
         # Generate CASE expression
         return self._generate_distance_case(
             col_a.chrom,
-            start_a,
-            end_a,
+            col_a.start,
+            col_a.end,
             strand_a,
             col_b.chrom,
-            start_b,
-            end_b,
+            col_b.start,
+            col_b.end,
             strand_b,
             stranded=stranded,
             signed=signed,
@@ -715,12 +802,14 @@ class BaseGIQLGenerator(Generator):
         :return:
             SQL predicate string
         """
-        # Canonicalize the raw physical endpoints to 0-based half-open. The
-        # alias-qualified column fragments come pre-resolved on the
-        # ResolvedColumn; canonicalization stays here (epic #114 step #123).
+        # The alias-qualified column fragments come pre-resolved on the
+        # ResolvedColumn, already canonicalized to 0-based half-open by
+        # CanonicalizeCoordinates (pass 2, issue #123). The predicate returns a
+        # boolean, which is encoding-invariant, so no output de-canonicalization
+        # is needed.
         chrom_col = column.chrom
-        start_col = canonical_start(column.start, column.table)
-        end_col = canonical_end(column.end, column.table)
+        start_col = column.start
+        end_col = column.end
 
         chrom = parsed_range.chromosome
         start = parsed_range.start
@@ -774,14 +863,16 @@ class BaseGIQLGenerator(Generator):
         :return:
             SQL predicate string
         """
-        # Canonicalize each side's raw physical endpoints; the alias-qualified
-        # chrom/start/end fragments come pre-resolved on the ResolvedColumns.
+        # The alias-qualified chrom/start/end fragments come pre-resolved on the
+        # ResolvedColumns, already canonicalized to 0-based half-open by
+        # CanonicalizeCoordinates (pass 2, issue #123). The predicate returns a
+        # boolean (encoding-invariant), so no output de-canonicalization is needed.
         l_chrom = left.chrom
         r_chrom = right.chrom
-        l_start = canonical_start(left.start, left.table)
-        l_end = canonical_end(left.end, left.table)
-        r_start = canonical_start(right.start, right.table)
-        r_end = canonical_end(right.end, right.table)
+        l_start = left.start
+        l_end = left.end
+        r_start = right.start
+        r_end = right.end
 
         if op_type == "intersects":
             # Ranges overlap if: chrom1 = chrom2 AND start1 < end2 AND end1 > start2

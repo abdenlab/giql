@@ -99,11 +99,25 @@ class SpatialPredicate(exp.Binary):
     pass
 
 
+#: Opt the spatial predicates, DISTANCE, and NEAREST into the
+#: CanonicalizeCoordinates pass (epic #114 step 8, issue #123). With this flag
+#: set, pass 2 canonicalizes each operator's interval operands: a non-table column
+#: operand (DISTANCE / predicate operand, NEAREST's column / implicit-outer
+#: reference) has its resolution metadata rewritten in place to canonical 0-based
+#: half-open arithmetic, and a registered-table reference slot (NEAREST's target)
+#: is wrapped in a ``__giql_canon_*`` CTE. The emitter then consumes already-
+#: canonical fragments with no in-emitter canonicalization. Identity (0-based
+#: half-open) operands are left untouched and the emitted SQL stays byte-identical.
+_CANONICALIZE = True
+
+
 class Intersects(SpatialPredicate):
     """INTERSECTS spatial predicate.
 
     Example: column INTERSECTS 'chr1:1000-2000'
     """
+
+    GIQL_CANONICALIZE = _CANONICALIZE
 
     GIQL_SLOTS = (
         SlotSpec("this", frozenset({"column"}), required=True),
@@ -117,6 +131,8 @@ class Contains(SpatialPredicate):
     Example: column CONTAINS 'chr1:1500'
     """
 
+    GIQL_CANONICALIZE = _CANONICALIZE
+
     GIQL_SLOTS = (
         SlotSpec("this", frozenset({"column"}), required=True),
         SlotSpec("expression", frozenset({"literal_range", "column"}), required=True),
@@ -128,6 +144,8 @@ class Within(SpatialPredicate):
 
     Example: column WITHIN 'chr1:1000-5000'
     """
+
+    GIQL_CANONICALIZE = _CANONICALIZE
 
     GIQL_SLOTS = (
         SlotSpec("this", frozenset({"column"}), required=True),
@@ -149,6 +167,8 @@ class SpatialSetPredicate(exp.Expression):
         "quantifier": True,
         "ranges": True,
     }
+
+    GIQL_CANONICALIZE = _CANONICALIZE
 
     GIQL_SLOTS = (
         SlotSpec("this", frozenset({"column"}), required=True),
@@ -259,6 +279,8 @@ class GIQLDistance(exp.Func):
         "signed": False,  # Optional: boolean for directional distance
     }
 
+    GIQL_CANONICALIZE = _CANONICALIZE
+
     GIQL_SLOTS = (
         SlotSpec("this", frozenset({"column"}), required=True),
         SlotSpec("expression", frozenset({"column"}), required=True),
@@ -295,6 +317,16 @@ class GIQLNearest(exp.Func):
         "stranded": False,  # Optional: strand-specific search
         "signed": False,  # Optional: directional distance
     }
+
+    #: Opt NEAREST into the CanonicalizeCoordinates pass (epic #114 step 8, issue
+    #: #123). Pass 2 wraps a non-canonical *target* (the ``this`` registered-table
+    #: ref slot) in a ``__giql_canon_*`` CTE — so the emitter reads canonical
+    #: target columns and de-canonicalizes its ``*`` row passthrough back to the
+    #: declared encoding — and canonicalizes a non-table ``column`` /
+    #: ``implicit_outer`` reference's metadata in place. Identity (0-based
+    #: half-open) operands are left untouched and the emitted SQL stays
+    #: byte-identical.
+    GIQL_CANONICALIZE = _CANONICALIZE
 
     GIQL_SLOTS = (
         SlotSpec("this", frozenset({"registered_table"}), required=True),

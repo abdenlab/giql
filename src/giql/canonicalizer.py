@@ -65,14 +65,40 @@ De-canonicalization hook
 A migrated operator's *output* columns must land back in the target relation's
 declared encoding. Epic #114 step 6 envisioned a rewrite of the outermost
 ``SELECT`` projection, but that placement is wrong for a table function: DISJOIN
-synthesizes its ``disjoin_*`` output and its passed-through interval at
+and NEAREST synthesize their output columns and pass whole source rows through at
 *generation* time, so those columns do not exist as AST in this pass, and a
 ``SELECT *`` consumer hides them from any outer-projection rewrite. So
 :func:`_decanonicalize_outputs` instead records each wrapped slot's *original*
 :class:`~giql.table.Table` on the operator's
 :class:`~giql.resolver.OperatorResolution`, and the operator's emitter reads it
 to de-canonicalize those synthesized columns where it generates them (DISJOIN,
-issue #122).
+issue #122; NEAREST's target row passthrough, issue #123).
+
+Column / interval operands (epic #114, step 8 / issue #123)
+-----------------------------------------------------------
+A reference slot (DISJOIN/NEAREST target, DISJOIN reference) *owns* the relation
+it names, so the pass can wrap that whole relation in a ``__giql_canon_*`` CTE and
+redirect the slot's AST node to it. A *column* operand cannot be wrapped that way:
+``DISTANCE(a.interval, b.interval)`` and ``a.interval INTERSECTS b.interval``
+reference an alias bound in the *enclosing* query's ``FROM`` / ``JOIN``, shared
+with the user's own projection (``SELECT a.start, DISTANCE(...)``). Rewriting that
+``FROM`` source to a canonical CTE would silently canonicalize the user's own
+``a.start`` too — a behavior change. NEAREST's column / implicit-outer
+``reference`` slot is the same shape (an alias from the outer LATERAL relation).
+
+For those operands the pass therefore canonicalizes the resolution metadata *in
+place* rather than synthesizing a CTE: :func:`_canonicalize_column_operands`
+rewrites each :class:`~giql.resolver.ResolvedColumn` (DISTANCE's two operands and
+the spatial predicates' column operands) and each non-table
+:class:`~giql.resolver.ResolvedInterval` (NEAREST's ``column`` /
+``implicit_outer`` reference) so its ``start`` / ``end`` fragments carry the
+canonical 0-based half-open arithmetic and its ``table`` is blanked. The emitter
+then consumes the fragments verbatim — no in-emitter
+:func:`giql.canonical.canonical_start` / ``canonical_end``. The arithmetic is the
+same the emitter used to emit inline, so the SQL stays byte-identical for these
+operands; only the *owner* of the arithmetic moves from the generator to the pass.
+A ``literal_range`` interval is already canonical and is left untouched, and an
+operand whose ``table`` is already canonical (or ``None``) is a no-op.
 """
 
 from __future__ import annotations
@@ -94,6 +120,8 @@ from giql.expressions import SpatialSetPredicate
 from giql.expressions import Within
 from giql.resolver import META_KEY
 from giql.resolver import OperatorResolution
+from giql.resolver import ResolvedColumn
+from giql.resolver import ResolvedInterval
 from giql.resolver import ResolvedRef
 from giql.table import Table
 
@@ -146,9 +174,16 @@ def canonicalize_coordinates(expression: exp.Expression) -> exp.Expression:
         The same *expression*, with canonical wrapper CTEs inserted and migrated
         operator slots rewritten (none, while every flag is off).
     """
+    # Column / interval operands (DISTANCE, predicates, NEAREST's non-table
+    # reference) canonicalize their metadata in place; this is independent of the
+    # ref-slot CTE synthesis below and runs for every opted-in operator.
+    _canonicalize_column_operands(expression)
+
     targets = _collect_targets(expression)
     if not targets:
-        # No opted-in operator carries a non-canonical operand: strict no-op.
+        # No opted-in operator carries a non-canonical *reference-slot* operand:
+        # no wrapper CTE is synthesized (the in-place column canonicalization
+        # above already ran).
         return expression
 
     taken = _collect_taken_names(expression)
@@ -221,6 +256,102 @@ def _is_canonical(table: Table | None) -> bool:
     if table is None:
         return True
     return table.coordinate_system == "0based" and table.interval_type == "half_open"
+
+
+def _canonicalize_column_operands(expression: exp.Expression) -> None:
+    """Canonicalize column / interval operand metadata in place for opted-in ops.
+
+    For every opted-in operator (``GIQL_CANONICALIZE``) carrying column operands
+    (DISTANCE's two operands and the spatial predicates' column operands, in the
+    :attr:`OperatorResolution.columns` channel) or a non-table interval reference
+    (NEAREST's ``column`` / ``implicit_outer`` slot, in
+    :attr:`OperatorResolution.slots`), rewrite the operand's ``start`` / ``end``
+    SQL fragments to carry the canonical 0-based half-open arithmetic for its
+    declared encoding and blank its ``table``.
+
+    This replaces the in-emitter :func:`giql.canonical.canonical_start` /
+    ``canonical_end`` wrapping for those operands (epic #114, step 8). Unlike the
+    ref-slot CTE synthesis, no relation is wrapped: the operand references an
+    alias bound in the enclosing query's ``FROM`` shared with the user's own
+    projection, so canonicalizing the whole relation would change unrelated
+    columns. Operands already canonical (``table`` is ``None`` or 0-based
+    half-open) are left untouched, keeping their SQL byte-identical; a
+    ``literal_range`` interval is already canonical and is skipped.
+    """
+    for node in expression.walk():
+        if not isinstance(node, _OPERATORS):
+            continue
+        if not getattr(node, "GIQL_CANONICALIZE", False):
+            continue
+        resolution = node.meta.get(META_KEY)
+        if not isinstance(resolution, OperatorResolution):
+            continue
+        for arg, column in list(resolution.columns.items()):
+            resolution.columns[arg] = _canonicalize_column(column)
+        for arg, slot in list(resolution.slots.items()):
+            if isinstance(slot, ResolvedInterval):
+                resolution.slots[arg] = _canonicalize_interval(slot)
+
+
+def _canonicalize_column(column: ResolvedColumn) -> ResolvedColumn:
+    """Return *column* with canonical start/end fragments and a blanked table.
+
+    A no-op (returns *column* unchanged) when its backing table is already
+    canonical or ``None``.
+    """
+    if _is_canonical(column.table):
+        return column
+    return replace(
+        column,
+        start=_canonical_start_sql(column.start, column.table),
+        end=_canonical_end_sql(column.end, column.table),
+        table=None,
+    )
+
+
+def _canonicalize_interval(interval: ResolvedInterval) -> ResolvedInterval:
+    """Return *interval* with canonical start/end fragments and a blanked table.
+
+    A no-op for a ``literal_range`` (already canonical, no table) and for any
+    interval whose backing table is already canonical or ``None``.
+    """
+    if interval.kind == "literal_range" or _is_canonical(interval.table):
+        return interval
+    return replace(
+        interval,
+        start=_canonical_start_sql(interval.start, interval.table),
+        end=_canonical_end_sql(interval.end, interval.table),
+        table=None,
+    )
+
+
+def _canonical_start_sql(start: str, table: Table | None) -> str:
+    """SQL-fragment analog of :func:`giql.canonical.canonical_start`.
+
+    - ``0based``: ``start`` (identity)
+    - ``1based``: ``(start - 1)``
+    """
+    if table is None or table.coordinate_system == "0based":
+        return start
+    return f"({start} - 1)"
+
+
+def _canonical_end_sql(end: str, table: Table | None) -> str:
+    """SQL-fragment analog of :func:`giql.canonical.canonical_end`.
+
+    - ``0based`` / ``half_open``: ``end`` (identity)
+    - ``0based`` / ``closed``:    ``(end + 1)``
+    - ``1based`` / ``half_open``: ``(end - 1)``
+    - ``1based`` / ``closed``:    ``end`` (identity)
+    """
+    if table is None:
+        return end
+    key = (table.coordinate_system, table.interval_type)
+    if key == ("0based", "closed"):
+        return f"({end} + 1)"
+    if key == ("1based", "half_open"):
+        return f"({end} - 1)"
+    return end
 
 
 def _collect_taken_names(expression: exp.Expression) -> set[str]:
