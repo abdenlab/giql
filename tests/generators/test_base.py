@@ -12,10 +12,31 @@ from sqlglot import exp
 from sqlglot import parse_one
 
 from giql import Table
+from giql import transpile
+from giql.canonicalizer import canonicalize_coordinates
 from giql.dialect import GIQLDialect
 from giql.expressions import GIQLNearest
 from giql.generators import BaseGIQLGenerator
+from giql.resolver import resolve_operator_refs
 from giql.table import Tables
+
+
+def _generate_through_passes(sql: str, tables: Tables) -> str:
+    """Parse, run normalization passes 1 and 2, then generate SQL.
+
+    Coordinate canonicalization for operator operands moved out of the emitter and
+    into the CanonicalizeCoordinates pass (issue #123). Emitter-level tests that
+    pin canonicalized output must therefore run both passes before generating,
+    exactly as :func:`giql.transpile.transpile` does, rather than calling
+    ``generate`` on a bare parsed AST (which would skip canonicalization). This
+    helper is used where the full ``transpile`` pipeline would otherwise rewrite
+    the node away (a column-to-column ``INTERSECTS`` is turned into a binned
+    equi-join before the predicate emitter runs).
+    """
+    ast = parse_one(sql, dialect=GIQLDialect)
+    ast = resolve_operator_refs(ast, tables)
+    ast = canonicalize_coordinates(ast)
+    return BaseGIQLGenerator(tables=tables).generate(ast)
 
 
 @pytest.fixture
@@ -815,11 +836,10 @@ class TestBaseGIQLGenerator:
             "SELECT DISTANCE(a.interval, b.interval) as dist "
             "FROM bed_features a CROSS JOIN bed_features_b b"
         )
-        ast = parse_one(sql, dialect=GIQLDialect)
-        generator = BaseGIQLGenerator(tables=tables_with_closed_intervals)
 
-        # Act
-        output = generator.generate(ast)
+        # Act — canonicalization for DISTANCE operands now lives in the
+        # CanonicalizeCoordinates pass (#123), so run both passes via the helper.
+        output = _generate_through_passes(sql, tables_with_closed_intervals)
 
         # Assert
         expected = (
@@ -930,30 +950,29 @@ class TestBaseGIQLGenerator:
         Given:
             A 0-based closed-interval target table and NEAREST.
         When:
-            giqlnearest_sql is called.
+            The query is transpiled.
         Then:
-            It should canonicalize the target end as (target."end" + 1) but
-            omit any "+1" from the gap branches.
+            It should canonicalize the target end as (end + 1) inside the
+            wrapper CTE while the distance gap branches read the bare canonical
+            end with no trailing "+ 1".
         """
         # Arrange
-        tables = Tables()
-        tables.register("genes_closed", Table("genes_closed", interval_type="closed"))
         sql = (
             "SELECT * FROM NEAREST(genes_closed, reference := 'chr1:1000-2000', k := 3)"
         )
-        ast = parse_one(sql, dialect=GIQLDialect)
-        generator = BaseGIQLGenerator(tables=tables)
 
-        # Act
-        output = generator.generate(ast)
+        # Act — the target's coordinate canonicalization now lives in the
+        # CanonicalizeCoordinates pass (#123): a non-canonical target is wrapped
+        # in a __giql_canon_* CTE, so the (end + 1) arithmetic appears there and
+        # the distance CASE reads the bare canonical columns.
+        output = transpile(sql, tables=[Table("genes_closed", interval_type="closed")])
 
-        # Assert — canonicalization is applied, but neither gap branch carries
-        # a trailing "+ 1".
-        assert '(genes_closed."end" + 1)' in output
-        assert 'THEN (genes_closed."start" - 2000)' in output
-        assert 'ELSE (1000 - (genes_closed."end" + 1))' in output
-        assert '(genes_closed."start" - 2000 + 1)' not in output
-        assert '(1000 - (genes_closed."end" + 1) + 1)' not in output
+        # Assert — the wrapper carries (end + 1); the gap branches carry no "+ 1".
+        assert '("end" + 1) AS "end"' in output
+        assert 'THEN (__giql_canon_0."start" - 2000)' in output
+        assert 'ELSE (1000 - __giql_canon_0."end")' in output
+        assert '__giql_canon_0."start" - 2000 + 1' not in output
+        assert '1000 - __giql_canon_0."end" + 1' not in output
 
     def test_giqldistance_sql_literal_first_arg_error(self, tables_with_two_tables):
         """
@@ -1272,14 +1291,11 @@ class TestBaseGIQLGenerator:
             unchanged.
         """
         # Arrange
-        tables = Tables()
-        tables.register(table.name, table)
         sql = "SELECT * FROM variants WHERE interval INTERSECTS 'chr1:100-200'"
-        ast = parse_one(sql, dialect=GIQLDialect)
-        generator = BaseGIQLGenerator(tables=tables)
 
-        # Act
-        output = generator.generate(ast)
+        # Act — predicate operand canonicalization now lives in the
+        # CanonicalizeCoordinates pass (#123); transpile runs it.
+        output = transpile(sql, tables=[table])
 
         # Assert
         expected = (
@@ -1328,14 +1344,11 @@ class TestBaseGIQLGenerator:
             unchanged.
         """
         # Arrange
-        tables = Tables()
-        tables.register(table.name, table)
         sql = "SELECT * FROM variants WHERE interval CONTAINS 'chr1:1500-2000'"
-        ast = parse_one(sql, dialect=GIQLDialect)
-        generator = BaseGIQLGenerator(tables=tables)
 
-        # Act
-        output = generator.generate(ast)
+        # Act — predicate operand canonicalization now lives in the
+        # CanonicalizeCoordinates pass (#123); transpile runs it.
+        output = transpile(sql, tables=[table])
 
         # Assert
         expected = (
@@ -1384,14 +1397,11 @@ class TestBaseGIQLGenerator:
             unchanged.
         """
         # Arrange
-        tables = Tables()
-        tables.register(table.name, table)
         sql = "SELECT * FROM variants WHERE interval WITHIN 'chr1:1000-5000'"
-        ast = parse_one(sql, dialect=GIQLDialect)
-        generator = BaseGIQLGenerator(tables=tables)
 
-        # Act
-        output = generator.generate(ast)
+        # Act — predicate operand canonicalization now lives in the
+        # CanonicalizeCoordinates pass (#123); transpile runs it.
+        output = transpile(sql, tables=[table])
 
         # Assert
         expected = (
@@ -1417,11 +1427,13 @@ class TestBaseGIQLGenerator:
             "SELECT * FROM bed_a AS a CROSS JOIN vcf_b AS b "
             "WHERE a.interval INTERSECTS b.interval"
         )
-        ast = parse_one(sql, dialect=GIQLDialect)
-        generator = BaseGIQLGenerator(tables=tables_mixed_conventions)
 
-        # Act
-        output = generator.generate(ast)
+        # Act — column-join operand canonicalization now lives in the
+        # CanonicalizeCoordinates pass (#123). The full transpile pipeline rewrites
+        # a column-to-column INTERSECTS into a binned equi-join before the
+        # predicate emitter runs, so run passes 1 and 2 directly to exercise the
+        # predicate emitter's column-join branch on canonicalized metadata.
+        output = _generate_through_passes(sql, tables_mixed_conventions)
 
         # Assert
         expected = (
@@ -1451,11 +1463,11 @@ class TestBaseGIQLGenerator:
             "SELECT * FROM bed_a AS a CROSS JOIN vcf_b AS b "
             "WHERE a.interval CONTAINS b.interval"
         )
-        ast = parse_one(sql, dialect=GIQLDialect)
-        generator = BaseGIQLGenerator(tables=tables_mixed_conventions)
 
-        # Act
-        output = generator.generate(ast)
+        # Act — column-join operand canonicalization now lives in the
+        # CanonicalizeCoordinates pass (#123); transpile runs it. (Column-to-column
+        # CONTAINS is not rewritten into a binned join, so it reaches the emitter.)
+        output = transpile(sql, tables=list(tables_mixed_conventions))
 
         # Assert
         expected = (
@@ -1485,11 +1497,11 @@ class TestBaseGIQLGenerator:
             "SELECT * FROM bed_a AS a CROSS JOIN vcf_b AS b "
             "WHERE a.interval WITHIN b.interval"
         )
-        ast = parse_one(sql, dialect=GIQLDialect)
-        generator = BaseGIQLGenerator(tables=tables_mixed_conventions)
 
-        # Act
-        output = generator.generate(ast)
+        # Act — column-join operand canonicalization now lives in the
+        # CanonicalizeCoordinates pass (#123); transpile runs it. (Column-to-column
+        # WITHIN is not rewritten into a binned join, so it reaches the emitter.)
+        output = transpile(sql, tables=list(tables_mixed_conventions))
 
         # Assert
         expected = (
@@ -1515,11 +1527,10 @@ class TestBaseGIQLGenerator:
         """
         # Arrange
         sql = "SELECT * FROM vcf_variants WHERE interval CONTAINS 'chr1:1500'"
-        ast = parse_one(sql, dialect=GIQLDialect)
-        generator = BaseGIQLGenerator(tables=tables_with_one_based_closed)
 
-        # Act
-        output = generator.generate(ast)
+        # Act — predicate operand canonicalization now lives in the
+        # CanonicalizeCoordinates pass (#123); transpile runs it.
+        output = transpile(sql, tables=list(tables_with_one_based_closed))
 
         # Assert
         expected = (
@@ -1546,11 +1557,10 @@ class TestBaseGIQLGenerator:
             "SELECT * FROM vcf_variants "
             "WHERE interval INTERSECTS ANY('chr1:100-200', 'chr1:500-600')"
         )
-        ast = parse_one(sql, dialect=GIQLDialect)
-        generator = BaseGIQLGenerator(tables=tables_with_one_based_closed)
 
-        # Act
-        output = generator.generate(ast)
+        # Act — SpatialSetPredicate operand canonicalization now lives in the
+        # CanonicalizeCoordinates pass (#123); transpile runs it.
+        output = transpile(sql, tables=list(tables_with_one_based_closed))
 
         # Assert
         expected = (
@@ -1638,11 +1648,10 @@ class TestBaseGIQLGenerator:
             "SELECT DISTANCE(a.interval, b.interval) as dist "
             "FROM dist_a a CROSS JOIN dist_b b"
         )
-        ast = parse_one(sql, dialect=GIQLDialect)
-        generator = BaseGIQLGenerator(tables=tables)
 
-        # Act
-        output = generator.generate(ast)
+        # Act — DISTANCE operand canonicalization now lives in the
+        # CanonicalizeCoordinates pass (#123); transpile runs it.
+        output = transpile(sql, tables=list(tables))
 
         # Assert
         expected = (
@@ -1673,11 +1682,10 @@ class TestBaseGIQLGenerator:
             "SELECT DISTANCE(a.interval, b.interval) as dist "
             "FROM bed_a a CROSS JOIN vcf_b b"
         )
-        ast = parse_one(sql, dialect=GIQLDialect)
-        generator = BaseGIQLGenerator(tables=tables_mixed_conventions)
 
-        # Act
-        output = generator.generate(ast)
+        # Act — DISTANCE operand canonicalization now lives in the
+        # CanonicalizeCoordinates pass (#123); transpile runs it.
+        output = transpile(sql, tables=list(tables_mixed_conventions))
 
         # Assert
         expected = (
@@ -1691,75 +1699,128 @@ class TestBaseGIQLGenerator:
         assert output == expected
 
     @pytest.mark.parametrize(
-        "coordinate_system, interval_type, target_start, target_end",
+        "coordinate_system, interval_type, wrap_start, wrap_end",
         [
             pytest.param(
                 "0based",
-                "half_open",
-                'genes."start"',
-                'genes."end"',
-                id="0based-half_open",
-            ),
-            pytest.param(
-                "0based",
                 "closed",
-                'genes."start"',
-                '(genes."end" + 1)',
+                '"start" AS "start"',
+                '("end" + 1) AS "end"',
                 id="0based-closed",
             ),
             pytest.param(
                 "1based",
                 "half_open",
-                '(genes."start" - 1)',
-                '(genes."end" - 1)',
+                '("start" - 1) AS "start"',
+                '("end" - 1) AS "end"',
                 id="1based-half_open",
             ),
             pytest.param(
                 "1based",
                 "closed",
-                '(genes."start" - 1)',
-                'genes."end"',
+                '("start" - 1) AS "start"',
+                '"end" AS "end"',
                 id="1based-closed",
             ),
         ],
     )
     def test_giqlnearest_should_canonicalize_target_columns_for_each_convention(
-        self, coordinate_system, interval_type, target_start, target_end
+        self, coordinate_system, interval_type, wrap_start, wrap_end
     ):
-        """Test NEAREST canonicalizes target endpoints per convention.
+        """Test NEAREST canonicalizes a non-canonical target via a wrapper CTE.
 
         Given:
-            A target table declared with one of the four (coordinate_system,
-            interval_type) combinations and a literal reference range.
+            A target table declared with one of the three non-canonical
+            (coordinate_system, interval_type) combinations and a literal
+            reference range.
         When:
-            giqlnearest_sql is called.
+            The query is transpiled.
         Then:
-            It should wrap the target-side start/end (or not) per the
-            canonical 0-based half-open conversion in the distance CASE
-            expression.
+            It should wrap the target in a __giql_canon_* CTE carrying the
+            canonical conversion, and the distance CASE should read the bare
+            canonical target columns with no in-CASE canonicalization.
         """
         # Arrange
-        tables = Tables()
-        tables.register(
-            "genes",
-            Table(
-                "genes",
-                coordinate_system=coordinate_system,
-                interval_type=interval_type,
-            ),
-        )
         sql = "SELECT * FROM NEAREST(genes, reference := 'chr1:1000-2000', k := 1)"
-        ast = parse_one(sql, dialect=GIQLDialect)
-        generator = BaseGIQLGenerator(tables=tables)
+
+        # Act — the target's coordinate canonicalization now lives in the
+        # CanonicalizeCoordinates pass (#123): a non-canonical target is wrapped
+        # in a __giql_canon_* CTE before generation, so the distance CASE reads
+        # already-canonical columns.
+        output = transpile(
+            sql,
+            tables=[
+                Table(
+                    "genes",
+                    coordinate_system=coordinate_system,
+                    interval_type=interval_type,
+                )
+            ],
+        )
+
+        # Assert — the wrapper carries the canonical conversion; the distance
+        # CASE reads the bare canonical columns against the literal [1000, 2000).
+        assert f"REPLACE ({wrap_start}, {wrap_end}) FROM genes" in output
+        assert (
+            'WHEN 1000 < __giql_canon_0."end" AND 2000 > __giql_canon_0."start" THEN 0'
+        ) in output
+        assert (
+            'WHEN 2000 <= __giql_canon_0."start" THEN (__giql_canon_0."start" - 2000)'
+        ) in output
+        assert 'ELSE (1000 - __giql_canon_0."end")' in output
+
+    def test_giqlnearest_should_pass_target_columns_through_when_target_is_canonical(
+        self,
+    ):
+        """Test NEAREST leaves a canonical target unwrapped and byte-identical.
+
+        Given:
+            A canonical 0-based half-open target table and a literal reference.
+        When:
+            The query is transpiled.
+        Then:
+            It should synthesize no wrapper CTE; the distance CASE reads the raw
+            target columns and the row passes through as a plain ``genes.*``.
+        """
+        # Arrange
+        sql = "SELECT * FROM NEAREST(genes, reference := 'chr1:1000-2000', k := 1)"
 
         # Act
-        output = generator.generate(ast)
+        output = transpile(sql, tables=[Table("genes")])
 
-        # Assert — distance CASE expression uses canonicalized target endpoints
-        # against the (already-canonical) literal reference [1000, 2000).
-        assert f"WHEN 1000 < {target_end} AND 2000 > {target_start} THEN 0" in output
-        assert f"WHEN 2000 <= {target_start} THEN ({target_start} - 2000)" in output
-        assert f"ELSE (1000 - {target_end})" in output
+        # Assert
+        assert "__giql_canon_" not in output
+        assert "genes.*," in output
+        assert 'WHEN 1000 < genes."end" AND 2000 > genes."start" THEN 0' in output
+
+    def test_giqlnearest_should_round_trip_passthrough_row_to_target_encoding(self):
+        """Test NEAREST de-canonicalizes the passed-through row to the target encoding.
+
+        Given:
+            A 1-based closed target table wrapped by the canonicalization pass.
+        When:
+            The query is transpiled.
+        Then:
+            The ``*`` passthrough should de-canonicalize the interval columns
+            back to the target's declared encoding via a star REPLACE, so the
+            returned row carries the table's own convention; the synthesized
+            ``distance`` column is encoding-invariant and stays unwrapped.
+        """
+        # Arrange
+        sql = "SELECT * FROM NEAREST(genes, reference := 'chr1:1000-2000', k := 1)"
+
+        # Act
+        output = transpile(
+            sql,
+            tables=[Table("genes", coordinate_system="1based", interval_type="closed")],
+        )
+
+        # Assert — passthrough de-canonicalizes 1-based-closed start as (start + 1)
+        # and leaves end identity; the distance column carries no round-trip.
+        assert (
+            '__giql_canon_0.* REPLACE ((__giql_canon_0."start" + 1) AS "start", '
+            '__giql_canon_0."end" AS "end")'
+        ) in output
 
     def test_giqlnearest_should_canonicalize_reference_column_when_reference_is_one_based_closed(
         self, tables_mixed_conventions
@@ -1780,13 +1841,14 @@ class TestBaseGIQLGenerator:
             "SELECT * FROM vcf_b b CROSS JOIN LATERAL "
             "NEAREST(bed_a, reference := b.interval, k := 1)"
         )
-        ast = parse_one(sql, dialect=GIQLDialect)
-        generator = BaseGIQLGenerator(tables=tables_mixed_conventions)
 
-        # Act
-        output = generator.generate(ast)
+        # Act — the reference operand's canonicalization now lives in the
+        # CanonicalizeCoordinates pass (#123); transpile runs it. The reference is
+        # a column operand (not a wrappable relation), so the arithmetic stays
+        # inline; the canonical target bed_a is left unwrapped.
+        output = transpile(sql, tables=list(tables_mixed_conventions))
 
-        # Assert — reference's start canonicalized via _canonical_start
+        # Assert — reference's start canonicalized as (start - 1)
         assert '(b."start" - 1) < bed_a."end"' in output
         assert 'bed_a."end" <= (b."start" - 1)' not in output  # reference is left side
         # Reference's end stays raw (1-based closed → identity for end)
@@ -1810,11 +1872,12 @@ class TestBaseGIQLGenerator:
         """
         # Arrange
         sql = "SELECT * FROM vcf_b CROSS JOIN LATERAL NEAREST(bed_a, k := 1)"
-        ast = parse_one(sql, dialect=GIQLDialect)
-        generator = BaseGIQLGenerator(tables=tables_mixed_conventions)
 
-        # Act
-        output = generator.generate(ast)
+        # Act — the implicit-outer reference's canonicalization now lives in the
+        # CanonicalizeCoordinates pass (#123); transpile runs it. The outer
+        # reference is a column operand (not a wrappable relation), so the
+        # arithmetic stays inline; the canonical target bed_a is left unwrapped.
+        output = transpile(sql, tables=list(tables_mixed_conventions))
 
         # Assert — distance CASE uses canonicalized outer-table columns and
         # raw target-table columns.

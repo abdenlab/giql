@@ -22,6 +22,9 @@ from giql.canonicalizer import CANON_PREFIX
 from giql.canonicalizer import canonicalize_coordinates
 from giql.dialect import GIQLDialect
 from giql.expressions import GIQLDisjoin
+from giql.expressions import GIQLDistance
+from giql.expressions import GIQLNearest
+from giql.expressions import Intersects
 from giql.generators import BaseGIQLGenerator
 from giql.resolver import META_KEY
 from giql.resolver import resolve_operator_refs
@@ -631,3 +634,193 @@ def test_all_encoding_pairs_covered():
     # Assert
     assert len(pairs) == 4
     assert len(canonical) == 1
+
+
+def _two_tables(encoding) -> list[Table]:
+    """Build two registered tables under the same (non-default) encoding."""
+    coordinate_system, interval_type = encoding
+    return [
+        Table(name, coordinate_system=coordinate_system, interval_type=interval_type)
+        for name in ("intervals_a", "intervals_b")
+    ]
+
+
+class TestColumnOperandCanonicalization:
+    """Pass 2 canonicalizes column / interval operands in place (issue #123).
+
+    A column operand references an alias bound in the enclosing query's FROM,
+    shared with the user's own projection, so it cannot be wrapped in a canonical
+    CTE without changing unrelated columns. Pass 2 therefore rewrites the operand's
+    resolution metadata to carry the canonical arithmetic inline and the emitter
+    consumes it verbatim — no in-emitter canonicalization, no wrapper CTE.
+    """
+
+    def test_distance_operand_canonicalized_inline_without_wrapper_cte(self):
+        """Test a non-canonical DISTANCE operand canonicalizes inline, no wrapper.
+
+        Given:
+            Two 1-based closed tables and a DISTANCE between their columns.
+        When:
+            The query is transpiled.
+        Then:
+            The CASE arithmetic should wrap each side's start as (start - 1)
+            inline and synthesize no __giql_canon_* wrapper CTE.
+        """
+        # Arrange
+        sql = (
+            "SELECT DISTANCE(a.interval, b.interval) AS dist "
+            "FROM intervals_a a, intervals_b b"
+        )
+
+        # Act
+        output = transpile(sql, tables=_two_tables(("1based", "closed")))
+
+        # Assert
+        assert CANON_PREFIX not in output
+        assert '(a."start" - 1)' in output
+        assert '(b."start" - 1)' in output
+
+    def test_canonical_distance_operand_is_byte_identical(self):
+        """Test a canonical DISTANCE operand emits byte-identical SQL.
+
+        Given:
+            Two default (0-based half-open) tables and a DISTANCE between their
+            columns, transpiled with the operator opted in and with its
+            GIQL_CANONICALIZE flag toggled off.
+        When:
+            The two transpilations are compared.
+        Then:
+            They should be byte-identical and carry no wrapper CTE — the pass is
+            inert for an already-canonical operand.
+        """
+        # Arrange
+        sql = (
+            "SELECT DISTANCE(a.interval, b.interval) AS dist "
+            "FROM intervals_a a, intervals_b b"
+        )
+        tables = [Table("intervals_a"), Table("intervals_b")]
+
+        # Act
+        opted_in = transpile(sql, tables=tables)
+        previous = GIQLDistance.GIQL_CANONICALIZE
+        GIQLDistance.GIQL_CANONICALIZE = False
+        try:
+            flag_off = transpile(sql, tables=tables)
+        finally:
+            GIQLDistance.GIQL_CANONICALIZE = previous
+
+        # Assert
+        assert opted_in == flag_off
+        assert CANON_PREFIX not in opted_in
+
+    def test_predicate_operand_canonicalized_inline_without_wrapper_cte(self):
+        """Test a non-canonical INTERSECTS operand canonicalizes inline, no wrapper.
+
+        Given:
+            A 1-based closed table and a literal-range INTERSECTS predicate.
+        When:
+            The query is transpiled.
+        Then:
+            The predicate should wrap the table-side start as (start - 1) inline
+            and synthesize no __giql_canon_* wrapper CTE.
+        """
+        # Arrange
+        sql = "SELECT * FROM variants WHERE interval INTERSECTS 'chr1:100-200'"
+
+        # Act
+        output = transpile(
+            sql,
+            tables=[
+                Table("variants", coordinate_system="1based", interval_type="closed")
+            ],
+        )
+
+        # Assert
+        assert CANON_PREFIX not in output
+        assert '("start" - 1) < 200' in output
+
+    def test_metadata_blanked_after_in_place_canonicalization(self):
+        """Test a canonicalized column operand carries a blanked Table.
+
+        Given:
+            A 1-based closed INTERSECTS predicate annotated by pass 1.
+        When:
+            Pass 2 runs.
+        Then:
+            The operand's ResolvedColumn should carry the canonical arithmetic and
+            its Table should be blanked so the emitter applies no further wrapping.
+        """
+        # Arrange
+        tables = _tables(("1based", "closed"), names=("variants",))
+        query = "SELECT * FROM variants WHERE interval INTERSECTS 'chr1:100-200'"
+        ast = resolve_operator_refs(parse_one(query, dialect=GIQLDialect), tables)
+
+        # Act
+        ast = canonicalize_coordinates(ast)
+
+        # Assert
+        node = next(n for n in ast.walk() if isinstance(n, Intersects))
+        column = node.meta[META_KEY].column("this")
+        assert column.table is None
+        assert column.start == '("start" - 1)'
+
+
+class TestNearestTargetCanonicalization:
+    """NEAREST's registered-table target is wrapped and its row round-trips."""
+
+    def test_non_canonical_target_wrapped_and_row_round_tripped(self):
+        """Test a non-canonical NEAREST target is wrapped and its row de-canonicalized.
+
+        Given:
+            A 1-based closed NEAREST target table and a literal reference.
+        When:
+            The query is transpiled.
+        Then:
+            The target should be wrapped in a __giql_canon_* CTE, the distance
+            CASE should read the bare canonical columns, and the passed-through
+            row should de-canonicalize the interval back to the declared encoding.
+        """
+        # Arrange
+        sql = "SELECT * FROM NEAREST(genes, reference := 'chr1:1000-2000', k := 1)"
+
+        # Act
+        output = transpile(
+            sql,
+            tables=[Table("genes", coordinate_system="1based", interval_type="closed")],
+        )
+
+        # Assert
+        assert f"{CANON_PREFIX}0 AS (SELECT * REPLACE" in output
+        assert 'WHEN 1000 < __giql_canon_0."end"' in output
+        assert (
+            '__giql_canon_0.* REPLACE ((__giql_canon_0."start" + 1) AS "start"'
+        ) in output
+
+    def test_canonical_target_not_wrapped(self):
+        """Test a canonical NEAREST target is left unwrapped.
+
+        Given:
+            A canonical 0-based half-open NEAREST target and a literal reference,
+            transpiled with NEAREST opted in and with its flag toggled off.
+        When:
+            The two transpilations are compared.
+        Then:
+            They should be byte-identical with no wrapper CTE — the identity fast
+            path.
+        """
+        # Arrange
+        sql = "SELECT * FROM NEAREST(genes, reference := 'chr1:1000-2000', k := 1)"
+        tables = [Table("genes")]
+
+        # Act
+        opted_in = transpile(sql, tables=tables)
+        previous = GIQLNearest.GIQL_CANONICALIZE
+        GIQLNearest.GIQL_CANONICALIZE = False
+        try:
+            flag_off = transpile(sql, tables=tables)
+        finally:
+            GIQLNearest.GIQL_CANONICALIZE = previous
+
+        # Assert
+        assert opted_in == flag_off
+        assert CANON_PREFIX not in opted_in
