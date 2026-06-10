@@ -26,8 +26,10 @@ from giql.resolver import ResolvedInterval
 from giql.resolver import ResolvedRef
 from giql.resolver import resolve_operator_refs
 from giql.resolver import validate_operator_refs
+from giql.resolver import validate_projection_contracts
 from giql.table import Table
 from giql.table import Tables
+from giql.transpile import transpile
 
 hypothesis = pytest.importorskip("hypothesis")
 from hypothesis import given  # noqa: E402
@@ -1396,3 +1398,244 @@ class TestValidateOperatorRefs:
         # Act & assert
         with pytest.raises(ResolutionError, match="expected ResolvedInterval"):
             validate_operator_refs(ast)
+
+
+class TestValidateProjectionContracts:
+    """Tests for the validate_projection_contracts pass."""
+
+    def test_validate_projection_contracts_cte_missing_column_raises(self):
+        """Test that a CTE operand missing a canonical column is rejected.
+
+        Given:
+            A DISJOIN reference naming a CTE whose projection lists only
+            ``chrom`` and ``start``, omitting the canonical ``end`` column.
+        When:
+            Running the resolve pass over the annotated AST.
+        Then:
+            It should raise a ValueError naming the operator, the CTE, and the
+            missing ``end`` column.
+        """
+        # Arrange
+        ast = parse_one(
+            "WITH refs AS (SELECT chrom, start FROM other) "
+            "SELECT * FROM DISJOIN(features, reference := refs)",
+            dialect=GIQLDialect,
+        )
+
+        # Act & assert
+        with pytest.raises(ValueError, match=r"GIQLDisjoin reference CTE 'refs'.*'end'"):
+            resolve_operator_refs(ast, _tables("features", "other"))
+
+    def test_validate_projection_contracts_subquery_missing_column_raises(self):
+        """Test that a subquery operand missing a canonical column is rejected.
+
+        Given:
+            A DISJOIN reference subquery whose projection lists only ``start``
+            and ``end``, omitting the canonical ``chrom`` column.
+        When:
+            Running the resolve pass over the annotated AST.
+        Then:
+            It should raise a ValueError naming the operator, the subquery, and
+            the missing ``chrom`` column.
+        """
+        # Arrange
+        ast = parse_one(
+            "SELECT * FROM DISJOIN(features, "
+            'reference := (SELECT start, "end" FROM other))',
+            dialect=GIQLDialect,
+        )
+
+        # Act & assert
+        with pytest.raises(ValueError, match=r"GIQLDisjoin reference subquery.*'chrom'"):
+            resolve_operator_refs(ast, _tables("features", "other"))
+
+    def test_validate_projection_contracts_well_formed_cte_passes(self):
+        """Test that a CTE projecting all canonical columns is accepted.
+
+        Given:
+            A DISJOIN reference naming a CTE whose projection lists all three
+            canonical ``chrom`` / ``start`` / ``end`` columns.
+        When:
+            Running the resolve pass over the annotated AST.
+        Then:
+            It should resolve the reference to a CTE without raising.
+        """
+        # Arrange
+        ast = parse_one(
+            'WITH refs AS (SELECT chrom, start, "end" FROM other) '
+            "SELECT * FROM DISJOIN(features, reference := refs)",
+            dialect=GIQLDialect,
+        )
+
+        # Act
+        resolve_operator_refs(ast, _tables("features", "other"))
+
+        # Assert
+        ref = _disjoin_node(ast).meta[META_KEY].slot("reference")
+        assert ref.kind == "cte"
+
+    def test_validate_projection_contracts_well_formed_subquery_passes(self):
+        """Test that a subquery projecting all canonical columns is accepted.
+
+        Given:
+            A DISJOIN reference subquery whose projection lists all three
+            canonical ``chrom`` / ``start`` / ``end`` columns.
+        When:
+            Running the resolve pass over the annotated AST.
+        Then:
+            It should resolve the reference to a subquery without raising.
+        """
+        # Arrange
+        ast = parse_one(
+            "SELECT * FROM DISJOIN(features, "
+            'reference := (SELECT chrom, start, "end" FROM other))',
+            dialect=GIQLDialect,
+        )
+
+        # Act
+        resolve_operator_refs(ast, _tables("features", "other"))
+
+        # Assert
+        ref = _disjoin_node(ast).meta[META_KEY].slot("reference")
+        assert ref.kind == "subquery"
+
+    def test_validate_projection_contracts_star_cte_passes(self):
+        """Test that a ``SELECT *`` CTE is passed without a false positive.
+
+        Given:
+            A DISJOIN reference naming a CTE whose projection is a ``*`` star,
+            so its output columns are not statically known.
+        When:
+            Running the resolve pass over the annotated AST.
+        Then:
+            It should resolve the reference without raising (documented star
+            limitation).
+        """
+        # Arrange
+        ast = parse_one(
+            "WITH refs AS (SELECT * FROM other) "
+            "SELECT * FROM DISJOIN(features, reference := refs)",
+            dialect=GIQLDialect,
+        )
+
+        # Act
+        resolve_operator_refs(ast, _tables("features", "other"))
+
+        # Assert
+        ref = _disjoin_node(ast).meta[META_KEY].slot("reference")
+        assert ref.kind == "cte"
+
+    def test_validate_projection_contracts_star_subquery_passes(self):
+        """Test that a ``SELECT *`` subquery is passed without a false positive.
+
+        Given:
+            A DISJOIN reference subquery whose projection is a ``*`` star, so its
+            output columns are not statically known.
+        When:
+            Running the resolve pass over the annotated AST.
+        Then:
+            It should resolve the reference without raising (documented star
+            limitation).
+        """
+        # Arrange
+        ast = parse_one(
+            "SELECT * FROM DISJOIN(features, reference := (SELECT * FROM other))",
+            dialect=GIQLDialect,
+        )
+
+        # Act
+        resolve_operator_refs(ast, _tables("features", "other"))
+
+        # Assert
+        ref = _disjoin_node(ast).meta[META_KEY].slot("reference")
+        assert ref.kind == "subquery"
+
+    def test_validate_projection_contracts_placeholder_cte_passes(self):
+        """Test that a bare-literal placeholder CTE is passed.
+
+        Given:
+            A DISJOIN reference naming a CTE whose projection is the placeholder
+            ``SELECT 1`` -- an unnamed literal with no statically intentional
+            column schema.
+        When:
+            Running the resolve pass over the annotated AST.
+        Then:
+            It should resolve the reference without raising (unresolvable
+            projection limitation).
+        """
+        # Arrange
+        ast = parse_one(
+            "WITH refs AS (SELECT 1) SELECT * FROM DISJOIN(features, reference := refs)",
+            dialect=GIQLDialect,
+        )
+
+        # Act
+        resolve_operator_refs(ast, _tables("features", "other"))
+
+        # Assert
+        ref = _disjoin_node(ast).meta[META_KEY].slot("reference")
+        assert ref.kind == "cte"
+
+    def test_validate_projection_contracts_can_run_standalone(self):
+        """Test that the contract check runs as a standalone boundary.
+
+        Given:
+            An AST already annotated by the resolve pass whose DISJOIN reference
+            CTE omits the canonical ``end`` column.
+        When:
+            Calling ``validate_projection_contracts`` directly on the annotated
+            AST.
+        Then:
+            It should raise the GIQL diagnostic independently of the surrounding
+            resolve pass.
+        """
+        # Arrange
+        ast = parse_one(
+            "WITH refs AS (SELECT chrom, start FROM other) "
+            "SELECT * FROM DISJOIN(features, reference := refs)",
+            dialect=GIQLDialect,
+        )
+        node = _disjoin_node(ast)
+        node.meta[META_KEY] = OperatorResolution(
+            "GIQLDisjoin",
+            {
+                "this": ResolvedRef(
+                    kind="registered_table",
+                    name="features",
+                    cols=("chrom", "start", "end"),
+                    table=Table("features"),
+                    coverage_skippable=False,
+                ),
+                "reference": ResolvedRef(
+                    kind="cte",
+                    name="refs",
+                    cols=("chrom", "start", "end"),
+                    table=None,
+                    coverage_skippable=False,
+                ),
+            },
+        )
+
+        # Act & assert
+        with pytest.raises(ValueError, match="does not project the canonical"):
+            validate_projection_contracts(ast)
+
+    def test_validate_projection_contracts_fires_through_transpile(self):
+        """Test that the diagnostic surfaces through ``transpile``.
+
+        Given:
+            A GIQL query whose DISJOIN reference CTE omits the canonical ``end``
+            column.
+        When:
+            Transpiling the query.
+        Then:
+            It should raise a ValueError carrying the GIQL-level diagnostic
+            rather than emitting SQL that fails at execution time.
+        """
+        # Arrange, act, & assert
+        with pytest.raises(ValueError, match=r"GIQLDisjoin reference CTE 'refs'.*'end'"):
+            transpile(
+                "WITH refs AS (SELECT chrom, start FROM other) "
+                "SELECT * FROM DISJOIN(features, reference := refs)",
+                tables=["features", "other"],
+            )
