@@ -280,41 +280,56 @@ class BaseGIQLGenerator(Generator):
         filter drops sub-intervals overlapping no reference interval. When no
         ``reference`` is given it defaults to the target set.
 
-        Coordinate-system round-tripping is handled by
-        :func:`giql.canonical.decanonical_start` /
-        :func:`giql.canonical.decanonical_end`.
+        Input canonicalization is owned by ``CanonicalizeCoordinates`` (pass 2,
+        issue #122): every non-canonical interval-bearing operand is rewritten to
+        a canonical ``__giql_canon_*`` CTE before generation, so this emitter
+        consumes already-canonical 0-based half-open columns and applies no
+        in-emitter canonicalization arithmetic. The output round-trip back to the
+        target's declared encoding stays here — the ``disjoin_*`` columns and the
+        passed-through interval are synthesized at generation time and cannot be
+        reached by a pass-2 outermost-projection rewrite — driven by the original
+        encoding the pass preserves on the resolution.
 
         :param expression:
             GIQLDisjoin expression node
         :return:
             SQL string (a parenthesized WITH-CTE subquery) for the DISJOIN table
         """
-        # Unpack the resolution metadata attached by ResolveOperatorRefs (pass 1).
+        # Unpack the resolution metadata attached by ResolveOperatorRefs (pass 1)
+        # and rewritten by CanonicalizeCoordinates (pass 2).
         target_ref, ref, ref_from = self._disjoin_resolution(expression)
         target_name = target_ref.name
         target_chrom, target_start, target_end = target_ref.cols
-        target_table = target_ref.table
         ref_chrom, ref_start, ref_end = ref.cols
-        ref_table = ref.table
         is_self_reference = ref.coverage_skippable
 
-        # Canonical target endpoints, qualified by the __giql_dj_tgt alias.
+        # The target's *declared* encoding, which disjoin_* output and the
+        # passed-through interval must round-trip back into. Pass 2 preserves it
+        # on the resolution when it wraps a non-canonical target (the slot's own
+        # Table is then None); a canonical target is left unwrapped and its slot
+        # Table carries the (identity) encoding.
+        output_table = self._disjoin_output_encoding(expression, target_ref)
+
+        # Post-pass every operand is canonical 0-based half-open (a registered
+        # table is either identity-encoded or rewritten to a canonical CTE), so
+        # the physical columns are consumed verbatim with no canonicalization.
         t_chrom = f't."{target_chrom}"'
-        t_start = canonical_start(f't."{target_start}"', target_table)
-        t_end = canonical_end(f't."{target_end}"', target_table)
+        t_start = f't."{target_start}"'
+        t_end = f't."{target_end}"'
 
-        # Canonical reference endpoints: unqualified for the breakpoint CTE,
-        # qualified by 'r' for the coverage EXISTS filter.
-        bp_start = canonical_start(f'"{ref_start}"', ref_table)
-        bp_end = canonical_end(f'"{ref_end}"', ref_table)
-        r_start = canonical_start(f'r."{ref_start}"', ref_table)
-        r_end = canonical_end(f'r."{ref_end}"', ref_table)
+        # Reference endpoints: unqualified for the breakpoint CTE, qualified by
+        # 'r' for the coverage EXISTS filter.
+        bp_start = f'"{ref_start}"'
+        bp_end = f'"{ref_end}"'
+        r_start = f'r."{ref_start}"'
+        r_end = f'r."{ref_end}"'
 
-        # disjoin_start / disjoin_end are emitted in the target table's
-        # coordinate system so an output row carries one convention; the cut
-        # math above stays canonical internally.
-        out_start = decanonical_start("s.seg_start", target_table)
-        out_end = decanonical_end("s.seg_end", target_table)
+        # disjoin_start / disjoin_end are emitted in the target's declared
+        # coordinate system so an output row carries one convention; the cut math
+        # stays canonical internally.
+        out_start = decanonical_start("s.seg_start", output_table)
+        out_end = decanonical_end("s.seg_end", output_table)
+        passthrough = self._disjoin_passthrough(target_start, target_end, output_table)
 
         # Build the WITH clause one named fragment per __giql_dj_* CTE so each
         # block reads on its own. The `seg_end > seg_start` guard in the final
@@ -361,7 +376,8 @@ class BaseGIQLGenerator(Generator):
             )
         where_sql = " AND ".join(where_clauses)
         final_select = (
-            f"SELECT t.*, s.kc AS disjoin_chrom, {out_start} AS disjoin_start, "
+            f"SELECT {passthrough}, s.kc AS disjoin_chrom, "
+            f"{out_start} AS disjoin_start, "
             f"{out_end} AS disjoin_end FROM __giql_dj_tgt AS t "
             f'JOIN __giql_dj_segs AS s ON t."{target_chrom}" = s.kc '
             f'AND t."{target_start}" = s.ks AND t."{target_end}" = s.ke '
@@ -370,6 +386,64 @@ class BaseGIQLGenerator(Generator):
         return (
             f"(WITH {ref_cte}, {tgt_cte}, {bp_cte}, "
             f"{cuts_cte}, {segs_cte} {final_select})"
+        )
+
+    def _disjoin_output_encoding(
+        self, expression: GIQLDisjoin, target_ref: ResolvedRef
+    ) -> Table | None:
+        """Return the target's declared encoding for DISJOIN's output round-trip.
+
+        ``CanonicalizeCoordinates`` (pass 2) records the original
+        :class:`~giql.table.Table` on the resolution when it wraps a non-canonical
+        target (blanking the slot's own ``table``). For an unwrapped target — a
+        canonical registered table, or any target when the pass did not run — the
+        slot's own ``table`` carries the (identity) encoding.
+
+        :param expression:
+            GIQLDisjoin expression node
+        :param target_ref:
+            The resolved target reference (post pass 2)
+        :return:
+            The target's declared :class:`~giql.table.Table`, or ``None``
+        """
+        resolution = expression.meta.get(META_KEY)
+        if isinstance(resolution, OperatorResolution):
+            preserved = resolution.output_tables.get("this")
+            if preserved is not None:
+                return preserved
+        return target_ref.table
+
+    def _disjoin_passthrough(
+        self, target_start: str, target_end: str, output_table: Table | None
+    ) -> str:
+        """Project the target's full row, de-canonicalizing the interval columns.
+
+        When the target's declared encoding is canonical 0-based half-open the
+        row passes through as a plain ``t.*`` — the byte-identical identity fast
+        path. When it is non-canonical the interval columns, canonical inside
+        ``__giql_dj_tgt``, are de-canonicalized back into that encoding via a star
+        ``REPLACE`` so the passed-through interval matches the target's own
+        convention. (Only non-canonical targets are wrapped, so the ``REPLACE``
+        appears only where a canonical CTE already shapes the SQL.)
+
+        :param target_start:
+            Physical start column name
+        :param target_end:
+            Physical end column name
+        :param output_table:
+            The target's declared :class:`~giql.table.Table`, or ``None``
+        :return:
+            The passthrough projection fragment (``t.*`` or a star ``REPLACE``)
+        """
+        if output_table is None or (
+            output_table.coordinate_system == "0based"
+            and output_table.interval_type == "half_open"
+        ):
+            return "t.*"
+        pt_start = decanonical_start(f't."{target_start}"', output_table)
+        pt_end = decanonical_end(f't."{target_end}"', output_table)
+        return (
+            f't.* REPLACE ({pt_start} AS "{target_start}", {pt_end} AS "{target_end}")'
         )
 
     def giqldistance_sql(self, expression: GIQLDistance) -> str:

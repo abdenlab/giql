@@ -34,6 +34,20 @@ reference, assumed canonical), is left untouched — the readability-vs-volume
 tradeoff the epic calls out (only synthesize a wrapper when canonicalization
 actually changes columns).
 
+Engine portability (known limitation)
+-------------------------------------
+The wrapper projection uses ``SELECT * REPLACE (...)`` to canonicalize the
+interval columns in place while passing every other source column through
+untouched (the registry declares only the genomic columns, so an explicit
+full-column projection is not available). ``* REPLACE`` is supported by DuckDB,
+BigQuery, Snowflake, and ClickHouse, but **not** by PostgreSQL, SQLite, or
+DataFusion — so a non-canonical encoding currently transpiles to
+engine-incompatible SQL on those targets. Identity-encoded (default 0-based
+half-open) relations are unaffected: they skip wrapping entirely and emit
+portable SQL. Making the emit strategy dialect-aware (an explicit portable
+projection when the target lacks ``REPLACE`` or the full schema is declared) is
+tracked in https://github.com/abdenlab/giql/issues/132.
+
 Gating (epic #114, step 6)
 --------------------------
 The pass is gated per operator by a ``GIQL_CANONICALIZE`` class attribute on the
@@ -48,11 +62,17 @@ suite is the migration oracle.
 
 De-canonicalization hook
 -------------------------
-The outermost ``SELECT`` projection receives a de-canonicalization rewrite for
-any output column that a migrated operator emitted in canonical form but that
-must land in the user's preferred encoding. With no operator migrated in this
-issue that rewrite has nothing to act on; :func:`_decanonicalize_outputs` is the
-designed-but-inert hook the port issues will fill in.
+A migrated operator's *output* columns must land back in the target relation's
+declared encoding. Epic #114 step 6 envisioned a rewrite of the outermost
+``SELECT`` projection, but that placement is wrong for a table function: DISJOIN
+synthesizes its ``disjoin_*`` output and its passed-through interval at
+*generation* time, so those columns do not exist as AST in this pass, and a
+``SELECT *`` consumer hides them from any outer-projection rewrite. So
+:func:`_decanonicalize_outputs` instead records each wrapped slot's *original*
+:class:`~giql.table.Table` on the operator's
+:class:`~giql.resolver.OperatorResolution`, and the operator's emitter reads it
+to de-canonicalize those synthesized columns where it generates them (DISJOIN,
+issue #122).
 """
 
 from __future__ import annotations
@@ -246,22 +266,39 @@ def _fresh_name(next_name, taken: set[str]) -> str:
 def _canonical_projection(ref: ResolvedRef) -> exp.Select:
     """Build the ``SELECT`` body that projects *ref*'s table to canonical form.
 
-    The projection exposes the canonical ``chrom`` / ``start`` / ``end`` columns
-    under their original physical names, with ``start`` / ``end`` rewritten by
-    the :mod:`giql.canonical` arithmetic for the table's declared encoding. This
-    is the interval contract every CTE / subquery reference is assumed to satisfy
-    (canonical 0-based half-open ``chrom`` / ``start`` / ``end``); operator port
-    issues #122 / #123 may extend it with pass-through columns as their emitters
-    require.
+    The projection is a **full-row passthrough**: ``SELECT *`` keeps every
+    physical column of the source relation, and a star ``REPLACE`` rewrites only
+    the two interval columns — ``start`` / ``end``, under their original physical
+    names — with the :mod:`giql.canonical` arithmetic for the table's declared
+    encoding. ``chrom`` and every non-interval column flow through the star
+    untouched.
+
+    The full row (rather than a bare ``chrom`` / ``start`` / ``end`` triple) is
+    required by table-function operators whose final projection passes the whole
+    source row through — DISJOIN's ``SELECT t.*`` (#122) — and by their join-back
+    semantics, which key on the source's physical columns. A CTE / subquery
+    reference that only needs the canonical interval triple still reads those
+    three columns from the same wrapper.
     """
-    chrom, start, end = ref.cols
+    _chrom, start, end = ref.cols
     table = ref.table
     relation = ref.name
-    return exp.select(
-        exp.alias_(exp.column(chrom), chrom),
-        exp.alias_(_canonical_start_expr(start, table), start),
-        exp.alias_(_canonical_end_expr(end, table), end),
-    ).from_(exp.to_table(relation))
+    # Quote the interval identifiers: the canonical column names are physical and
+    # routinely reserved words (the default genomic layout's ``start`` / ``end``),
+    # so the executed wrapper must quote them.
+    star = exp.Star(
+        replace=[
+            exp.alias_(
+                _canonical_start_expr(start, table),
+                exp.to_identifier(start, quoted=True),
+            ),
+            exp.alias_(
+                _canonical_end_expr(end, table),
+                exp.to_identifier(end, quoted=True),
+            ),
+        ]
+    )
+    return exp.Select(expressions=[star]).from_(exp.to_table(relation))
 
 
 def _canonical_start_expr(start: str, table: Table | None) -> exp.Expression:
@@ -272,7 +309,7 @@ def _canonical_start_expr(start: str, table: Table | None) -> exp.Expression:
     - ``0based``: ``start`` (identity)
     - ``1based``: ``start - 1``
     """
-    col = exp.column(start)
+    col = exp.column(exp.to_identifier(start, quoted=True))
     if table is None or table.coordinate_system == "0based":
         return col
     return exp.paren(exp.Sub(this=col, expression=exp.Literal.number(1)))
@@ -288,7 +325,7 @@ def _canonical_end_expr(end: str, table: Table | None) -> exp.Expression:
     - ``1based`` / ``half_open``: ``end - 1``
     - ``1based`` / ``closed``:    ``end`` (identity)
     """
-    col = exp.column(end)
+    col = exp.column(exp.to_identifier(end, quoted=True))
     if table is None:
         return col
     key = (table.coordinate_system, table.interval_type)
@@ -343,13 +380,27 @@ def _decanonicalize_outputs(
     expression: exp.Expression,
     targets: list[tuple[exp.Expression, str, ResolvedRef]],
 ) -> None:
-    """De-canonicalize migrated operator outputs in the outermost projection.
+    """Preserve each wrapped slot's original encoding for the emitter's output.
 
-    Inert hook (epic #114, step 6). The outermost ``SELECT`` projection list
-    should rewrite any output column a migrated operator emitted in canonical
-    form back into the user's preferred encoding. No operator is migrated in
-    issue #121, so there is nothing to rewrite; the operator port issues (#122,
-    #123) fill this in alongside flipping their ``GIQL_CANONICALIZE`` flags.
+    A wrapped slot's :class:`~giql.resolver.ResolvedRef` is rewritten to a
+    ``Table``-free canonical-CTE ref, which would otherwise lose the
+    (non-canonical) encoding the operator's *output* must round-trip back into.
+
+    The de-canonicalization itself cannot be applied on the AST in this pass for
+    a table-function operator: DISJOIN synthesizes its ``disjoin_*`` columns and
+    its passed-through interval at *generation* time, so those columns do not
+    exist as AST here, and a ``SELECT *`` consumer hides them from any
+    outer-projection rewrite. The originally-envisioned outermost-projection
+    rewrite (epic #114, step 6) is therefore wrong for projected
+    table-function columns; instead this hook records the per-slot original
+    :class:`~giql.table.Table` on the :class:`~giql.resolver.OperatorResolution`,
+    and the operator's emitter reads it to de-canonicalize those synthesized
+    columns where it generates them (see :issue:`122`).
+
+    *targets* carries the original (pre-rewrite) refs, so ``ref.table`` is the
+    source relation's declared encoding.
     """
-    # Intentionally empty until an operator opts in (see module docstring).
-    return None
+    for node, arg, ref in targets:
+        resolution = node.meta.get(META_KEY)
+        if isinstance(resolution, OperatorResolution):
+            resolution.output_tables[arg] = ref.table
