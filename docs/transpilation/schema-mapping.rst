@@ -186,9 +186,13 @@ If your data uses 1-based coordinates (like VCF or GFF), configure the
 
    To target a non-``REPLACE`` engine today, store your data in 0-based
    half-open form, or convert it explicitly in a CTE and reference that CTE
-   (which GIQL treats as already canonical). Making canonicalization emit
-   portable SQL on every engine is tracked in
-   `#132 <https://github.com/abdenlab/giql/issues/132>`_.
+   (which GIQL treats as already canonical). Such a CTE -- and any CTE or
+   subquery passed as an operator reference -- must project the canonical
+   ``chrom`` / ``start`` / ``end`` columns; GIQL validates this contract at
+   transpile time and raises a ``ValueError`` naming the missing column(s)
+   rather than emitting SQL that fails with an engine ``column not found``
+   error. Making canonicalization emit portable SQL on every engine is tracked
+   in `#132 <https://github.com/abdenlab/giql/issues/132>`_.
 
 Working with Point Features
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
