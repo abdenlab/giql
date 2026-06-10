@@ -5,6 +5,7 @@ Tests verify that DISTANCE() is correctly transpiled to SQL CASE expressions.
 
 from sqlglot import parse_one
 
+from giql import transpile
 from giql.dialect import GIQLDialect
 from giql.generators import BaseGIQLGenerator
 
@@ -68,6 +69,25 @@ class TestDistanceTranspilation:
         expected = """SELECT CASE WHEN a."chrom" != b."chrom" THEN NULL WHEN a."start" < b."end" AND a."end" > b."start" THEN 0 WHEN a."end" <= b."start" THEN (b."start" - a."end") ELSE (a."start" - b."end") END AS dist FROM features_a AS a CROSS JOIN features_b AS b"""
 
         assert output == expected, f"Expected:\n{expected}\n\nGot:\n{output}"
+
+    def test_distance_resolver_path_matches_direct_generation(self):
+        """
+        GIVEN a DISTANCE query over registered default-convention tables
+        WHEN transpiling through the full pipeline (the resolver pass) versus
+            generating directly from the parsed AST
+        THEN both paths should emit byte-identical SQL, proving the
+            ResolvedColumn metadata path reproduces the legacy string path
+        """
+        query = (
+            "SELECT DISTANCE(a.interval, b.interval) AS dist "
+            "FROM features_a a, features_b b"
+        )
+
+        via_transpile = transpile(query, tables=["features_a", "features_b"])
+        ast = parse_one(query, dialect=GIQLDialect)
+        via_generate = BaseGIQLGenerator().generate(ast)
+
+        assert via_transpile == via_generate
 
     def test_distance_transpilation_signed_duckdb(self):
         """

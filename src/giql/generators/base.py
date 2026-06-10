@@ -20,6 +20,7 @@ from giql.range_parser import ParsedRange
 from giql.range_parser import RangeParser
 from giql.resolver import META_KEY
 from giql.resolver import OperatorResolution
+from giql.resolver import ResolvedColumn
 from giql.resolver import ResolvedInterval
 from giql.resolver import ResolvedRef
 from giql.resolver import resolve_operator_refs
@@ -374,70 +375,96 @@ class BaseGIQLGenerator(Generator):
     def giqldistance_sql(self, expression: GIQLDistance) -> str:
         """Generate SQL CASE expression for DISTANCE function.
 
+        Reads the :class:`~giql.resolver.ResolvedColumn` metadata that
+        ``ResolveOperatorRefs`` (pass 1) attaches to each interval operand. When
+        the pass deferred an operand (a literal range, an unqualified column, or
+        a tree the pass never reached) the emitter falls back to its historical
+        string-level resolution and raises the same diagnostics as before.
+
+        Coordinate canonicalization stays here (epic #114 step 8 / issue #123):
+        the resolved metadata carries each operand's :class:`~giql.table.Table`
+        so the endpoints are wrapped identically.
+
         :param expression:
             GIQLDistance expression node
         :return:
             SQL CASE expression string calculating genomic distance
         """
-        # Extract the two interval arguments
-        interval_a = expression.this
-        interval_b = expression.args.get("expression")
-
         stranded = self._extract_bool_param(expression.args.get("stranded"))
         signed = self._extract_bool_param(expression.args.get("signed"))
 
-        # Get SQL representations
-        interval_a_sql = self.sql(interval_a)
-        interval_b_sql = self.sql(interval_b)
+        col_a = self._distance_operand(expression, "this", "first")
+        col_b = self._distance_operand(expression, "expression", "second")
 
-        # Check if we're dealing with column-to-column or column-to-literal
-        if "." in interval_a_sql and not interval_a_sql.startswith("'"):
-            # Column reference for interval_a
-            if stranded:
-                chrom_a, start_a, end_a, strand_a = self._get_column_refs(
-                    interval_a_sql, None, include_strand=True
-                )
-            else:
-                chrom_a, start_a, end_a = self._get_column_refs(interval_a_sql, None)
-                strand_a = None
-        else:
-            # Literal range - not implemented yet for interval_a
-            raise ValueError("Literal range as first argument not yet supported")
-
-        if "." in interval_b_sql and not interval_b_sql.startswith("'"):
-            # Column reference for interval_b
-            if stranded:
-                chrom_b, start_b, end_b, strand_b = self._get_column_refs(
-                    interval_b_sql, None, include_strand=True
-                )
-            else:
-                chrom_b, start_b, end_b = self._get_column_refs(interval_b_sql, None)
-                strand_b = None
-        else:
-            # Literal range - not implemented yet
-            raise ValueError("Literal range as second argument not yet supported")
+        # Strand columns are consumed only in stranded mode (matching the
+        # historical 3-tuple vs 4-tuple branching in the legacy emitter).
+        strand_a = col_a.strand if stranded else None
+        strand_b = col_b.strand if stranded else None
 
         # Distance math below assumes 0-based half-open.
-        table_a = self._resolve_table(interval_a_sql)
-        table_b = self._resolve_table(interval_b_sql)
-        start_a = canonical_start(start_a, table_a)
-        end_a = canonical_end(end_a, table_a)
-        start_b = canonical_start(start_b, table_b)
-        end_b = canonical_end(end_b, table_b)
+        start_a = canonical_start(col_a.start, col_a.table)
+        end_a = canonical_end(col_a.end, col_a.table)
+        start_b = canonical_start(col_b.start, col_b.table)
+        end_b = canonical_end(col_b.end, col_b.table)
 
         # Generate CASE expression
         return self._generate_distance_case(
-            chrom_a,
+            col_a.chrom,
             start_a,
             end_a,
             strand_a,
-            chrom_b,
+            col_b.chrom,
             start_b,
             end_b,
             strand_b,
             stranded=stranded,
             signed=signed,
         )
+
+    def _distance_operand(
+        self, expression: GIQLDistance, arg: str, position: str
+    ) -> ResolvedColumn:
+        """Resolve one DISTANCE interval operand to a :class:`ResolvedColumn`.
+
+        Prefers the metadata attached by ``ResolveOperatorRefs`` (pass 1). When
+        the pass deferred the operand — it could not resolve a literal range or
+        an unqualified column, or never ran (the generator was invoked directly
+        without the pass) — this falls back to the legacy ``_get_column_refs`` /
+        ``_resolve_table`` path, raising the historical literal-range error for
+        a non-column operand.
+
+        :param expression:
+            GIQLDistance expression node
+        :param arg:
+            The operand arg key (``"this"`` or ``"expression"``)
+        :param position:
+            Human-readable operand position for the error message (``"first"``
+            or ``"second"``)
+        :return:
+            The resolved column operand
+        :raises ValueError:
+            If the operand is a literal range rather than a column reference
+        """
+        resolution = expression.meta.get(META_KEY)
+        if isinstance(resolution, OperatorResolution):
+            resolved = resolution.column(arg)
+            if resolved is not None:
+                return resolved
+
+        # Deferred: fall back to string-level resolution.
+        operand_sql = self.sql(expression.args.get(arg))
+        if "." in operand_sql and not operand_sql.startswith("'"):
+            chrom, start, end, strand = self._get_column_refs(
+                operand_sql, None, include_strand=True
+            )
+            return ResolvedColumn(
+                chrom=chrom,
+                start=start,
+                end=end,
+                strand=strand,
+                table=self._resolve_table(operand_sql),
+            )
+        raise ValueError(f"Literal range as {position} argument not yet supported")
 
     def _generate_distance_case(
         self,
