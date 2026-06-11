@@ -199,17 +199,25 @@ class GIQLCluster(exp.Func):
 
     Implicitly partitions by chromosome and orders by start position.
 
+    The optional ``predicate`` argument is a boolean expression evaluated
+    between each interval and its sorted predecessor; intervals are only kept
+    in the same cluster when they are adjacent *and* the predicate holds. Bare
+    columns resolve to the current interval; the predecessor's value of a
+    column is referenced with a ``prev.*`` qualifier.
+
     Examples:
         CLUSTER(interval)
         CLUSTER(interval, 1000)
         CLUSTER(interval, stranded := true)
         CLUSTER(interval, 1000, stranded := true)
+        CLUSTER(interval, predicate := depth = prev.depth)
     """
 
     arg_types = {
         "this": True,  # genomic column
         "distance": False,  # maximum distance between features
         "stranded": False,  # strand-specific clustering
+        "predicate": False,  # pairwise boolean gate (current row vs prev.*)
     }
 
     @classmethod
@@ -232,16 +240,25 @@ class GIQLMerge(exp.Func):
     Merges overlapping or bookended intervals into single intervals.
     Built on top of CLUSTER operation.
 
+    The optional ``predicate`` argument gates merging on a pairwise boolean
+    expression between each interval and its sorted predecessor (see
+    :class:`GIQLCluster`); a ``prev.*`` qualifier references the predecessor's
+    value of a column. When the predicate tests equality of a value this
+    yields a run-length encoding of the input interval sequence.
+
     Examples:
         MERGE(interval)
         MERGE(interval, 1000)
         MERGE(interval, stranded := true)
+        MERGE(interval, predicate := depth = prev.depth)
+        MERGE(interval, predicate := strand = prev.strand AND name = prev.name)
     """
 
     arg_types = {
         "this": True,  # genomic column
         "distance": False,  # maximum distance between features
         "stranded": False,  # strand-specific merging
+        "predicate": False,  # pairwise boolean gate (current row vs prev.*)
     }
 
     @classmethod

@@ -443,14 +443,34 @@ class ClusterTransformer:
         else:
             lag_with_distance = lag_window
 
+        # Build the adjacency condition (predecessor end >= current start).
+        adjacency = exp.GTE(
+            this=lag_with_distance,
+            expression=exp.column(start_col, quoted=True),
+        )
+
+        # An optional predicate further restricts which adjacent intervals
+        # are kept together: a row stays in the current cluster only when it
+        # is adjacent to its predecessor AND the predicate holds between them.
+        # ``prev.col`` references in the predicate resolve to the predecessor
+        # row via LAG over the same partition/order as the adjacency window.
+        predicate_expr = cluster_expr.args.get("predicate")
+        if predicate_expr is not None:
+            rewritten_predicate = self._rewrite_prev_refs(
+                predicate_expr, partition_cols, order_by
+            )
+            keep_together = exp.And(
+                this=adjacency,
+                expression=exp.Paren(this=rewritten_predicate),
+            )
+        else:
+            keep_together = adjacency
+
         # Create CASE expression for is_new_cluster
         case_expr = exp.Case(
             ifs=[
                 exp.If(
-                    this=exp.GTE(
-                        this=lag_with_distance,
-                        expression=exp.column(start_col, quoted=True),
-                    ),
+                    this=keep_together,
                     true=exp.Literal.number(0),
                 )
             ],
@@ -549,6 +569,44 @@ class ClusterTransformer:
             new_query.order_by(*query.args["order"].expressions, copy=False)
 
         return new_query
+
+    def _rewrite_prev_refs(
+        self,
+        predicate: exp.Expression,
+        partition_cols: list[exp.Expression],
+        order_by: list[exp.Ordered],
+    ) -> exp.Expression:
+        """Rewrite ``prev.col`` references in a predicate to LAG windows.
+
+        Bare column references in the predicate denote the current interval and
+        are left untouched. Each ``prev.col`` reference denotes the sorted
+        predecessor and is rewritten to ``LAG(col) OVER (...)`` using the same
+        partition/order as the cluster's adjacency window, so the predicate is
+        evaluated pairwise against the immediately preceding row.
+
+        :param predicate:
+            Boolean predicate expression to rewrite (not mutated).
+        :param partition_cols:
+            Window partition columns (chromosome, optionally strand).
+        :param order_by:
+            Window ORDER BY terms (start position).
+        :return:
+            A copy of the predicate with every ``prev.*`` reference replaced by
+            an equivalent LAG window.
+        """
+
+        def _replace(node: exp.Expression) -> exp.Expression:
+            if isinstance(node, exp.Column) and node.table == "prev":
+                return exp.Window(
+                    this=exp.Anonymous(
+                        this="LAG", expressions=[exp.Column(this=node.this.copy())]
+                    ),
+                    partition_by=[col.copy() for col in partition_cols],
+                    order=exp.Order(expressions=[term.copy() for term in order_by]),
+                )
+            return node
+
+        return predicate.copy().transform(_replace)
 
 
 class MergeTransformer:
@@ -673,6 +731,7 @@ class MergeTransformer:
         # Extract MERGE parameters (same as CLUSTER)
         distance_expr = merge_expr.args.get("distance")
         stranded_expr = merge_expr.args.get("stranded")
+        predicate_expr = merge_expr.args.get("predicate")
 
         # Get column names from table config or use defaults
         (
@@ -688,6 +747,8 @@ class MergeTransformer:
             cluster_kwargs["distance"] = distance_expr
         if stranded_expr:
             cluster_kwargs["stranded"] = stranded_expr
+        if predicate_expr is not None:
+            cluster_kwargs["predicate"] = predicate_expr
 
         cluster_expr = GIQLCluster(**cluster_kwargs)
 
