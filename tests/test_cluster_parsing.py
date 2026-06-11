@@ -6,6 +6,7 @@ only := and => are accepted for named parameter binding.
 """
 
 import pytest
+from sqlglot import exp
 from sqlglot import parse_one
 from sqlglot.errors import ParseError
 
@@ -95,3 +96,98 @@ class TestClusterParsing:
                 "SELECT CLUSTER(stranded := true) AS cluster_id FROM peaks",
                 dialect=GIQLDialect,
             )
+
+    def test_from_arg_list_with_predicate(self):
+        """Test that a predicate named argument is captured on the node.
+
+        Given:
+            A GIQL query with CLUSTER(interval, predicate := depth = PREV(depth)).
+        When:
+            Parsing the query.
+        Then:
+            It should attach the predicate as an equality expression in args.
+        """
+        # Act
+        ast = parse_one(
+            "SELECT *, CLUSTER(interval, predicate := depth = PREV(depth)) AS cid "
+            "FROM peaks",
+            dialect=GIQLDialect,
+        )
+
+        # Assert
+        cluster_expr = ast.expressions[1].this
+        assert isinstance(cluster_expr, GIQLCluster)
+        assert isinstance(cluster_expr.args.get("predicate"), exp.EQ)
+
+    def test_from_arg_list_with_predicate_prev_call(self):
+        """Test that a PREV() call parses as a predecessor function reference.
+
+        Given:
+            A predicate CLUSTER(interval, predicate := depth = PREV(depth))
+            referencing the predecessor row with the PREV() function.
+        When:
+            Parsing the query.
+        Then:
+            It should parse PREV(depth) as an anonymous PREV call over depth.
+        """
+        # Act
+        ast = parse_one(
+            "SELECT *, CLUSTER(interval, predicate := depth = PREV(depth)) AS cid "
+            "FROM peaks",
+            dialect=GIQLDialect,
+        )
+
+        # Assert
+        predicate = ast.expressions[1].this.args["predicate"]
+        prev_call = predicate.expression
+        assert isinstance(prev_call, exp.Anonymous)
+        assert prev_call.name.upper() == "PREV"
+        assert [arg.name for arg in prev_call.expressions] == ["depth"]
+
+    def test_from_arg_list_with_predicate_kwarg_syntax(self):
+        """Test that the => kwarg form also binds the predicate argument.
+
+        Given:
+            A CLUSTER call using CLUSTER(interval, predicate => score = PREV(score))
+            with the => kwarg form rather than :=.
+        When:
+            Parsing the query.
+        Then:
+            It should attach the predicate as an equality expression in args.
+        """
+        # Act
+        ast = parse_one(
+            "SELECT *, CLUSTER(interval, predicate => score = PREV(score)) AS cid "
+            "FROM peaks",
+            dialect=GIQLDialect,
+        )
+
+        # Assert
+        cluster_expr = ast.expressions[1].this
+        assert isinstance(cluster_expr, GIQLCluster)
+        assert isinstance(cluster_expr.args.get("predicate"), exp.EQ)
+
+    def test_from_arg_list_with_predicate_and_positional_distance(self):
+        """Test that a predicate composes with positional distance and stranded.
+
+        Given:
+            A query mixing a positional distance, stranded :=, and predicate :=
+            on a single CLUSTER call.
+        When:
+            Parsing the query.
+        Then:
+            It should retain distance, stranded, and predicate together in args.
+        """
+        # Act
+        ast = parse_one(
+            "SELECT *, CLUSTER(interval, 1000, stranded := true, "
+            "predicate := name = PREV(name)) AS cid FROM peaks",
+            dialect=GIQLDialect,
+        )
+
+        # Assert
+        cluster_expr = ast.expressions[1].this
+        assert isinstance(cluster_expr, GIQLCluster)
+        assert cluster_expr.args.get("distance") is not None
+        assert cluster_expr.args.get("stranded") is not None
+        assert cluster_expr.args.get("predicate") is not None

@@ -40,6 +40,9 @@ Syntax
    -- Strand-specific clustering
    CLUSTER(interval, stranded := true) AS cluster_id
 
+   -- Predicate-gated clustering (run-length encoding on a column)
+   CLUSTER(interval, predicate := depth = PREV(depth)) AS cluster_id
+
    -- Combined parameters
    CLUSTER(interval, distance, stranded := true) AS cluster_id
 
@@ -55,6 +58,36 @@ Parameters
 
 **stranded** *(optional)*
    When ``true``, only cluster intervals on the same strand. Default: ``false``.
+
+**predicate** *(optional)*
+   A boolean expression evaluated between each interval and its sorted
+   predecessor. When supplied, the cluster-boundary condition becomes
+   **adjacent AND predicate**: an interval stays in the current cluster only
+   when it is within ``distance`` of its predecessor *and* the predicate holds
+   between the two. A change in the predicate forces a new cluster, so an
+   equality predicate yields a run-length encoding of the input sequence.
+   Omitting the predicate preserves the default adjacency-only behavior.
+
+   Bare column references resolve to the *current* interval; the predecessor's
+   value of a column is referenced with ``PREV(column)``
+   (e.g. ``depth = PREV(depth)``). The predicate composes with ``distance`` and
+   ``stranded`` and is evaluated under the operator's existing per-chromosome
+   (and per-strand) partition and start-position order.
+
+   Two constraints apply:
+
+   - **References existing columns only.** The predicate *gates* merging on
+     columns already present on the input rows; it does not synthesize a
+     statistic. Coverage depth, for example, must already be a column on the
+     rows (typically produced upstream by :ref:`DISJOIN <disjoin-operator>` and
+     aggregation).
+   - **Pairwise only, with single-linkage drift.** The predicate compares each
+     interval to its immediate sorted predecessor (everything ``LAG`` can
+     express). Whole-cluster conditions are out of scope. When the predicate is
+     not an equivalence relation (e.g. ``ABS(score - PREV(score)) < 5``),
+     consecutive pairs may each satisfy it while the cluster's extremes do not
+     — the same single-linkage behavior that ``distance``-based clustering
+     already exhibits.
 
 Return Value
 ~~~~~~~~~~~~
@@ -100,6 +133,19 @@ Cluster intervals separately by strand:
        CLUSTER(interval, stranded := true) AS cluster_id
    FROM features
    ORDER BY chrom, strand, start
+
+**Predicate-Gated Clustering:**
+
+Cut adjacent intervals into clusters wherever a column's value changes
+(run-length encoding). ``PREV(column)`` references the predecessor row's value:
+
+.. code-block:: sql
+
+   SELECT
+       *,
+       CLUSTER(interval, predicate := depth = PREV(depth)) AS cluster_id
+   FROM features
+   ORDER BY chrom, start
 
 **Analyze Cluster Statistics:**
 
@@ -194,6 +240,9 @@ Syntax
    -- Strand-specific merge
    SELECT MERGE(interval, stranded := true) FROM features
 
+   -- Predicate-gated merge (merge only equal-valued adjacent runs)
+   SELECT MERGE(interval, predicate := depth = PREV(depth)) FROM features
+
    -- Merge with additional aggregations
    SELECT
        MERGE(interval),
@@ -213,6 +262,16 @@ Parameters
 
 **stranded** *(optional)*
    When ``true``, merge intervals separately by strand. Default: ``false``.
+
+**predicate** *(optional)*
+   A boolean expression that further restricts which adjacent intervals are
+   merged. ``MERGE`` decomposes into :ref:`CLUSTER <cluster-operator>` plus a
+   ``GROUP BY`` over the cluster id, so it inherits predicate-aware boundaries
+   directly — see the :ref:`CLUSTER predicate <cluster-operator>` description
+   for the full semantics, the ``PREV(column)`` convention, the
+   references-existing-columns-only constraint, and the pairwise-only /
+   single-linkage caveat. Omitting the predicate preserves the default
+   adjacency-only merge.
 
 Return Value
 ~~~~~~~~~~~~
@@ -255,6 +314,24 @@ Merge intervals separately by strand:
 
    SELECT MERGE(interval, stranded := true)
    FROM features
+
+**Predicate-Gated Merge (coverage depth):**
+
+Merge only adjacent intervals that share the same coverage depth, reconstructing
+a re-clustered, depth-segmented partition from per-breakpoint segments produced
+by :ref:`DISJOIN <disjoin-operator>` and aggregation:
+
+.. code-block:: sql
+
+   SELECT MERGE(interval, predicate := depth = PREV(depth))
+   FROM (
+       SELECT disjoin_chrom AS chrom,
+              disjoin_start AS start,
+              disjoin_end AS end,
+              COUNT(*) AS depth
+       FROM DISJOIN(features)
+       GROUP BY disjoin_chrom, disjoin_start, disjoin_end
+   ) AS segments
 
 **Merge with Feature Count:**
 
