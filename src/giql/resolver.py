@@ -97,6 +97,7 @@ __all__ = [
     "ResolutionError",
     "resolve_operator_refs",
     "validate_operator_refs",
+    "validate_projection_contracts",
 ]
 
 #: The single namespaced key under which resolution metadata is stored on a
@@ -419,6 +420,7 @@ def resolve_operator_refs(expression: exp.Expression, tables: Tables) -> exp.Exp
             _resolve_operator(node, tables, frozenset())
 
     validate_operator_refs(expression)
+    validate_projection_contracts(expression)
     return expression
 
 
@@ -1157,3 +1159,195 @@ def _validate_ref(ref: object, spec: SlotSpec, operator: str) -> None:
             f"{operator} slot {spec.arg!r} resolved to a {ref.kind} but carries "
             "a Table config; CTE and subquery references are assumed canonical."
         )
+
+
+def validate_projection_contracts(expression: exp.Expression) -> None:
+    """Assert every CTE / subquery operator operand projects canonical columns.
+
+    A user-facing GIQL diagnostic boundary (epic #114, step 9). When an operator
+    reference slot resolves to an in-query CTE or a ``(SELECT ...)`` subquery
+    (:class:`ResolvedRef` kind ``"cte"`` / ``"subquery"``), the resolver and the
+    canonicalizer both *assume* it exposes the canonical ``chrom`` / ``start`` /
+    ``end`` columns the operator will reference — an assumption that, when wrong,
+    historically surfaced only as an opaque engine ``column not found`` error at
+    execution time. This pass inspects the operand's projection at transpile time
+    and raises a clear :class:`ValueError` naming the operator, the offending
+    relation, and the missing column(s) instead.
+
+    Unlike :func:`validate_operator_refs` (an internal invariant check that raises
+    :class:`ResolutionError`), this is a *user-facing* check that raises
+    :class:`ValueError` so it surfaces verbatim through ``transpile()``'s
+    "Resolution error" boundary.
+
+    False-positive guard
+    --------------------
+    A projection's output column names are only statically known when **every**
+    projection expression is an intentional named column — a bare ``exp.Column``
+    (whose output name is the column) or an aliased expression ``exp.Alias``
+    (whose output name is the explicit alias). If any projection is a ``*`` star
+    (whose columns expand from an unknown source schema) or an unnamed expression
+    (a bare literal like ``SELECT 1`` or a computed ``chrom + 1`` with no alias),
+    the relation's schema is not statically determinable and the operand is
+    **passed** without a diagnostic — a documented limitation that avoids
+    false-positives on star and placeholder projections. The check fires only
+    when the schema is fully known *and* a canonical column is provably absent.
+
+    Parameters
+    ----------
+    expression : exp.Expression
+        The pass-1-annotated AST to validate.
+
+    Raises
+    ------
+    ValueError
+        If a CTE or subquery operand's statically-known projection omits one or
+        more of the canonical ``chrom`` / ``start`` / ``end`` columns the
+        operator references.
+    """
+    cte_bodies = _cte_body_index(expression)
+    for node in expression.walk():
+        if not isinstance(node, _OPERATORS):
+            continue
+        resolution = node.meta.get(META_KEY)
+        if not isinstance(resolution, OperatorResolution):
+            continue
+        operator = resolution.operator
+        for arg, ref in resolution.slots.items():
+            if not isinstance(ref, ResolvedRef):
+                continue
+            if ref.kind not in ("cte", "subquery"):
+                continue
+            select = _projection_select(node, arg, ref, cte_bodies)
+            if select is None:
+                continue
+            _check_projection(node, arg, ref, select, operator)
+
+
+def _cte_body_index(expression: exp.Expression) -> dict[str, exp.Expression]:
+    """Map each in-query CTE alias to the query body it defines.
+
+    Built once per validation so a CTE-kind reference can locate its ``WITH``
+    definition and read its output projection. The body is the CTE's ``this`` —
+    an ``exp.Select`` or set operation (``exp.Union`` / ``exp.Intersect`` /
+    ``exp.Except``). When two CTEs share an alias (inner-WITH redeclaration), the
+    last one wins; the resolver's scope-based reference resolution already
+    selected which one the operator sees, and the projection contract is
+    identical across redeclarations for the columns we check.
+    """
+    index: dict[str, exp.Expression] = {}
+    for cte in expression.find_all(exp.CTE):
+        body = cte.this
+        if body is not None:
+            index[cte.alias] = body
+    return index
+
+
+def _projection_select(
+    node: exp.Expression,
+    arg: str,
+    ref: ResolvedRef,
+    cte_bodies: dict[str, exp.Expression],
+) -> exp.Expression | None:
+    """Return the query body whose projection backs reference slot *arg*.
+
+    For a CTE reference the body is looked up by name in *cte_bodies*; for a
+    subquery reference it is the operand AST node itself (an ``exp.Subquery``
+    unwrapped to its inner query, or a bare ``exp.Select`` / set operation).
+    Returns ``None`` when no projection-bearing body can be located — e.g. a CTE
+    whose definition is not in the index (out of scope) — so the caller skips it.
+    """
+    if ref.kind == "cte":
+        return cte_bodies.get(ref.name) if ref.name else None
+    operand = node.args.get(arg)
+    if isinstance(operand, exp.Subquery):
+        operand = operand.this
+    if isinstance(operand, (exp.Select, exp.SetOperation)):
+        return operand
+    return None
+
+
+def _static_output_columns(select: exp.Expression) -> frozenset[str] | None:
+    """Return a body's statically-known output column names, or ``None``.
+
+    ``None`` signals an *unresolvable* projection — one whose output schema
+    cannot be determined statically (a ``*`` star or any unnamed expression) —
+    which the contract check treats as a pass (the false-positive guard). A
+    non-``None`` result is the complete set of intentional output column names,
+    safe to test for the canonical columns.
+
+    A set operation (``UNION`` / ``INTERSECT`` / ``EXCEPT``) defers to its left
+    branch, whose projection determines the result's column names in SQL.
+    """
+    if isinstance(select, exp.SetOperation):
+        return _static_output_columns(select.this)
+    if not isinstance(select, exp.Select):
+        return None
+
+    names: set[str] = set()
+    for projection in select.selects:
+        if not isinstance(projection, (exp.Column, exp.Alias)):
+            # A star or an unnamed expression (bare literal, computed column):
+            # the output schema is not statically determinable, so the whole
+            # projection is unresolvable and the operand passes.
+            return None
+        if isinstance(projection, exp.Column) and isinstance(projection.this, exp.Star):
+            # A qualified star (``a.*``) also expands from an unknown schema.
+            return None
+        names.add(projection.output_name)
+    return frozenset(names)
+
+
+def _check_projection(
+    node: exp.Expression,
+    arg: str,
+    ref: ResolvedRef,
+    select: exp.Expression,
+    operator: str,
+) -> None:
+    """Raise a GIQL diagnostic if *select* omits a canonical column.
+
+    Compares the operand's statically-known output columns against the canonical
+    column names the operator references (``ref.cols``). A star or otherwise
+    unresolvable projection (``_static_output_columns`` returns ``None``) is a
+    pass. When the schema is known and any required column is absent, raises a
+    :class:`ValueError` naming the operator, the offending relation, the missing
+    column(s), and a source position when one is available.
+    """
+    columns = _static_output_columns(select)
+    if columns is None:
+        return
+    missing = [col for col in ref.cols if col not in columns]
+    if not missing:
+        return
+
+    relation = f"CTE {ref.name!r}" if ref.kind == "cte" else "subquery"
+    missing_str = ", ".join(repr(col) for col in missing)
+    have_str = ", ".join(repr(col) for col in sorted(columns)) or "no columns"
+    position = _source_position(node.args.get(arg))
+    raise ValueError(
+        f"{operator} {arg} {relation} does not project the canonical "
+        f"genomic column(s) {missing_str} that the operator references; "
+        f"it projects {have_str}. A CTE or subquery operand must project "
+        f"canonical 0-based half-open 'chrom'/'start'/'end' columns."
+        f"{position}"
+    )
+
+
+def _source_position(operand: exp.Expression | None) -> str:
+    """Return a `` (line L, col C)`` suffix for *operand*, or ``""``.
+
+    Mirrors ``sqlglot``'s ``validate_qualify_columns`` precedent of attaching the
+    parser-populated source position to a validation diagnostic. The position is
+    best-effort: when the parser did not record one (``meta`` carries no
+    ``line``), an empty string is returned and the textual diagnostic stands on
+    its own.
+    """
+    if operand is None:
+        return ""
+    line = operand.meta.get("line")
+    col = operand.meta.get("col")
+    if line is None:
+        return ""
+    if col is None:
+        return f" (line {line})"
+    return f" (line {line}, col {col})"

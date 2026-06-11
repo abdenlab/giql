@@ -80,6 +80,36 @@ single bin.
    engines need their own generator. The grid must also span every chromosome
    present in ``features``, or features on an uncovered chromosome are dropped.
 
+The CTE / Subquery Reference Contract
+-------------------------------------
+
+When the ``reference`` operand is an in-query CTE or a ``(SELECT ...)``
+subquery (rather than a registered table), it **must** project the canonical
+``chrom`` / ``start`` / ``end`` columns -- the 0-based, half-open genomic
+coordinates the operator references. A registered table may declare a custom
+column mapping or coordinate system, but a CTE or subquery carries no such
+declaration, so GIQL assumes it is already canonical.
+
+GIQL validates this contract at transpile time. If a CTE or subquery operand
+omits one of the canonical columns, ``transpile()`` raises a ``ValueError``
+naming the operator, the offending relation, and the missing column(s) -- a
+clear GIQL-level diagnostic rather than an opaque engine ``column not found``
+error at execution time. For example, ``reference := (SELECT chrom, start FROM
+mask)`` is rejected because it omits ``end``.
+
+.. code-block:: sql
+
+   -- Valid: the subquery projects all three canonical columns
+   SELECT * FROM DISJOIN(features, reference := (
+       SELECT chrom, start, "end" FROM mask WHERE score > 10
+   ))
+
+This check is best-effort. When the operand's output columns cannot be
+determined statically -- a ``SELECT *`` star projection, or a placeholder such
+as ``SELECT 1`` -- the operand is passed through without a diagnostic (the
+relation's schema is unknown at transpile time), and a genuinely missing column
+would still surface as an engine error at execution time.
+
 Coming from Bedtools?
 ---------------------
 
