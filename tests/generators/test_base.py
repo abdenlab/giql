@@ -156,10 +156,8 @@ class TestBaseGIQLGenerator:
         THEN Alias-to-table mapping includes the alias.
         """
         sql = "SELECT * FROM variants AS v WHERE v.interval INTERSECTS 'chr1:1000-2000'"
-        ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(tables=tables_info)
-        output = generator.generate(ast)
+        output = _generate_through_passes(sql, tables_info)
 
         expected = (
             "SELECT * FROM variants AS v WHERE "
@@ -190,10 +188,8 @@ class TestBaseGIQLGenerator:
         THEN SQL with chrom = 'chr1' AND start < 2000 AND end > 1000 is generated.
         """
         sql = "SELECT * FROM variants WHERE interval INTERSECTS 'chr1:1000-2000'"
-        ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator()
-        output = generator.generate(ast)
+        output = _generate_through_passes(sql, Tables())
 
         expected = (
             "SELECT * FROM variants WHERE "
@@ -212,10 +208,11 @@ class TestBaseGIQLGenerator:
             "SELECT * FROM features_a AS a CROSS JOIN features_b AS b "
             "WHERE a.interval INTERSECTS b.interval"
         )
-        ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(tables=tables_with_two_tables)
-        output = generator.generate(ast)
+        # The full transpile pipeline rewrites a column-to-column INTERSECTS into a
+        # binned equi-join before the predicate emitter runs, so run passes 1 and 2
+        # directly to exercise the predicate emitter's column-join branch.
+        output = _generate_through_passes(sql, tables_with_two_tables)
 
         expected = (
             "SELECT * FROM features_a AS a CROSS JOIN features_b AS b WHERE "
@@ -239,9 +236,7 @@ class TestBaseGIQLGenerator:
         end = start + length
         sql = f"SELECT * FROM variants WHERE interval INTERSECTS '{chrom}:{start}-{end}'"
 
-        ast = parse_one(sql, dialect=GIQLDialect)
-        generator = BaseGIQLGenerator()
-        output = generator.generate(ast)
+        output = _generate_through_passes(sql, Tables())
 
         # Verify we can parse the output SQL (proves it's syntactically valid)
         parsed = parse_one(output)
@@ -254,10 +249,8 @@ class TestBaseGIQLGenerator:
         THEN SQL with start <= 1000 AND end > 1000 is generated.
         """
         sql = "SELECT * FROM variants WHERE interval CONTAINS 'chr1:1500'"
-        ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator()
-        output = generator.generate(ast)
+        output = _generate_through_passes(sql, Tables())
 
         expected = (
             "SELECT * FROM variants WHERE "
@@ -272,10 +265,8 @@ class TestBaseGIQLGenerator:
         THEN SQL with start <= 1000 AND end >= 2000 is generated.
         """
         sql = "SELECT * FROM variants WHERE interval CONTAINS 'chr1:1500-2000'"
-        ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator()
-        output = generator.generate(ast)
+        output = _generate_through_passes(sql, Tables())
 
         expected = (
             "SELECT * FROM variants WHERE "
@@ -294,10 +285,8 @@ class TestBaseGIQLGenerator:
             "SELECT * FROM features_a AS a CROSS JOIN features_b AS b "
             "WHERE a.interval CONTAINS b.interval"
         )
-        ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(tables=tables_with_two_tables)
-        output = generator.generate(ast)
+        output = _generate_through_passes(sql, tables_with_two_tables)
 
         expected = (
             "SELECT * FROM features_a AS a CROSS JOIN features_b AS b WHERE "
@@ -321,9 +310,7 @@ class TestBaseGIQLGenerator:
         end = start + length
         sql = f"SELECT * FROM variants WHERE interval CONTAINS '{chrom}:{start}-{end}'"
 
-        ast = parse_one(sql, dialect=GIQLDialect)
-        generator = BaseGIQLGenerator()
-        output = generator.generate(ast)
+        output = _generate_through_passes(sql, Tables())
 
         # Verify we can parse the output SQL (proves it's syntactically valid)
         parsed = parse_one(output)
@@ -339,10 +326,8 @@ class TestBaseGIQLGenerator:
         THEN SQL with start >= 1000 AND end <= 2000 is generated.
         """
         sql = "SELECT * FROM variants WHERE interval WITHIN 'chr1:1000-5000'"
-        ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator()
-        output = generator.generate(ast)
+        output = _generate_through_passes(sql, Tables())
 
         expected = (
             "SELECT * FROM variants WHERE "
@@ -360,10 +345,8 @@ class TestBaseGIQLGenerator:
             "SELECT * FROM features_a AS a CROSS JOIN features_b AS b "
             "WHERE a.interval WITHIN b.interval"
         )
-        ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(tables=tables_with_two_tables)
-        output = generator.generate(ast)
+        output = _generate_through_passes(sql, tables_with_two_tables)
 
         expected = (
             "SELECT * FROM features_a AS a CROSS JOIN features_b AS b WHERE "
@@ -382,10 +365,8 @@ class TestBaseGIQLGenerator:
             "SELECT * FROM variants "
             "WHERE interval INTERSECTS ANY('chr1:1000-2000', 'chr1:5000-6000')"
         )
-        ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator()
-        output = generator.generate(ast)
+        output = _generate_through_passes(sql, Tables())
 
         expected = (
             "SELECT * FROM variants WHERE "
@@ -404,10 +385,8 @@ class TestBaseGIQLGenerator:
             "SELECT * FROM variants "
             "WHERE interval INTERSECTS ALL('chr1:1000-2000', 'chr1:1500-1800')"
         )
-        ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator()
-        output = generator.generate(ast)
+        output = _generate_through_passes(sql, Tables())
 
         expected = (
             "SELECT * FROM variants WHERE "
@@ -423,10 +402,8 @@ class TestBaseGIQLGenerator:
         THEN Subquery with ORDER BY distance LIMIT k is generated.
         """
         sql = "SELECT * FROM NEAREST(genes, reference := 'chr1:1000-2000', k := 3)"
-        ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(tables=tables_with_peaks_and_genes)
-        output = generator.generate(ast)
+        output = _generate_through_passes(sql, tables_with_peaks_and_genes)
 
         expected = (
             "SELECT * FROM (\n"
@@ -459,10 +436,8 @@ class TestBaseGIQLGenerator:
             "SELECT * FROM peaks "
             "CROSS JOIN LATERAL NEAREST(genes, reference := peaks.interval, k := 3)"
         )
-        ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(tables=tables_with_peaks_and_genes)
-        output = generator.generate(ast)
+        output = _generate_through_passes(sql, tables_with_peaks_and_genes)
 
         expected = (
             "SELECT * FROM peaks CROSS JOIN LATERAL (\n"
@@ -498,10 +473,8 @@ class TestBaseGIQLGenerator:
             "CROSS JOIN LATERAL NEAREST("
             "genes, reference := peaks.interval, k := 5, max_distance := 100000)"
         )
-        ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(tables=tables_with_peaks_and_genes)
-        output = generator.generate(ast)
+        output = _generate_through_passes(sql, tables_with_peaks_and_genes)
 
         expected = (
             "SELECT * FROM peaks CROSS JOIN LATERAL (\n"
@@ -544,10 +517,8 @@ class TestBaseGIQLGenerator:
             "CROSS JOIN LATERAL NEAREST("
             "genes, reference := peaks.interval, k := 3, stranded := true)"
         )
-        ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(tables=tables_with_peaks_and_genes)
-        output = generator.generate(ast)
+        output = _generate_through_passes(sql, tables_with_peaks_and_genes)
 
         expected = (
             "SELECT * FROM peaks CROSS JOIN LATERAL (\n"
@@ -603,10 +574,9 @@ class TestBaseGIQLGenerator:
             "SELECT * FROM nostr "
             "CROSS JOIN LATERAL NEAREST(genes, k := 1, stranded := true)"
         )
-        ast = parse_one(sql, dialect=GIQLDialect)
 
         # Act
-        output = BaseGIQLGenerator(tables=tables).generate(ast)
+        output = _generate_through_passes(sql, tables)
 
         # Assert
         assert "strand" not in output
@@ -623,10 +593,8 @@ class TestBaseGIQLGenerator:
             "CROSS JOIN LATERAL NEAREST("
             "genes, reference := peaks.interval, k := 3, signed := true)"
         )
-        ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(tables=tables_with_peaks_and_genes)
-        output = generator.generate(ast)
+        output = _generate_through_passes(sql, tables_with_peaks_and_genes)
 
         expected = (
             "SELECT * FROM peaks CROSS JOIN LATERAL (\n"
@@ -665,6 +633,8 @@ class TestBaseGIQLGenerator:
         # Use query without explicit reference to trigger correlated mode
         sql = "SELECT * FROM peaks CROSS JOIN LATERAL NEAREST(genes, k := 3)"
         ast = parse_one(sql, dialect=GIQLDialect)
+        ast = resolve_operator_refs(ast, tables_with_peaks_and_genes)
+        ast = canonicalize_coordinates(ast)
 
         generator = NoLateralGenerator(tables=tables_with_peaks_and_genes)
 
@@ -688,10 +658,8 @@ class TestBaseGIQLGenerator:
             f"SELECT * FROM NEAREST("
             f"genes, reference := 'chr1:1000-2000', k := {k}, max_distance := {max_distance})"
         )
-        ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(tables=tables_with_peaks_and_genes)
-        output = generator.generate(ast)
+        output = _generate_through_passes(sql, tables_with_peaks_and_genes)
 
         # k should appear in LIMIT
         assert f"LIMIT {k}" in output
@@ -708,10 +676,8 @@ class TestBaseGIQLGenerator:
             "SELECT DISTANCE(a.interval, b.interval) as dist "
             "FROM features_a a CROSS JOIN features_b b"
         )
-        ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(tables=tables_with_two_tables)
-        output = generator.generate(ast)
+        output = _generate_through_passes(sql, tables_with_two_tables)
 
         expected = (
             'SELECT CASE WHEN a."chrom" != b."chrom" THEN NULL '
@@ -733,10 +699,8 @@ class TestBaseGIQLGenerator:
             "SELECT DISTANCE(a.interval, b.interval, stranded := true) as dist "
             "FROM features_a a CROSS JOIN features_b b"
         )
-        ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(tables=tables_with_two_tables)
-        output = generator.generate(ast)
+        output = _generate_through_passes(sql, tables_with_two_tables)
 
         expected = (
             'SELECT CASE WHEN a."chrom" != b."chrom" THEN NULL '
@@ -766,10 +730,8 @@ class TestBaseGIQLGenerator:
             "SELECT DISTANCE(a.interval, b.interval, signed := true) as dist "
             "FROM features_a a CROSS JOIN features_b b"
         )
-        ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(tables=tables_with_two_tables)
-        output = generator.generate(ast)
+        output = _generate_through_passes(sql, tables_with_two_tables)
 
         expected = (
             'SELECT CASE WHEN a."chrom" != b."chrom" THEN NULL '
@@ -792,10 +754,8 @@ class TestBaseGIQLGenerator:
             "DISTANCE(a.interval, b.interval, stranded := true, signed := true) as dist "
             "FROM features_a a CROSS JOIN features_b b"
         )
-        ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(tables=tables_with_two_tables)
-        output = generator.generate(ast)
+        output = _generate_through_passes(sql, tables_with_two_tables)
 
         expected = (
             'SELECT CASE WHEN a."chrom" != b."chrom" THEN NULL '
@@ -915,10 +875,8 @@ class TestBaseGIQLGenerator:
             "SELECT * FROM NEAREST("
             "genes, reference := 'chr1:1000-2000:+', k := 3, stranded := true)"
         )
-        ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(tables=tables_with_peaks_and_genes)
-        output = generator.generate(ast)
+        output = _generate_through_passes(sql, tables_with_peaks_and_genes)
 
         # Should contain strand literal '+' and strand filtering
         assert "'+'" in output
@@ -933,10 +891,8 @@ class TestBaseGIQLGenerator:
         THEN Strand column is resolved from outer table and used.
         """
         sql = "SELECT * FROM peaks CROSS JOIN LATERAL NEAREST(genes, k := 3, stranded := true)"
-        ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(tables=tables_with_peaks_and_genes)
-        output = generator.generate(ast)
+        output = _generate_through_passes(sql, tables_with_peaks_and_genes)
 
         # Should have strand columns from both tables
         assert 'peaks."strand"' in output
@@ -982,6 +938,8 @@ class TestBaseGIQLGenerator:
         """
         sql = "SELECT DISTANCE('chr1:1000-2000', b.interval) as dist FROM features_b b"
         ast = parse_one(sql, dialect=GIQLDialect)
+        ast = resolve_operator_refs(ast, tables_with_two_tables)
+        ast = canonicalize_coordinates(ast)
 
         generator = BaseGIQLGenerator(tables=tables_with_two_tables)
 
@@ -996,6 +954,8 @@ class TestBaseGIQLGenerator:
         """
         sql = "SELECT DISTANCE(a.interval, 'chr1:1000-2000') as dist FROM features_a a"
         ast = parse_one(sql, dialect=GIQLDialect)
+        ast = resolve_operator_refs(ast, tables_with_two_tables)
+        ast = canonicalize_coordinates(ast)
 
         generator = BaseGIQLGenerator(tables=tables_with_two_tables)
 
@@ -1016,6 +976,8 @@ class TestBaseGIQLGenerator:
             this=exp.Table(this=exp.Identifier(this="genes")),
             k=exp.Literal.number(3),
         )
+        resolve_operator_refs(nearest, tables_with_peaks_and_genes)
+        canonicalize_coordinates(nearest)
 
         generator = BaseGIQLGenerator(tables=tables_with_peaks_and_genes)
 
@@ -1034,12 +996,9 @@ class TestBaseGIQLGenerator:
         # The outer relation (unknown_table) is present in the LATERAL context
         # but is not a registered table, so the implicit-outer reference defers.
         sql = "SELECT * FROM unknown_table CROSS JOIN LATERAL NEAREST(genes, k := 3)"
-        ast = parse_one(sql, dialect=GIQLDialect)
-
-        generator = BaseGIQLGenerator(tables=tables)
 
         with pytest.raises(ValueError, match="not found in tables"):
-            generator.generate(ast)
+            _generate_through_passes(sql, tables)
 
     def test_giqlnearest_sql_invalid_reference_range(self, tables_with_peaks_and_genes):
         """
@@ -1048,12 +1007,9 @@ class TestBaseGIQLGenerator:
         THEN ValueError is raised with parse error details.
         """
         sql = "SELECT * FROM NEAREST(genes, reference := 'invalid_range', k := 3)"
-        ast = parse_one(sql, dialect=GIQLDialect)
-
-        generator = BaseGIQLGenerator(tables=tables_with_peaks_and_genes)
 
         with pytest.raises(ValueError, match="Could not parse reference genomic range"):
-            generator.generate(ast)
+            _generate_through_passes(sql, tables_with_peaks_and_genes)
 
     def test_giqlnearest_sql_no_tables_error(self):
         """
@@ -1093,10 +1049,8 @@ class TestBaseGIQLGenerator:
         THEN Default column names are used without table qualifier.
         """
         sql = "SELECT * FROM variants WHERE interval INTERSECTS 'chr1:1000-2000'"
-        ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator()
-        output = generator.generate(ast)
+        output = _generate_through_passes(sql, Tables())
 
         expected = (
             "SELECT * FROM variants WHERE "
@@ -1121,6 +1075,8 @@ class TestBaseGIQLGenerator:
             k=exp.Literal.number(3),
             stranded=exp.Boolean(this=True),
         )
+        resolve_operator_refs(nearest, tables_with_peaks_and_genes)
+        canonicalize_coordinates(nearest)
 
         generator = BaseGIQLGenerator(tables=tables_with_peaks_and_genes)
         output = generator.giqlnearest_sql(nearest)
@@ -1144,6 +1100,8 @@ class TestBaseGIQLGenerator:
             reference=exp.Literal.string("chr1:1000-2000"),
             k=exp.Literal.number(3),
         )
+        resolve_operator_refs(nearest, tables_with_peaks_and_genes)
+        canonicalize_coordinates(nearest)
 
         generator = BaseGIQLGenerator(tables=tables_with_peaks_and_genes)
         output = generator.giqlnearest_sql(nearest)
@@ -1168,10 +1126,8 @@ class TestBaseGIQLGenerator:
             f"SELECT DISTANCE(a.interval, b.interval, stranded := {bool_repr}) as dist "
             "FROM features_a a, features_b b"
         )
-        ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(tables=tables_with_two_tables)
-        output = generator.generate(ast)
+        output = _generate_through_passes(sql, tables_with_two_tables)
 
         # Should include strand handling (NULL checks for strand columns)
         assert "strand" in output.lower()
@@ -1193,10 +1149,8 @@ class TestBaseGIQLGenerator:
             f"SELECT DISTANCE(a.interval, b.interval, stranded := {bool_repr}) as dist "
             "FROM features_a a, features_b b"
         )
-        ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(tables=tables_with_two_tables)
-        output = generator.generate(ast)
+        output = _generate_through_passes(sql, tables_with_two_tables)
 
         # Should NOT include strand NULL checks (basic distance)
         assert "strand" not in output.lower()
@@ -1217,10 +1171,8 @@ class TestBaseGIQLGenerator:
             f"SELECT DISTANCE(a.interval, b.interval, signed := {bool_repr}) as dist "
             "FROM features_a a, features_b b"
         )
-        ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(tables=tables_with_two_tables)
-        output = generator.generate(ast)
+        output = _generate_through_passes(sql, tables_with_two_tables)
 
         # Signed distance has negative sign for upstream intervals
         assert "-(" in output
@@ -1241,10 +1193,8 @@ class TestBaseGIQLGenerator:
             f"SELECT DISTANCE(a.interval, b.interval, signed := {bool_repr}) as dist "
             "FROM features_a a, features_b b"
         )
-        ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(tables=tables_with_two_tables)
-        output = generator.generate(ast)
+        output = _generate_through_passes(sql, tables_with_two_tables)
 
         # Unsigned distance has no negative sign (both ELSE branches are positive)
         # Count occurrences of "-(" - signed has 1, unsigned has 0
