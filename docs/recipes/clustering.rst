@@ -347,6 +347,86 @@ Compare raw vs merged coverage:
 
 **Use case:** Quantify the redundancy in your feature set.
 
+Predicate-Gated Clustering and Merging
+--------------------------------------
+
+Both ``CLUSTER`` and ``MERGE`` accept an optional ``predicate :=`` argument that
+further restricts which adjacent intervals are coalesced: an interval stays in
+the current cluster only when it is adjacent to its predecessor *and* the
+predicate holds between the two. Bare columns resolve to the current interval;
+the predecessor's value is referenced with a ``prev.*`` qualifier. The predicate
+references columns already present on the rows — it gates merging, it does not
+synthesize a statistic — and it compares each interval only to its immediate
+sorted predecessor (so non-equivalence predicates exhibit single-linkage drift,
+just like ``distance``-based clustering).
+
+Run-Length Encoding on a Column
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Merge only adjacent intervals that share the same value, cutting a new region
+wherever the value changes:
+
+.. code-block:: sql
+
+   SELECT MERGE(interval, predicate := depth = prev.depth)
+   FROM segments
+
+**Use case:** Collapse a per-base or per-segment signal into maximal runs of
+constant value (e.g. equal coverage depth, same genotype, same annotation).
+
+Run-Length Encode with CLUSTER
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Assign a distinct cluster id to each maximal equal-valued run while keeping the
+individual rows:
+
+.. code-block:: sql
+
+   SELECT
+       *,
+       CLUSTER(interval, predicate := depth = prev.depth) AS run_id
+   FROM segments
+   ORDER BY chrom, start
+
+**Use case:** Label run boundaries for inspection before aggregating.
+
+Reconstruct disjoin() Coverage Segments
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+GIQL's :ref:`DISJOIN <disjoin-operator>` primitive splits overlapping intervals
+at every breakpoint but deliberately does not re-cluster the resulting
+sub-intervals. Pairing it with a predicate-gated ``MERGE`` closes that gap: cut
+the input at every breakpoint, aggregate coverage depth per segment, then merge
+back the contiguous runs of equal depth — reproducing the re-clustered,
+depth-annotated output Bioconductor's ``disjoin()`` produces:
+
+.. code-block:: sql
+
+   SELECT MERGE(interval, predicate := depth = prev.depth)
+   FROM (
+       SELECT disjoin_chrom AS chrom,
+              disjoin_start AS start,
+              disjoin_end AS end,
+              COUNT(*) AS depth
+       FROM DISJOIN(features)
+       GROUP BY disjoin_chrom, disjoin_start, disjoin_end
+   ) AS segments
+
+**Use case:** Build a re-clustered coverage profile from overlapping intervals,
+the expression-based generalization of ``disjoin()`` to any pairwise condition.
+
+Multi-Column Predicate
+~~~~~~~~~~~~~~~~~~~~~~~
+
+Gate merging on more than one column by combining comparisons with ``AND``:
+
+.. code-block:: sql
+
+   SELECT MERGE(interval, predicate := strand = prev.strand AND name = prev.name)
+   FROM features
+
+**Use case:** Keep merged regions homogeneous across several attributes at once.
+
 Advanced Patterns
 -----------------
 

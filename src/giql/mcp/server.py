@@ -105,6 +105,14 @@ OPERATORS: dict[str, dict[str, Any]] = {
                 "description": "Max gap to consider same cluster (default: 0)",
             },
             {"name": "stranded", "description": "Cluster by strand (default: false)"},
+            {
+                "name": "predicate",
+                "description": (
+                    "Pairwise boolean gate; keep adjacent intervals together "
+                    "only when it holds. Use prev.col for the predecessor row "
+                    "(e.g. predicate := depth = prev.depth). Optional."
+                ),
+            },
         ],
         "returns": "Integer cluster ID",
         "example": "SELECT *, CLUSTER(interval) AS cluster_id FROM features",
@@ -118,6 +126,14 @@ OPERATORS: dict[str, dict[str, Any]] = {
             {"name": "interval", "description": "Genomic column to merge"},
             {"name": "distance", "description": "Max gap to merge (default: 0)"},
             {"name": "stranded", "description": "Merge by strand (default: false)"},
+            {
+                "name": "predicate",
+                "description": (
+                    "Pairwise boolean gate; merge adjacent intervals only when "
+                    "it holds. Use prev.col for the predecessor row (e.g. "
+                    "predicate := depth = prev.depth). Optional."
+                ),
+            },
         ],
         "returns": "Merged interval coordinates (chromosome, start_pos, end_pos)",
         "example": "SELECT MERGE(interval), COUNT(*) FROM features",
