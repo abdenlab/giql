@@ -101,7 +101,7 @@ class TestClusterParsing:
         """Test that a predicate named argument is captured on the node.
 
         Given:
-            A GIQL query with CLUSTER(interval, predicate := depth = prev.depth).
+            A GIQL query with CLUSTER(interval, predicate := depth = PREV(depth)).
         When:
             Parsing the query.
         Then:
@@ -109,7 +109,7 @@ class TestClusterParsing:
         """
         # Act
         ast = parse_one(
-            "SELECT *, CLUSTER(interval, predicate := depth = prev.depth) AS cid "
+            "SELECT *, CLUSTER(interval, predicate := depth = PREV(depth)) AS cid "
             "FROM peaks",
             dialect=GIQLDialect,
         )
@@ -119,36 +119,36 @@ class TestClusterParsing:
         assert isinstance(cluster_expr, GIQLCluster)
         assert isinstance(cluster_expr.args.get("predicate"), exp.EQ)
 
-    def test_from_arg_list_with_predicate_prev_qualifier(self):
-        """Test that a prev. qualifier parses as a column on the predecessor.
+    def test_from_arg_list_with_predicate_prev_call(self):
+        """Test that a PREV() call parses as a predecessor function reference.
 
         Given:
-            A predicate CLUSTER(interval, predicate := depth = prev.depth)
-            referencing the predecessor row with the prev. qualifier.
+            A predicate CLUSTER(interval, predicate := depth = PREV(depth))
+            referencing the predecessor row with the PREV() function.
         When:
             Parsing the query.
         Then:
-            It should parse prev.depth as a column whose table is prev.
+            It should parse PREV(depth) as an anonymous PREV call over depth.
         """
         # Act
         ast = parse_one(
-            "SELECT *, CLUSTER(interval, predicate := depth = prev.depth) AS cid "
+            "SELECT *, CLUSTER(interval, predicate := depth = PREV(depth)) AS cid "
             "FROM peaks",
             dialect=GIQLDialect,
         )
 
         # Assert
         predicate = ast.expressions[1].this.args["predicate"]
-        prev_ref = predicate.expression
-        assert isinstance(prev_ref, exp.Column)
-        assert prev_ref.table == "prev"
-        assert prev_ref.name == "depth"
+        prev_call = predicate.expression
+        assert isinstance(prev_call, exp.Anonymous)
+        assert prev_call.name.upper() == "PREV"
+        assert [arg.name for arg in prev_call.expressions] == ["depth"]
 
     def test_from_arg_list_with_predicate_kwarg_syntax(self):
         """Test that the => kwarg form also binds the predicate argument.
 
         Given:
-            A CLUSTER call using CLUSTER(interval, predicate => score = prev.score)
+            A CLUSTER call using CLUSTER(interval, predicate => score = PREV(score))
             with the => kwarg form rather than :=.
         When:
             Parsing the query.
@@ -157,7 +157,7 @@ class TestClusterParsing:
         """
         # Act
         ast = parse_one(
-            "SELECT *, CLUSTER(interval, predicate => score = prev.score) AS cid "
+            "SELECT *, CLUSTER(interval, predicate => score = PREV(score)) AS cid "
             "FROM peaks",
             dialect=GIQLDialect,
         )
@@ -181,7 +181,7 @@ class TestClusterParsing:
         # Act
         ast = parse_one(
             "SELECT *, CLUSTER(interval, 1000, stranded := true, "
-            "predicate := name = prev.name) AS cid FROM peaks",
+            "predicate := name = PREV(name)) AS cid FROM peaks",
             dialect=GIQLDialect,
         )
 

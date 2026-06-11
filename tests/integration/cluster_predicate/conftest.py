@@ -12,8 +12,6 @@ from giql import transpile
 
 duckdb = pytest.importorskip("duckdb")
 
-pytestmark = pytest.mark.integration
-
 from tests.integration.bedtools.utils.duckdb_loader import load_intervals  # noqa: E402
 
 
@@ -32,7 +30,7 @@ def giql_query(duckdb_connection):
     Usage::
 
         rows = giql_query(
-            "SELECT MERGE(interval, predicate := score = prev.score) FROM t",
+            "SELECT MERGE(interval, predicate := score = PREV(score)) FROM t",
             tables=["t"],
             t=[("chr1", 0, 10, "a", 5, "+"), ...],
         )

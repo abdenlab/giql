@@ -91,7 +91,7 @@ class TestMergeParsing:
         """Test that a predicate named argument is captured on the node.
 
         Given:
-            A GIQL query with MERGE(interval, predicate := depth = prev.depth).
+            A GIQL query with MERGE(interval, predicate := depth = PREV(depth)).
         When:
             Parsing the query.
         Then:
@@ -99,7 +99,7 @@ class TestMergeParsing:
         """
         # Act
         ast = parse_one(
-            "SELECT MERGE(interval, predicate := depth = prev.depth) FROM peaks",
+            "SELECT MERGE(interval, predicate := depth = PREV(depth)) FROM peaks",
             dialect=GIQLDialect,
         )
 
@@ -112,7 +112,7 @@ class TestMergeParsing:
         """Test that the => kwarg form also binds the predicate argument.
 
         Given:
-            A MERGE call using MERGE(interval, predicate => score = prev.score)
+            A MERGE call using MERGE(interval, predicate => score = PREV(score))
             with the => kwarg form rather than :=.
         When:
             Parsing the query.
@@ -121,7 +121,7 @@ class TestMergeParsing:
         """
         # Act
         ast = parse_one(
-            "SELECT MERGE(interval, predicate => score = prev.score) FROM peaks",
+            "SELECT MERGE(interval, predicate => score = PREV(score)) FROM peaks",
             dialect=GIQLDialect,
         )
 
@@ -134,22 +134,22 @@ class TestMergeParsing:
         """Test that a multi-term predicate parses as a conjunction.
 
         Given:
-            A query MERGE(interval, predicate := strand = prev.strand AND
-            name = prev.name) joining two pairwise comparisons with AND.
+            A query MERGE(interval, predicate := strand = PREV(strand) AND
+            name = PREV(name)) joining two pairwise comparisons with AND.
         When:
             Parsing the query.
         Then:
-            It should attach the predicate as an AND of two prev. comparisons.
+            It should attach the predicate as an AND of two PREV() comparisons.
         """
         # Act
         ast = parse_one(
-            "SELECT MERGE(interval, predicate := strand = prev.strand "
-            "AND name = prev.name) FROM peaks",
+            "SELECT MERGE(interval, predicate := strand = PREV(strand) "
+            "AND name = PREV(name)) FROM peaks",
             dialect=GIQLDialect,
         )
 
         # Assert
         predicate = ast.expressions[0].args["predicate"]
         assert isinstance(predicate, exp.And)
-        prev_tables = {col.table for col in predicate.find_all(exp.Column)}
-        assert "prev" in prev_tables
+        prev_calls = {call.name.upper() for call in predicate.find_all(exp.Anonymous)}
+        assert "PREV" in prev_calls

@@ -52,13 +52,13 @@ class TestMergePredicate:
         Given:
             Five abutting intervals whose scores form the runs 5,5 | 3,3 | 5.
         When:
-            MERGE(interval, predicate := score = prev.score) runs.
+            MERGE(interval, predicate := score = PREV(score)) runs.
         Then:
             It should emit one merged interval per maximal equal-score run.
         """
         # Arrange & act
         rows = giql_query(
-            "SELECT MERGE(interval, predicate := score = prev.score) FROM intervals",
+            "SELECT MERGE(interval, predicate := score = PREV(score)) FROM intervals",
             tables=["intervals"],
             intervals=[
                 _ival("chr1", 0, 10, "a", 5),
@@ -83,14 +83,14 @@ class TestMergePredicate:
             Three abutting intervals with scores 10, 13, 16, where each
             consecutive pair differs by 3 but the extremes differ by 6.
         When:
-            MERGE(interval, predicate := ABS(score - prev.score) < 5) runs.
+            MERGE(interval, predicate := ABS(score - PREV(score)) < 5) runs.
         Then:
             It should merge the entire run into one interval even though the
             cluster's extremes violate the predicate (documented drift).
         """
         # Arrange & act
         rows = giql_query(
-            "SELECT MERGE(interval, predicate := ABS(score - prev.score) < 5) "
+            "SELECT MERGE(interval, predicate := ABS(score - PREV(score)) < 5) "
             "FROM intervals",
             tables=["intervals"],
             intervals=[
@@ -110,16 +110,16 @@ class TestMergePredicate:
             Four abutting intervals where the (name, strand) pair changes first
             on strand and then on name partway through the run.
         When:
-            MERGE(interval, predicate := strand = prev.strand AND
-            name = prev.name) runs.
+            MERGE(interval, predicate := strand = PREV(strand) AND
+            name = PREV(name)) runs.
         Then:
             It should break the merge wherever either column changes, yielding
             one merged interval per homogeneous (name, strand) run.
         """
         # Arrange & act
         rows = giql_query(
-            "SELECT MERGE(interval, predicate := strand = prev.strand "
-            "AND name = prev.name) FROM intervals",
+            "SELECT MERGE(interval, predicate := strand = PREV(strand) "
+            "AND name = PREV(name)) FROM intervals",
             tables=["intervals"],
             intervals=[
                 _ival("chr1", 0, 10, "g", 5, "+"),
@@ -142,7 +142,7 @@ class TestMergePredicate:
         Given:
             Equal-name abutting intervals on both the + and - strands.
         When:
-            MERGE(interval, stranded := true, predicate := name = prev.name)
+            MERGE(interval, stranded := true, predicate := name = PREV(name))
             runs.
         Then:
             It should merge each strand's equal-name run independently, emitting
@@ -150,7 +150,7 @@ class TestMergePredicate:
         """
         # Arrange & act
         rows = giql_query(
-            "SELECT MERGE(interval, stranded := true, predicate := name = prev.name) "
+            "SELECT MERGE(interval, stranded := true, predicate := name = PREV(name)) "
             "FROM intervals",
             tables=["intervals"],
             intervals=[
@@ -162,10 +162,15 @@ class TestMergePredicate:
         )
 
         # Assert
-        assert rows == [
-            ("chr1", "+", 0, 20),
-            ("chr1", "-", 0, 20),
-        ]
+        # The emitted MERGE SQL orders only by (chrom, start); these two rows
+        # tie on (chr1, 0) and differ only by strand, so the row order is not
+        # deterministic. Compare order-independently.
+        assert sorted(rows) == sorted(
+            [
+                ("chr1", "+", 0, 20),
+                ("chr1", "-", 0, 20),
+            ]
+        )
 
 
 class TestClusterPredicate:
@@ -177,14 +182,14 @@ class TestClusterPredicate:
         Given:
             Five abutting intervals whose scores form the runs 5,5 | 3,3 | 5.
         When:
-            CLUSTER(interval, predicate := score = prev.score) runs.
+            CLUSTER(interval, predicate := score = PREV(score)) runs.
         Then:
             It should assign a distinct cluster id to each maximal equal-score
             run, comparing each row only to its immediate predecessor.
         """
         # Arrange & act
         rows = giql_query(
-            "SELECT name, CLUSTER(interval, predicate := score = prev.score) AS cid "
+            "SELECT name, CLUSTER(interval, predicate := score = PREV(score)) AS cid "
             "FROM intervals",
             tables=["intervals"],
             intervals=[
@@ -208,7 +213,7 @@ class TestClusterPredicate:
         Given:
             Three equal-score intervals separated by a 50bp gap then a 150bp
             gap, clustered with CLUSTER(interval, 100, predicate := score =
-            prev.score).
+            PREV(score)).
         When:
             The generated SQL runs in DuckDB.
         Then:
@@ -218,7 +223,7 @@ class TestClusterPredicate:
         """
         # Arrange & act
         rows = giql_query(
-            "SELECT name, CLUSTER(interval, 100, predicate := score = prev.score) "
+            "SELECT name, CLUSTER(interval, 100, predicate := score = PREV(score)) "
             "AS cid FROM intervals",
             tables=["intervals"],
             intervals=[
@@ -238,7 +243,7 @@ class TestClusterPredicate:
 
         Given:
             Equal-score abutting intervals on chr1 and chr2, clustered with
-            CLUSTER(interval, predicate := score = prev.score).
+            CLUSTER(interval, predicate := score = PREV(score)).
         When:
             The generated SQL runs in DuckDB.
         Then:
@@ -248,7 +253,7 @@ class TestClusterPredicate:
         """
         # Arrange & act
         rows = giql_query(
-            "SELECT chrom, name, CLUSTER(interval, predicate := score = prev.score) "
+            "SELECT chrom, name, CLUSTER(interval, predicate := score = PREV(score)) "
             "AS cid FROM intervals",
             tables=["intervals"],
             intervals=[
@@ -266,6 +271,62 @@ class TestClusterPredicate:
         assert by_name["c"][1] == by_name["d"][1]
         # chr2's first row starts its own cluster (ids are per-partition).
         assert {by_name["a"], by_name["c"]} == {("chr1", 1), ("chr2", 1)}
+
+    def test_cluster_reserved_word_predicate_executes(self, giql_query):
+        """Test that a predicate over reserved-word columns executes.
+
+        Given:
+            Three abutting intervals and a predicate over the reserved-word
+            genomic columns start and end (start = PREV(end)).
+        When:
+            The generated SQL runs in DuckDB.
+        Then:
+            It should emit valid quoted SQL and merge the abutting run, proving
+            reserved-word predicate columns are handled.
+        """
+        # Arrange & act
+        rows = giql_query(
+            "SELECT MERGE(interval, predicate := start = PREV(end)) FROM intervals",
+            tables=["intervals"],
+            intervals=[
+                _ival("chr1", 0, 10, "a", 5),
+                _ival("chr1", 10, 20, "b", 5),
+                _ival("chr1", 20, 30, "c", 5),
+            ],
+        )
+
+        # Assert
+        assert rows == [("chr1", 0, 30)]
+
+    def test_cluster_predicate_column_absent_from_projection_executes(self, giql_query):
+        """Test that a predicate column need not appear in the projection.
+
+        Given:
+            A CLUSTER query whose explicit projection omits the predicate
+            column score (selecting only chrom, start, end, and the cluster id).
+        When:
+            The generated SQL runs in DuckDB.
+        Then:
+            It should still cluster by the score runs, confirming the predicate
+            column is projected into the intermediate CTE.
+        """
+        # Arrange & act
+        rows = giql_query(
+            'SELECT chrom, start, "end", '
+            "CLUSTER(interval, predicate := score = PREV(score)) AS cid "
+            "FROM intervals",
+            tables=["intervals"],
+            intervals=[
+                _ival("chr1", 0, 10, "a", 5),
+                _ival("chr1", 10, 20, "b", 5),
+                _ival("chr1", 20, 30, "c", 3),
+            ],
+        )
+
+        # Assert
+        cids = [row[-1] for row in rows]
+        assert cids[0] == cids[1]
+        assert cids[2] != cids[0]
 
 
 class TestDisjoinDepthMergePipeline:
@@ -321,7 +382,7 @@ class TestDisjoinDepthMergePipeline:
         Given:
             The depth-annotated disjoint segments (depths 2, 3, 3, 2).
         When:
-            MERGE(interval, predicate := depth = prev.depth) runs over them.
+            MERGE(interval, predicate := depth = PREV(depth)) runs over them.
         Then:
             It should coalesce the adjacent depth-3 run into [10, 30) while
             keeping the depth-2 flanks distinct, reproducing the re-clustered
@@ -329,7 +390,7 @@ class TestDisjoinDepthMergePipeline:
         """
         # Arrange & act
         rows = giql_query(
-            "SELECT MERGE(interval, predicate := depth = prev.depth) "
+            "SELECT MERGE(interval, predicate := depth = PREV(depth)) "
             f"FROM ({self._DEPTH_SEGMENTS_QUERY}) AS segments",
             tables=["features"],
             features=self._FEATURES,
