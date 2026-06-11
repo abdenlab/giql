@@ -41,7 +41,7 @@ Syntax
    CLUSTER(interval, stranded := true) AS cluster_id
 
    -- Predicate-gated clustering (run-length encoding on a column)
-   CLUSTER(interval, predicate := depth = prev.depth) AS cluster_id
+   CLUSTER(interval, predicate := depth = PREV(depth)) AS cluster_id
 
    -- Combined parameters
    CLUSTER(interval, distance, stranded := true) AS cluster_id
@@ -69,8 +69,8 @@ Parameters
    Omitting the predicate preserves the default adjacency-only behavior.
 
    Bare column references resolve to the *current* interval; the predecessor's
-   value of a column is referenced with a ``prev.*`` qualifier
-   (e.g. ``depth = prev.depth``). The predicate composes with ``distance`` and
+   value of a column is referenced with ``PREV(column)``
+   (e.g. ``depth = PREV(depth)``). The predicate composes with ``distance`` and
    ``stranded`` and is evaluated under the operator's existing per-chromosome
    (and per-strand) partition and start-position order.
 
@@ -84,7 +84,7 @@ Parameters
    - **Pairwise only, with single-linkage drift.** The predicate compares each
      interval to its immediate sorted predecessor (everything ``LAG`` can
      express). Whole-cluster conditions are out of scope. When the predicate is
-     not an equivalence relation (e.g. ``ABS(score - prev.score) < 5``),
+     not an equivalence relation (e.g. ``ABS(score - PREV(score)) < 5``),
      consecutive pairs may each satisfy it while the cluster's extremes do not
      — the same single-linkage behavior that ``distance``-based clustering
      already exhibits.
@@ -137,13 +137,13 @@ Cluster intervals separately by strand:
 **Predicate-Gated Clustering:**
 
 Cut adjacent intervals into clusters wherever a column's value changes
-(run-length encoding). The ``prev.*`` qualifier references the predecessor row:
+(run-length encoding). ``PREV(column)`` references the predecessor row's value:
 
 .. code-block:: sql
 
    SELECT
        *,
-       CLUSTER(interval, predicate := depth = prev.depth) AS cluster_id
+       CLUSTER(interval, predicate := depth = PREV(depth)) AS cluster_id
    FROM features
    ORDER BY chrom, start
 
@@ -241,7 +241,7 @@ Syntax
    SELECT MERGE(interval, stranded := true) FROM features
 
    -- Predicate-gated merge (merge only equal-valued adjacent runs)
-   SELECT MERGE(interval, predicate := depth = prev.depth) FROM features
+   SELECT MERGE(interval, predicate := depth = PREV(depth)) FROM features
 
    -- Merge with additional aggregations
    SELECT
@@ -268,7 +268,7 @@ Parameters
    merged. ``MERGE`` decomposes into :ref:`CLUSTER <cluster-operator>` plus a
    ``GROUP BY`` over the cluster id, so it inherits predicate-aware boundaries
    directly — see the :ref:`CLUSTER predicate <cluster-operator>` description
-   for the full semantics, the ``prev.*`` qualifier convention, the
+   for the full semantics, the ``PREV(column)`` convention, the
    references-existing-columns-only constraint, and the pairwise-only /
    single-linkage caveat. Omitting the predicate preserves the default
    adjacency-only merge.
@@ -323,7 +323,7 @@ by :ref:`DISJOIN <disjoin-operator>` and aggregation:
 
 .. code-block:: sql
 
-   SELECT MERGE(interval, predicate := depth = prev.depth)
+   SELECT MERGE(interval, predicate := depth = PREV(depth))
    FROM (
        SELECT disjoin_chrom AS chrom,
               disjoin_start AS start,

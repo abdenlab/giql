@@ -354,7 +354,7 @@ Both ``CLUSTER`` and ``MERGE`` accept an optional ``predicate :=`` argument that
 further restricts which adjacent intervals are coalesced: an interval stays in
 the current cluster only when it is adjacent to its predecessor *and* the
 predicate holds between the two. Bare columns resolve to the current interval;
-the predecessor's value is referenced with a ``prev.*`` qualifier. The predicate
+the predecessor's value is referenced with ``PREV(column)``. The predicate
 references columns already present on the rows — it gates merging, it does not
 synthesize a statistic — and it compares each interval only to its immediate
 sorted predecessor (so non-equivalence predicates exhibit single-linkage drift,
@@ -368,7 +368,7 @@ wherever the value changes:
 
 .. code-block:: sql
 
-   SELECT MERGE(interval, predicate := depth = prev.depth)
+   SELECT MERGE(interval, predicate := depth = PREV(depth))
    FROM segments
 
 **Use case:** Collapse a per-base or per-segment signal into maximal runs of
@@ -384,7 +384,7 @@ individual rows:
 
    SELECT
        *,
-       CLUSTER(interval, predicate := depth = prev.depth) AS run_id
+       CLUSTER(interval, predicate := depth = PREV(depth)) AS run_id
    FROM segments
    ORDER BY chrom, start
 
@@ -402,7 +402,7 @@ depth-annotated output Bioconductor's ``disjoin()`` produces:
 
 .. code-block:: sql
 
-   SELECT MERGE(interval, predicate := depth = prev.depth)
+   SELECT MERGE(interval, predicate := depth = PREV(depth))
    FROM (
        SELECT disjoin_chrom AS chrom,
               disjoin_start AS start,
@@ -422,7 +422,7 @@ Gate merging on more than one column by combining comparisons with ``AND``:
 
 .. code-block:: sql
 
-   SELECT MERGE(interval, predicate := strand = prev.strand AND name = prev.name)
+   SELECT MERGE(interval, predicate := strand = PREV(strand) AND name = PREV(name))
    FROM features
 
 **Use case:** Keep merged regions homogeneous across several attributes at once.

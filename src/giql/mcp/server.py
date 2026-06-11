@@ -109,8 +109,8 @@ OPERATORS: dict[str, dict[str, Any]] = {
                 "name": "predicate",
                 "description": (
                     "Pairwise boolean gate; keep adjacent intervals together "
-                    "only when it holds. Use prev.col for the predecessor row "
-                    "(e.g. predicate := depth = prev.depth). Optional."
+                    "only when it holds. Use PREV(col) for the predecessor row's "
+                    "value (e.g. predicate := depth = PREV(depth)). Optional."
                 ),
             },
         ],
@@ -130,8 +130,8 @@ OPERATORS: dict[str, dict[str, Any]] = {
                 "name": "predicate",
                 "description": (
                     "Pairwise boolean gate; merge adjacent intervals only when "
-                    "it holds. Use prev.col for the predecessor row (e.g. "
-                    "predicate := depth = prev.depth). Optional."
+                    "it holds. Use PREV(col) for the predecessor row's value "
+                    "(e.g. predicate := depth = PREV(depth)). Optional."
                 ),
             },
         ],

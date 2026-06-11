@@ -203,21 +203,21 @@ class GIQLCluster(exp.Func):
     between each interval and its sorted predecessor; intervals are only kept
     in the same cluster when they are adjacent *and* the predicate holds. Bare
     columns resolve to the current interval; the predecessor's value of a
-    column is referenced with a ``prev.*`` qualifier.
+    column is referenced with ``PREV(column)``.
 
     Examples:
         CLUSTER(interval)
         CLUSTER(interval, 1000)
         CLUSTER(interval, stranded := true)
         CLUSTER(interval, 1000, stranded := true)
-        CLUSTER(interval, predicate := depth = prev.depth)
+        CLUSTER(interval, predicate := depth = PREV(depth))
     """
 
     arg_types = {
         "this": True,  # genomic column
         "distance": False,  # maximum distance between features
         "stranded": False,  # strand-specific clustering
-        "predicate": False,  # pairwise boolean gate (current row vs prev.*)
+        "predicate": False,  # pairwise boolean gate (current row vs PREV(col))
     }
 
     @classmethod
@@ -242,23 +242,23 @@ class GIQLMerge(exp.Func):
 
     The optional ``predicate`` argument gates merging on a pairwise boolean
     expression between each interval and its sorted predecessor (see
-    :class:`GIQLCluster`); a ``prev.*`` qualifier references the predecessor's
-    value of a column. When the predicate tests equality of a value this
-    yields a run-length encoding of the input interval sequence.
+    :class:`GIQLCluster`); ``PREV(column)`` references the predecessor's value
+    of a column. When the predicate tests equality of a value this yields a
+    run-length encoding of the input interval sequence.
 
     Examples:
         MERGE(interval)
         MERGE(interval, 1000)
         MERGE(interval, stranded := true)
-        MERGE(interval, predicate := depth = prev.depth)
-        MERGE(interval, predicate := strand = prev.strand AND name = prev.name)
+        MERGE(interval, predicate := depth = PREV(depth))
+        MERGE(interval, predicate := strand = PREV(strand) AND name = PREV(name))
     """
 
     arg_types = {
         "this": True,  # genomic column
         "distance": False,  # maximum distance between features
         "stranded": False,  # strand-specific merging
-        "predicate": False,  # pairwise boolean gate (current row vs prev.*)
+        "predicate": False,  # pairwise boolean gate (current row vs PREV(col))
     }
 
     @classmethod
