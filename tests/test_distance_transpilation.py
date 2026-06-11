@@ -6,8 +6,27 @@ Tests verify that DISTANCE() is correctly transpiled to SQL CASE expressions.
 from sqlglot import parse_one
 
 from giql import transpile
+from giql.canonicalizer import canonicalize_coordinates
 from giql.dialect import GIQLDialect
 from giql.generators import BaseGIQLGenerator
+from giql.resolver import resolve_operator_refs
+from giql.table import Tables
+
+
+def _generate(sql: str, tables: Tables | None = None) -> str:
+    """Parse, run normalization passes 1 and 2, then generate SQL.
+
+    DISTANCE operand resolution and coordinate canonicalization moved out of the
+    emitter and into the ResolveOperatorRefs / CanonicalizeCoordinates passes
+    (epic #114, issues #119 / #123). Emitter-level tests must run both passes
+    before generating, exactly as :func:`giql.transpile.transpile` does, rather
+    than calling ``generate`` on a bare parsed AST.
+    """
+    tables = tables or Tables()
+    ast = parse_one(sql, dialect=GIQLDialect)
+    ast = resolve_operator_refs(ast, tables)
+    ast = canonicalize_coordinates(ast)
+    return BaseGIQLGenerator(tables=tables).generate(ast)
 
 
 class TestDistanceTranspilation:
@@ -24,9 +43,7 @@ class TestDistanceTranspilation:
         FROM features_a a CROSS JOIN features_b b
         """
 
-        ast = parse_one(sql, dialect=GIQLDialect)
-        generator = BaseGIQLGenerator()
-        output = generator.generate(ast)
+        output = _generate(sql)
 
         expected = """SELECT CASE WHEN a."chrom" != b."chrom" THEN NULL WHEN a."start" < b."end" AND a."end" > b."start" THEN 0 WHEN a."end" <= b."start" THEN (b."start" - a."end") ELSE (a."start" - b."end") END AS dist FROM features_a AS a CROSS JOIN features_b AS b"""
 
@@ -43,9 +60,7 @@ class TestDistanceTranspilation:
         FROM features_a a, features_b b
         """
 
-        ast = parse_one(sql, dialect=GIQLDialect)
-        generator = BaseGIQLGenerator()
-        output = generator.generate(ast)
+        output = _generate(sql)
 
         expected = """SELECT CASE WHEN a."chrom" != b."chrom" THEN NULL WHEN a."start" < b."end" AND a."end" > b."start" THEN 0 WHEN a."end" <= b."start" THEN (b."start" - a."end") ELSE (a."start" - b."end") END AS dist FROM features_a AS a, features_b AS b"""
 
@@ -62,9 +77,7 @@ class TestDistanceTranspilation:
         FROM features_a a CROSS JOIN features_b b
         """
 
-        ast = parse_one(sql, dialect=GIQLDialect)
-        generator = BaseGIQLGenerator()
-        output = generator.generate(ast)
+        output = _generate(sql)
 
         expected = """SELECT CASE WHEN a."chrom" != b."chrom" THEN NULL WHEN a."start" < b."end" AND a."end" > b."start" THEN 0 WHEN a."end" <= b."start" THEN (b."start" - a."end") ELSE (a."start" - b."end") END AS dist FROM features_a AS a CROSS JOIN features_b AS b"""
 
@@ -72,11 +85,12 @@ class TestDistanceTranspilation:
 
     def test_distance_resolver_path_matches_direct_generation(self):
         """
-        GIVEN a DISTANCE query over registered default-convention tables
-        WHEN transpiling through the full pipeline (the resolver pass) versus
-            generating directly from the parsed AST
-        THEN both paths should emit byte-identical SQL, proving the
-            ResolvedColumn metadata path reproduces the legacy string path
+        GIVEN a DISTANCE query over default-convention tables
+        WHEN transpiling through the full pipeline (with the tables registered)
+            versus running the two normalization passes with no tables registered
+        THEN both paths should emit byte-identical SQL, proving the qualified
+            ResolvedColumn metadata resolves identically whether or not the
+            operand's relation is registered
         """
         query = (
             "SELECT DISTANCE(a.interval, b.interval) AS dist "
@@ -84,8 +98,7 @@ class TestDistanceTranspilation:
         )
 
         via_transpile = transpile(query, tables=["features_a", "features_b"])
-        ast = parse_one(query, dialect=GIQLDialect)
-        via_generate = BaseGIQLGenerator().generate(ast)
+        via_generate = _generate(query)
 
         assert via_transpile == via_generate
 
@@ -101,9 +114,7 @@ class TestDistanceTranspilation:
         FROM features_a a CROSS JOIN features_b b
         """
 
-        ast = parse_one(sql, dialect=GIQLDialect)
-        generator = BaseGIQLGenerator()
-        output = generator.generate(ast)
+        output = _generate(sql)
 
         # Signed distance: upstream (B before A) returns negative,
         # downstream (B after A) returns positive

@@ -8,8 +8,26 @@ import duckdb
 import pytest
 from sqlglot import parse_one
 
+from giql.canonicalizer import canonicalize_coordinates
 from giql.dialect import GIQLDialect
 from giql.generators import BaseGIQLGenerator
+from giql.resolver import resolve_operator_refs
+from giql.table import Tables
+
+
+def _generate(sql: str) -> str:
+    """Parse, run normalization passes 1 and 2, then generate SQL.
+
+    DISTANCE operand resolution and coordinate canonicalization moved out of the
+    emitter and into the ResolveOperatorRefs / CanonicalizeCoordinates passes
+    (epic #114, issues #119 / #123). These behavioral tests must run both passes
+    before generating, exactly as :func:`giql.transpile.transpile` does, rather
+    than calling ``generate`` on a bare parsed AST.
+    """
+    ast = parse_one(sql, dialect=GIQLDialect)
+    ast = resolve_operator_refs(ast, Tables())
+    ast = canonicalize_coordinates(ast)
+    return BaseGIQLGenerator().generate(ast)
 
 
 class TestDistanceCalculation:
@@ -32,9 +50,7 @@ class TestDistanceCalculation:
         """
 
         # Parse and generate SQL
-        ast = parse_one(sql, dialect=GIQLDialect)
-        generator = BaseGIQLGenerator()
-        output_sql = generator.generate(ast)
+        output_sql = _generate(sql)
 
         # Verify SQL contains CASE expression logic for overlaps
         assert "CASE" in output_sql
@@ -69,9 +85,7 @@ class TestDistanceCalculation:
             (SELECT 'chr1' as chrom, 300 as start, 400 as end) b
         """
 
-        ast = parse_one(sql, dialect=GIQLDialect)
-        generator = BaseGIQLGenerator()
-        output_sql = generator.generate(ast)
+        output_sql = _generate(sql)
 
         conn = duckdb.connect(":memory:")
         result = conn.execute(output_sql).fetchone()
@@ -96,9 +110,7 @@ class TestDistanceCalculation:
             (SELECT 'chr2' as chrom, 150 as start, 250 as end) b
         """
 
-        ast = parse_one(sql, dialect=GIQLDialect)
-        generator = BaseGIQLGenerator()
-        output_sql = generator.generate(ast)
+        output_sql = _generate(sql)
 
         conn = duckdb.connect(":memory:")
         result = conn.execute(output_sql).fetchone()
@@ -127,9 +139,7 @@ class TestDistanceCalculation:
             (SELECT 'chr1' as chrom, 200 as start, 300 as end) b
         """
 
-        ast = parse_one(sql, dialect=GIQLDialect)
-        generator = BaseGIQLGenerator()
-        output_sql = generator.generate(ast)
+        output_sql = _generate(sql)
 
         conn = duckdb.connect(":memory:")
         result = conn.execute(output_sql).fetchone()
@@ -159,9 +169,7 @@ class TestDistanceCalculation:
             (SELECT 'chr1' as chrom, 300 as start, 400 as end) b
         """
 
-        ast = parse_one(sql, dialect=GIQLDialect)
-        generator = BaseGIQLGenerator()
-        output_sql = generator.generate(ast)
+        output_sql = _generate(sql)
 
         conn = duckdb.connect(":memory:")
         result = conn.execute(output_sql).fetchone()
@@ -190,9 +198,7 @@ class TestStrandedDistance:
             (SELECT 'chr1' as chrom, 300 as start, 400 as end, '+' as strand) b
         """
 
-        ast = parse_one(sql, dialect=GIQLDialect)
-        generator = BaseGIQLGenerator()
-        output_sql = generator.generate(ast)
+        output_sql = _generate(sql)
 
         conn = duckdb.connect(":memory:")
         result = conn.execute(output_sql).fetchone()
@@ -217,9 +223,7 @@ class TestStrandedDistance:
             (SELECT 'chr1' as chrom, 300 as start, 400 as end, '-' as strand) b
         """
 
-        ast = parse_one(sql, dialect=GIQLDialect)
-        generator = BaseGIQLGenerator()
-        output_sql = generator.generate(ast)
+        output_sql = _generate(sql)
 
         conn = duckdb.connect(":memory:")
         result = conn.execute(output_sql).fetchone()
@@ -244,9 +248,7 @@ class TestStrandedDistance:
             (SELECT 'chr1' as chrom, 300 as start, 400 as end, '-' as strand) b
         """
 
-        ast = parse_one(sql, dialect=GIQLDialect)
-        generator = BaseGIQLGenerator()
-        output_sql = generator.generate(ast)
+        output_sql = _generate(sql)
 
         conn = duckdb.connect(":memory:")
         result = conn.execute(output_sql).fetchone()
@@ -271,9 +273,7 @@ class TestStrandedDistance:
             (SELECT 'chr1' as chrom, 300 as start, 400 as end, '+' as strand) b
         """
 
-        ast = parse_one(sql, dialect=GIQLDialect)
-        generator = BaseGIQLGenerator()
-        output_sql = generator.generate(ast)
+        output_sql = _generate(sql)
 
         conn = duckdb.connect(":memory:")
         result = conn.execute(output_sql).fetchone()
@@ -298,9 +298,7 @@ class TestStrandedDistance:
             (SELECT 'chr1' as chrom, 300 as start, 400 as end, '.' as strand) b
         """
 
-        ast = parse_one(sql, dialect=GIQLDialect)
-        generator = BaseGIQLGenerator()
-        output_sql = generator.generate(ast)
+        output_sql = _generate(sql)
 
         conn = duckdb.connect(":memory:")
         result = conn.execute(output_sql).fetchone()
@@ -325,9 +323,7 @@ class TestStrandedDistance:
             (SELECT 'chr1' as chrom, 300 as start, 400 as end, '+' as strand) b
         """
 
-        ast = parse_one(sql, dialect=GIQLDialect)
-        generator = BaseGIQLGenerator()
-        output_sql = generator.generate(ast)
+        output_sql = _generate(sql)
 
         conn = duckdb.connect(":memory:")
         result = conn.execute(output_sql).fetchone()
@@ -352,9 +348,7 @@ class TestStrandedDistance:
             (SELECT 'chr1' as chrom, 300 as start, 400 as end, '+' as strand) b
         """
 
-        ast = parse_one(sql, dialect=GIQLDialect)
-        generator = BaseGIQLGenerator()
-        output_sql = generator.generate(ast)
+        output_sql = _generate(sql)
 
         conn = duckdb.connect(":memory:")
         result = conn.execute(output_sql).fetchone()
@@ -379,9 +373,7 @@ class TestStrandedDistance:
             (SELECT 'chr1' as chrom, 150 as start, 250 as end, '-' as strand) b
         """
 
-        ast = parse_one(sql, dialect=GIQLDialect)
-        generator = BaseGIQLGenerator()
-        output_sql = generator.generate(ast)
+        output_sql = _generate(sql)
 
         conn = duckdb.connect(":memory:")
         result = conn.execute(output_sql).fetchone()

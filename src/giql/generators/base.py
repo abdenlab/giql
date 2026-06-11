@@ -3,10 +3,6 @@ from sqlglot.generator import Generator
 
 from giql.canonical import decanonical_end
 from giql.canonical import decanonical_start
-from giql.constants import DEFAULT_CHROM_COL
-from giql.constants import DEFAULT_END_COL
-from giql.constants import DEFAULT_START_COL
-from giql.constants import DEFAULT_STRAND_COL
 from giql.expressions import Contains
 from giql.expressions import GIQLDisjoin
 from giql.expressions import GIQLDistance
@@ -21,7 +17,6 @@ from giql.resolver import OperatorResolution
 from giql.resolver import ResolvedColumn
 from giql.resolver import ResolvedInterval
 from giql.resolver import ResolvedRef
-from giql.resolver import resolve_operator_refs
 from giql.table import Table
 from giql.table import Tables
 
@@ -46,40 +41,6 @@ class BaseGIQLGenerator(Generator):
     def __init__(self, tables: Tables | None = None, **kwargs):
         super().__init__(**kwargs)
         self.tables = tables or Tables()
-        self._current_table = None  # Track current table for column resolution
-        self._alias_to_table = {}  # Map aliases to table names
-
-    def select_sql(self, expression: exp.Select) -> str:
-        """Override SELECT generation to track table context and aliases."""
-        # Build alias-to-table mapping
-        self._alias_to_table = {}
-
-        # Extract from FROM clause
-        if expression.args.get("from_"):
-            from_clause = expression.args["from_"]
-            if isinstance(from_clause.this, exp.Table):
-                table_name = from_clause.this.name
-                self._current_table = table_name
-                # Check if table has an alias
-                if from_clause.this.alias:
-                    self._alias_to_table[from_clause.this.alias] = table_name
-                else:
-                    # No alias, table referenced by name
-                    self._alias_to_table[table_name] = table_name
-
-        # Extract from JOINs
-        if expression.args.get("joins"):
-            for join in expression.args["joins"]:
-                if isinstance(join.this, exp.Table):
-                    table_name = join.this.name
-                    # Check if table has an alias
-                    if join.this.alias:
-                        self._alias_to_table[join.this.alias] = table_name
-                    else:
-                        self._alias_to_table[table_name] = table_name
-
-        # Call parent implementation
-        return super().select_sql(expression)
 
     def intersects_sql(self, expression: Intersects) -> str:
         """Generate standard SQL for INTERSECTS.
@@ -537,13 +498,12 @@ class BaseGIQLGenerator(Generator):
 
         Reads the :class:`~giql.resolver.ResolvedColumn` metadata that
         ``ResolveOperatorRefs`` (pass 1) attaches to each interval operand. When
-        the pass deferred an operand (a literal range, an unqualified column, or
-        a tree the pass never reached) the emitter falls back to its historical
-        string-level resolution and raises the same diagnostics as before.
+        the pass deferred an operand (a literal range, or an unqualified column)
+        the emitter raises the historical literal-range diagnostic.
 
-        Coordinate canonicalization stays here (epic #114 step 8 / issue #123):
-        the resolved metadata carries each operand's :class:`~giql.table.Table`
-        so the endpoints are wrapped identically.
+        Coordinate canonicalization is owned by ``CanonicalizeCoordinates``
+        (pass 2, issue #123): the resolved metadata's endpoints are already
+        canonicalized in place, so the emitter consumes them verbatim.
 
         :param expression:
             GIQLDistance expression node
@@ -585,14 +545,12 @@ class BaseGIQLGenerator(Generator):
     def _distance_operand(
         self, expression: GIQLDistance, arg: str, position: str
     ) -> ResolvedColumn:
-        """Resolve one DISTANCE interval operand to a :class:`ResolvedColumn`.
+        """Return the :class:`ResolvedColumn` for one DISTANCE interval operand.
 
-        Prefers the metadata attached by ``ResolveOperatorRefs`` (pass 1). When
-        the pass deferred the operand — it could not resolve a literal range or
-        an unqualified column, or never ran (the generator was invoked directly
-        without the pass) — this falls back to the legacy ``_get_column_refs`` /
-        ``_resolve_table`` path, raising the historical literal-range error for
-        a non-column operand.
+        Reads the metadata attached by ``ResolveOperatorRefs`` (pass 1). When the
+        pass deferred the operand — a literal range or an unqualified column it
+        could not resolve — no column is attached and this raises the historical
+        literal-range diagnostic.
 
         :param expression:
             GIQLDistance expression node
@@ -612,19 +570,6 @@ class BaseGIQLGenerator(Generator):
             if resolved is not None:
                 return resolved
 
-        # Deferred: fall back to string-level resolution.
-        operand_sql = self.sql(expression.args.get(arg))
-        if "." in operand_sql and not operand_sql.startswith("'"):
-            chrom, start, end, strand = self._get_column_refs(
-                operand_sql, None, include_strand=True
-            )
-            return ResolvedColumn(
-                chrom=chrom,
-                start=start,
-                end=end,
-                strand=strand,
-                table=self._resolve_table(operand_sql),
-            )
         raise ValueError(f"Literal range as {position} argument not yet supported")
 
     def _generate_distance_case(
@@ -718,28 +663,17 @@ class BaseGIQLGenerator(Generator):
             f"ELSE ({start_a} - {end_b}) END END"
         )
 
-    def _predicate_operand(
-        self, expression: exp.Expression, arg: str, ctx_table: str | None
-    ) -> ResolvedColumn:
+    def _predicate_operand(self, expression: exp.Expression, arg: str) -> ResolvedColumn:
         """Return the :class:`ResolvedColumn` for a spatial predicate operand.
 
         Reads the column resolution attached to *expression* by the
-        ``ResolveOperatorRefs`` pass (the metadata-driven path used by the full
-        transpile pipeline). When the pass did not annotate the node — e.g. a
-        generator invoked on a bare AST without running pass 1 — it falls back to
-        the generator's historical ``_current_table`` / alias-map resolution so
-        direct ``generate()`` callers keep their existing behavior. Both paths
-        format physical column references identically, so the emitted SQL is the
-        same regardless of which produced the :class:`ResolvedColumn`.
+        ``ResolveOperatorRefs`` pass (pass 1). The emitter consumes only the
+        resolved metadata; all name/column resolution lives in the pass.
 
         :param expression:
             The spatial predicate node carrying the resolution metadata.
         :param arg:
             The operand slot key (``"this"`` or ``"expression"``).
-        :param ctx_table:
-            The current-table resolution context for the fallback path —
-            ``self._current_table`` for a literal-range operand, ``None`` for a
-            column-to-column operand.
         :return:
             The resolved column metadata.
         """
@@ -749,10 +683,10 @@ class BaseGIQLGenerator(Generator):
             if resolved is not None:
                 return resolved
 
-        column_ref = self.sql(expression, arg)
-        chrom, start, end = self._get_column_refs(column_ref, ctx_table)
-        table = self._resolve_table(column_ref, ctx_table)
-        return ResolvedColumn(chrom=chrom, start=start, end=end, strand="", table=table)
+        raise ValueError(
+            f"Spatial predicate operand {arg!r} was not resolved; run the "
+            "ResolveOperatorRefs pass (transpile pipeline) before generation."
+        )
 
     def _generate_spatial_op(self, expression: exp.Binary, op_type: str) -> str:
         """Generate SQL for a spatial operation.
@@ -769,15 +703,15 @@ class BaseGIQLGenerator(Generator):
         # Check if right side is a column reference or a literal range string
         if "." in right_raw and not right_raw.startswith("'"):
             # Column-to-column join (e.g., a.interval INTERSECTS b.interval)
-            left = self._predicate_operand(expression, "this", None)
-            right = self._predicate_operand(expression, "expression", None)
+            left = self._predicate_operand(expression, "this")
+            right = self._predicate_operand(expression, "expression")
             return self._generate_column_join(left, right, op_type)
         else:
             # Literal range string (e.g., interval INTERSECTS 'chr1:1000-2000')
             try:
                 range_str = right_raw.strip("'\"")
                 parsed_range = RangeParser.parse(range_str).to_zero_based_half_open()
-                left = self._predicate_operand(expression, "this", self._current_table)
+                left = self._predicate_operand(expression, "this")
                 return self._generate_range_predicate(left, parsed_range, op_type)
             except Exception as e:
                 raise ValueError(
@@ -919,7 +853,7 @@ class BaseGIQLGenerator(Generator):
         # Resolve the (single) left column operand once; every range condition
         # compares against the same column. The set predicate's ranges are
         # always literals, so only this operand needs resolution.
-        column = self._predicate_operand(expression, "this", self._current_table)
+        column = self._predicate_operand(expression, "this")
 
         # Parse all ranges
         parsed_ranges = []
@@ -970,10 +904,8 @@ class BaseGIQLGenerator(Generator):
 
         The transpile pipeline attaches an
         :class:`~giql.resolver.OperatorResolution` before generation, and it
-        survives the generator's defensive tree copy. Direct callers that invoke
-        ``generate`` / ``giqlnearest_sql`` without running the pass (notably unit
-        tests) get the metadata resolved lazily here against this generator's
-        registered tables, so the emit path always reads resolved metadata.
+        survives the generator's defensive tree copy. The emitter reads only the
+        attached metadata; resolution lives entirely in the pass.
 
         :param expression:
             GIQLNearest expression node
@@ -982,9 +914,6 @@ class BaseGIQLGenerator(Generator):
             if resolution did not produce one.
         """
         resolution = expression.meta.get(META_KEY)
-        if not isinstance(resolution, OperatorResolution):
-            resolve_operator_refs(expression.root(), self.tables)
-            resolution = expression.meta.get(META_KEY)
         return resolution if isinstance(resolution, OperatorResolution) else None
 
     def _raise_nearest_reference_error(
@@ -1145,106 +1074,3 @@ class BaseGIQLGenerator(Generator):
             return param_expr.this
         else:
             return str(param_expr).upper() in ("TRUE", "1", "YES")
-
-    def _get_column_refs(
-        self,
-        column_ref: str,
-        table_name: str | None = None,
-        include_strand: bool = False,
-    ) -> tuple[str, str, str] | tuple[str, str, str, str]:
-        """Get physical column names for genomic data.
-
-        :param column_ref:
-            Logical column reference (e.g., 'v.interval' or 'interval')
-        :param table_name:
-            Table name to look up schema (optional, overrides extraction from column_ref)
-        :param include_strand:
-            If True, return 4-tuple with strand column; otherwise return 3-tuple
-        :return:
-            Tuple of (chromosome_col, start_col, end_col) or
-            (chromosome_col, start_col, end_col, strand_col) if include_strand=True
-        """
-        # Default column names
-        chrom_col = DEFAULT_CHROM_COL
-        start_col = DEFAULT_START_COL
-        end_col = DEFAULT_END_COL
-        strand_col = DEFAULT_STRAND_COL
-
-        # Alias is kept verbatim for output formatting; table name is resolved
-        # separately to look up the Table config (alias != name in joins).
-        table_alias = column_ref.rsplit(".", 1)[0] if "." in column_ref else None
-        table_name = self._resolve_table_name(column_ref, table_name)
-
-        # Try to get custom column names from table config
-        if table_name and self.tables:
-            table = self.tables.get(table_name)
-            if table:
-                chrom_col = table.chrom_col
-                start_col = table.start_col
-                end_col = table.end_col
-                if table.strand_col:
-                    strand_col = table.strand_col
-
-        # Format with table alias if present
-        if table_alias:
-            base_cols = (
-                f'{table_alias}."{chrom_col}"',
-                f'{table_alias}."{start_col}"',
-                f'{table_alias}."{end_col}"',
-            )
-            if include_strand:
-                return base_cols + (f'{table_alias}."{strand_col}"',)
-            return base_cols
-        else:
-            base_cols = (
-                f'"{chrom_col}"',
-                f'"{start_col}"',
-                f'"{end_col}"',
-            )
-            if include_strand:
-                return base_cols + (f'"{strand_col}"',)
-            return base_cols
-
-    def _resolve_table_name(self, column_ref: str, table_name: str | None) -> str | None:
-        """Resolve the underlying table name for a column reference.
-
-        Precedence: explicit ``table_name`` (caller-provided context) > alias
-        map (JOIN-side resolution via ``self._alias_to_table``) >
-        ``self._current_table`` (FROM-clause fallback for unmapped dotted
-        aliases). Undotted refs return ``None`` because their caller is
-        expected to pass ``_current_table`` as the explicit ``table_name``
-        when relevant.
-
-        :param column_ref:
-            Column reference, possibly aliased (e.g. ``a.interval``)
-        :param table_name:
-            Explicit table name; takes precedence if non-empty
-        :return:
-            ``table_name`` if non-empty; otherwise the alias mapping from
-            ``self._alias_to_table`` (with ``self._current_table`` as fallback)
-            if ``column_ref`` is dotted; otherwise None
-        """
-        if table_name:
-            return table_name
-        if "." in column_ref:
-            alias = column_ref.rsplit(".", 1)[0]
-            return self._alias_to_table.get(alias, self._current_table)
-        return None
-
-    def _resolve_table(
-        self, column_ref: str, table_name: str | None = None
-    ) -> Table | None:
-        """Resolve the Table config that backs a column reference.
-
-        :param column_ref:
-            Column reference, possibly aliased (e.g. ``a.interval``)
-        :param table_name:
-            Explicit table name; if omitted, derived from ``column_ref`` alias
-            or falls back to ``self._current_table``
-        :return:
-            The Table config if registered, otherwise None
-        """
-        table_name = self._resolve_table_name(column_ref, table_name)
-        if table_name and self.tables:
-            return self.tables.get(table_name)
-        return None

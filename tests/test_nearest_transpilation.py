@@ -8,9 +8,26 @@ import pytest
 from sqlglot import parse_one
 
 from giql import Table
+from giql.canonicalizer import canonicalize_coordinates
 from giql.dialect import GIQLDialect
 from giql.generators import BaseGIQLGenerator
+from giql.resolver import resolve_operator_refs
 from giql.table import Tables
+
+
+def _generate(sql: str, tables: Tables) -> str:
+    """Parse, run normalization passes 1 and 2, then generate SQL.
+
+    Operator resolution and coordinate canonicalization moved out of the emitter
+    and into the ResolveOperatorRefs / CanonicalizeCoordinates passes (epic #114,
+    issues #118-#123). Emitter-level tests must run both passes before generating,
+    exactly as :func:`giql.transpile.transpile` does, rather than calling
+    ``generate`` on a bare parsed AST.
+    """
+    ast = parse_one(sql, dialect=GIQLDialect)
+    ast = resolve_operator_refs(ast, tables)
+    ast = canonicalize_coordinates(ast)
+    return BaseGIQLGenerator(tables=tables).generate(ast)
 
 
 @pytest.fixture
@@ -37,9 +54,7 @@ class TestNearestTranspilation:
         CROSS JOIN LATERAL NEAREST(genes, reference := peaks.interval, k := 3)
         """
 
-        ast = parse_one(sql, dialect=GIQLDialect)
-        generator = BaseGIQLGenerator(tables=tables_with_peaks_and_genes)
-        output = generator.generate(ast)
+        output = _generate(sql, tables_with_peaks_and_genes)
 
         # Expectations:
         # - LATERAL subquery
@@ -65,9 +80,7 @@ class TestNearestTranspilation:
         CROSS JOIN LATERAL NEAREST(genes, reference := peaks.interval, k := 5, max_distance := 100000)
         """
 
-        ast = parse_one(sql, dialect=GIQLDialect)
-        generator = BaseGIQLGenerator(tables=tables_with_peaks_and_genes)
-        output = generator.generate(ast)
+        output = _generate(sql, tables_with_peaks_and_genes)
 
         # Expectations:
         # - LATERAL subquery
@@ -88,9 +101,7 @@ class TestNearestTranspilation:
         FROM NEAREST(genes, reference := 'chr1:1000-2000', k := 3)
         """
 
-        ast = parse_one(sql, dialect=GIQLDialect)
-        generator = BaseGIQLGenerator(tables=tables_with_peaks_and_genes)
-        output = generator.generate(ast)
+        output = _generate(sql, tables_with_peaks_and_genes)
 
         # Expectations:
         # - No LATERAL (standalone mode)
@@ -113,9 +124,7 @@ class TestNearestTranspilation:
         CROSS JOIN LATERAL NEAREST(genes, reference := peaks.interval, k := 3, stranded := true)
         """
 
-        ast = parse_one(sql, dialect=GIQLDialect)
-        generator = BaseGIQLGenerator(tables=tables_with_peaks_and_genes)
-        output = generator.generate(ast)
+        output = _generate(sql, tables_with_peaks_and_genes)
 
         # Expectations:
         # - LATERAL subquery
@@ -138,9 +147,7 @@ class TestNearestTranspilation:
         CROSS JOIN LATERAL NEAREST(genes, reference := peaks.interval, k := 3, signed := true)
         """
 
-        ast = parse_one(sql, dialect=GIQLDialect)
-        generator = BaseGIQLGenerator(tables=tables_with_peaks_and_genes)
-        output = generator.generate(ast)
+        output = _generate(sql, tables_with_peaks_and_genes)
 
         # Expectations:
         # - LATERAL subquery
