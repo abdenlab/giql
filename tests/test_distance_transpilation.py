@@ -45,7 +45,7 @@ class TestDistanceTranspilation:
 
         output = _generate(sql)
 
-        expected = """SELECT CASE WHEN a."chrom" != b."chrom" THEN NULL WHEN a."start" < b."end" AND a."end" > b."start" THEN 0 WHEN a."end" <= b."start" THEN (b."start" - a."end") ELSE (a."start" - b."end") END AS dist FROM features_a AS a CROSS JOIN features_b AS b"""
+        expected = """SELECT CASE WHEN a."chrom" != b."chrom" THEN NULL WHEN a."start" < b."end" AND a."end" > b."start" THEN 0 WHEN a."end" <= b."start" THEN (b."start" - a."end" + 1) ELSE (a."start" - b."end" + 1) END AS dist FROM features_a AS a CROSS JOIN features_b AS b"""
 
         assert output == expected, f"Expected:\n{expected}\n\nGot:\n{output}"
 
@@ -62,7 +62,7 @@ class TestDistanceTranspilation:
 
         output = _generate(sql)
 
-        expected = """SELECT CASE WHEN a."chrom" != b."chrom" THEN NULL WHEN a."start" < b."end" AND a."end" > b."start" THEN 0 WHEN a."end" <= b."start" THEN (b."start" - a."end") ELSE (a."start" - b."end") END AS dist FROM features_a AS a, features_b AS b"""
+        expected = """SELECT CASE WHEN a."chrom" != b."chrom" THEN NULL WHEN a."start" < b."end" AND a."end" > b."start" THEN 0 WHEN a."end" <= b."start" THEN (b."start" - a."end" + 1) ELSE (a."start" - b."end" + 1) END AS dist FROM features_a AS a, features_b AS b"""
 
         assert output == expected, f"Expected:\n{expected}\n\nGot:\n{output}"
 
@@ -79,7 +79,7 @@ class TestDistanceTranspilation:
 
         output = _generate(sql)
 
-        expected = """SELECT CASE WHEN a."chrom" != b."chrom" THEN NULL WHEN a."start" < b."end" AND a."end" > b."start" THEN 0 WHEN a."end" <= b."start" THEN (b."start" - a."end") ELSE (a."start" - b."end") END AS dist FROM features_a AS a CROSS JOIN features_b AS b"""
+        expected = """SELECT CASE WHEN a."chrom" != b."chrom" THEN NULL WHEN a."start" < b."end" AND a."end" > b."start" THEN 0 WHEN a."end" <= b."start" THEN (b."start" - a."end" + 1) ELSE (a."start" - b."end" + 1) END AS dist FROM features_a AS a CROSS JOIN features_b AS b"""
 
         assert output == expected, f"Expected:\n{expected}\n\nGot:\n{output}"
 
@@ -121,8 +121,8 @@ class TestDistanceTranspilation:
         expected = (
             'SELECT CASE WHEN a."chrom" != b."chrom" THEN NULL '
             'WHEN a."start" < b."end" AND a."end" > b."start" THEN 0 '
-            'WHEN a."end" <= b."start" THEN (b."start" - a."end") '
-            'ELSE -(a."start" - b."end") END AS dist '
+            'WHEN a."end" <= b."start" THEN (b."start" - a."end" + 1) '
+            'ELSE -(a."start" - b."end" + 1) END AS dist '
             "FROM features_a AS a CROSS JOIN features_b AS b"
         )
 
