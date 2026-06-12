@@ -587,6 +587,13 @@ class BaseGIQLGenerator(Generator):
     ) -> str:
         """Generate SQL CASE expression for distance calculation.
 
+        Distances follow bedtools ``closest -d`` semantics: overlapping
+        intervals report ``0``, book-ended (adjacent) intervals where
+        ``A.end == B.start`` in half-open coordinates report ``1``, and a raw
+        half-open gap of N bases reports ``N + 1``. The ``+ 1`` is applied to
+        the absolute gap magnitude before any directional sign, so a downstream
+        book-ended pair reports ``+1`` and an upstream one ``-1`` in signed mode.
+
         :param chrom_a:
             Chromosome column for interval A
         :param start_a:
@@ -619,15 +626,15 @@ class BaseGIQLGenerator(Generator):
                 return (
                     f"CASE WHEN {chrom_a} != {chrom_b} THEN NULL "
                     f"WHEN {start_a} < {end_b} AND {end_a} > {start_b} THEN 0 "
-                    f"WHEN {end_a} <= {start_b} THEN ({start_b} - {end_a}) "
-                    f"ELSE -({start_a} - {end_b}) END"
+                    f"WHEN {end_a} <= {start_b} THEN ({start_b} - {end_a} + 1) "
+                    f"ELSE -({start_a} - {end_b} + 1) END"
                 )
             # Unsigned (absolute) distance
             return (
                 f"CASE WHEN {chrom_a} != {chrom_b} THEN NULL "
                 f"WHEN {start_a} < {end_b} AND {end_a} > {start_b} THEN 0 "
-                f"WHEN {end_a} <= {start_b} THEN ({start_b} - {end_a}) "
-                f"ELSE ({start_a} - {end_b}) END"
+                f"WHEN {end_a} <= {start_b} THEN ({start_b} - {end_a} + 1) "
+                f"ELSE ({start_a} - {end_b} + 1) END"
             )
 
         # Stranded distance calculation
@@ -642,11 +649,11 @@ class BaseGIQLGenerator(Generator):
                 f"WHEN {strand_b} = '.' OR {strand_b} = '?' THEN NULL "
                 f"WHEN {start_a} < {end_b} AND {end_a} > {start_b} THEN 0 "
                 f"WHEN {end_a} <= {start_b} THEN "
-                f"CASE WHEN {strand_a} = '-' THEN -({start_b} - {end_a}) "
-                f"ELSE ({start_b} - {end_a}) END "
+                f"CASE WHEN {strand_a} = '-' THEN -({start_b} - {end_a} + 1) "
+                f"ELSE ({start_b} - {end_a} + 1) END "
                 f"ELSE "
-                f"CASE WHEN {strand_a} = '-' THEN ({start_a} - {end_b}) "
-                f"ELSE -({start_a} - {end_b}) END END"
+                f"CASE WHEN {strand_a} = '-' THEN ({start_a} - {end_b} + 1) "
+                f"ELSE -({start_a} - {end_b} + 1) END END"
             )
         # Stranded but not signed: apply strand flip only
         return (
@@ -656,11 +663,11 @@ class BaseGIQLGenerator(Generator):
             f"WHEN {strand_b} = '.' OR {strand_b} = '?' THEN NULL "
             f"WHEN {start_a} < {end_b} AND {end_a} > {start_b} THEN 0 "
             f"WHEN {end_a} <= {start_b} THEN "
-            f"CASE WHEN {strand_a} = '-' THEN -({start_b} - {end_a}) "
-            f"ELSE ({start_b} - {end_a}) END "
+            f"CASE WHEN {strand_a} = '-' THEN -({start_b} - {end_a} + 1) "
+            f"ELSE ({start_b} - {end_a} + 1) END "
             f"ELSE "
-            f"CASE WHEN {strand_a} = '-' THEN -({start_a} - {end_b}) "
-            f"ELSE ({start_a} - {end_b}) END END"
+            f"CASE WHEN {strand_a} = '-' THEN -({start_a} - {end_b} + 1) "
+            f"ELSE ({start_a} - {end_b} + 1) END END"
         )
 
     def _predicate_operand(self, expression: exp.Expression, arg: str) -> ResolvedColumn:
