@@ -411,16 +411,16 @@ class TestBaseGIQLGenerator:
             "CASE WHEN 'chr1' != genes.\"chrom\" THEN NULL "
             'WHEN 1000 < genes."end" AND 2000 > genes."start" THEN 0 '
             'WHEN 2000 <= genes."start" '
-            'THEN (genes."start" - 2000) '
-            'ELSE (1000 - genes."end") END AS distance\n'
+            'THEN (genes."start" - 2000 + 1) '
+            'ELSE (1000 - genes."end" + 1) END AS distance\n'
             "                FROM genes\n"
             "                WHERE 'chr1' = genes.\"chrom\"\n"
             "                ORDER BY ABS("
             "CASE WHEN 'chr1' != genes.\"chrom\" THEN NULL "
             'WHEN 1000 < genes."end" AND 2000 > genes."start" THEN 0 '
             'WHEN 2000 <= genes."start" '
-            'THEN (genes."start" - 2000) '
-            'ELSE (1000 - genes."end") END)\n'
+            'THEN (genes."start" - 2000 + 1) '
+            'ELSE (1000 - genes."end" + 1) END)\n'
             "                LIMIT 3\n"
             "            )"
         )
@@ -446,8 +446,8 @@ class TestBaseGIQLGenerator:
             'WHEN peaks."start" < genes."end" '
             'AND peaks."end" > genes."start" THEN 0 '
             'WHEN peaks."end" <= genes."start" '
-            'THEN (genes."start" - peaks."end") '
-            'ELSE (peaks."start" - genes."end") END AS distance\n'
+            'THEN (genes."start" - peaks."end" + 1) '
+            'ELSE (peaks."start" - genes."end" + 1) END AS distance\n'
             "                FROM genes\n"
             '                WHERE peaks."chrom" = genes."chrom"\n'
             "                ORDER BY ABS("
@@ -455,8 +455,8 @@ class TestBaseGIQLGenerator:
             'WHEN peaks."start" < genes."end" '
             'AND peaks."end" > genes."start" THEN 0 '
             'WHEN peaks."end" <= genes."start" '
-            'THEN (genes."start" - peaks."end") '
-            'ELSE (peaks."start" - genes."end") END)\n'
+            'THEN (genes."start" - peaks."end" + 1) '
+            'ELSE (peaks."start" - genes."end" + 1) END)\n'
             "                LIMIT 3\n"
             "            )"
         )
@@ -483,8 +483,8 @@ class TestBaseGIQLGenerator:
             'WHEN peaks."start" < genes."end" '
             'AND peaks."end" > genes."start" THEN 0 '
             'WHEN peaks."end" <= genes."start" '
-            'THEN (genes."start" - peaks."end") '
-            'ELSE (peaks."start" - genes."end") END AS distance\n'
+            'THEN (genes."start" - peaks."end" + 1) '
+            'ELSE (peaks."start" - genes."end" + 1) END AS distance\n'
             "                FROM genes\n"
             '                WHERE peaks."chrom" = genes."chrom" '
             "AND (ABS("
@@ -492,15 +492,15 @@ class TestBaseGIQLGenerator:
             'WHEN peaks."start" < genes."end" '
             'AND peaks."end" > genes."start" THEN 0 '
             'WHEN peaks."end" <= genes."start" '
-            'THEN (genes."start" - peaks."end") '
-            'ELSE (peaks."start" - genes."end") END)) <= 100000\n'
+            'THEN (genes."start" - peaks."end" + 1) '
+            'ELSE (peaks."start" - genes."end" + 1) END)) <= 100000\n'
             "                ORDER BY ABS("
             'CASE WHEN peaks."chrom" != genes."chrom" THEN NULL '
             'WHEN peaks."start" < genes."end" '
             'AND peaks."end" > genes."start" THEN 0 '
             'WHEN peaks."end" <= genes."start" '
-            'THEN (genes."start" - peaks."end") '
-            'ELSE (peaks."start" - genes."end") END)\n'
+            'THEN (genes."start" - peaks."end" + 1) '
+            'ELSE (peaks."start" - genes."end" + 1) END)\n'
             "                LIMIT 5\n"
             "            )"
         )
@@ -531,11 +531,11 @@ class TestBaseGIQLGenerator:
             'AND peaks."end" > genes."start" THEN 0 '
             'WHEN peaks."end" <= genes."start" '
             "THEN CASE WHEN peaks.\"strand\" = '-' "
-            'THEN -(genes."start" - peaks."end") '
-            'ELSE (genes."start" - peaks."end") END '
+            'THEN -(genes."start" - peaks."end" + 1) '
+            'ELSE (genes."start" - peaks."end" + 1) END '
             "ELSE CASE WHEN peaks.\"strand\" = '-' "
-            'THEN -(peaks."start" - genes."end") '
-            'ELSE (peaks."start" - genes."end") END END AS distance\n'
+            'THEN -(peaks."start" - genes."end" + 1) '
+            'ELSE (peaks."start" - genes."end" + 1) END END AS distance\n'
             "                FROM genes\n"
             '                WHERE peaks."chrom" = genes."chrom" '
             'AND peaks."strand" = genes."strand"\n'
@@ -548,11 +548,11 @@ class TestBaseGIQLGenerator:
             'AND peaks."end" > genes."start" THEN 0 '
             'WHEN peaks."end" <= genes."start" '
             "THEN CASE WHEN peaks.\"strand\" = '-' "
-            'THEN -(genes."start" - peaks."end") '
-            'ELSE (genes."start" - peaks."end") END '
+            'THEN -(genes."start" - peaks."end" + 1) '
+            'ELSE (genes."start" - peaks."end" + 1) END '
             "ELSE CASE WHEN peaks.\"strand\" = '-' "
-            'THEN -(peaks."start" - genes."end") '
-            'ELSE (peaks."start" - genes."end") END END)\n'
+            'THEN -(peaks."start" - genes."end" + 1) '
+            'ELSE (peaks."start" - genes."end" + 1) END END)\n'
             "                LIMIT 3\n"
             "            )"
         )
@@ -603,8 +603,8 @@ class TestBaseGIQLGenerator:
             'WHEN peaks."start" < genes."end" '
             'AND peaks."end" > genes."start" THEN 0 '
             'WHEN peaks."end" <= genes."start" '
-            'THEN (genes."start" - peaks."end") '
-            'ELSE -(peaks."start" - genes."end") END AS distance\n'
+            'THEN (genes."start" - peaks."end" + 1) '
+            'ELSE -(peaks."start" - genes."end" + 1) END AS distance\n'
             "                FROM genes\n"
             '                WHERE peaks."chrom" = genes."chrom"\n'
             "                ORDER BY ABS("
@@ -612,8 +612,8 @@ class TestBaseGIQLGenerator:
             'WHEN peaks."start" < genes."end" '
             'AND peaks."end" > genes."start" THEN 0 '
             'WHEN peaks."end" <= genes."start" '
-            'THEN (genes."start" - peaks."end") '
-            'ELSE -(peaks."start" - genes."end") END)\n'
+            'THEN (genes."start" - peaks."end" + 1) '
+            'ELSE -(peaks."start" - genes."end" + 1) END)\n'
             "                LIMIT 3\n"
             "            )"
         )
@@ -683,8 +683,8 @@ class TestBaseGIQLGenerator:
             'SELECT CASE WHEN a."chrom" != b."chrom" THEN NULL '
             'WHEN a."start" < b."end" AND a."end" > b."start" '
             'THEN 0 WHEN a."end" <= b."start" '
-            'THEN (b."start" - a."end") '
-            'ELSE (a."start" - b."end") END AS dist '
+            'THEN (b."start" - a."end" + 1) '
+            'ELSE (a."start" - b."end" + 1) END AS dist '
             "FROM features_a AS a CROSS JOIN features_b AS b"
         )
         assert output == expected
@@ -711,11 +711,11 @@ class TestBaseGIQLGenerator:
             'AND a."end" > b."start" THEN 0 '
             'WHEN a."end" <= b."start" '
             "THEN CASE WHEN a.\"strand\" = '-' "
-            'THEN -(b."start" - a."end") '
-            'ELSE (b."start" - a."end") END '
+            'THEN -(b."start" - a."end" + 1) '
+            'ELSE (b."start" - a."end" + 1) END '
             "ELSE CASE WHEN a.\"strand\" = '-' "
-            'THEN -(a."start" - b."end") '
-            'ELSE (a."start" - b."end") END END AS dist '
+            'THEN -(a."start" - b."end" + 1) '
+            'ELSE (a."start" - b."end" + 1) END END AS dist '
             "FROM features_a AS a CROSS JOIN features_b AS b"
         )
         assert output == expected
@@ -737,8 +737,8 @@ class TestBaseGIQLGenerator:
             'SELECT CASE WHEN a."chrom" != b."chrom" THEN NULL '
             'WHEN a."start" < b."end" AND a."end" > b."start" '
             'THEN 0 WHEN a."end" <= b."start" '
-            'THEN (b."start" - a."end") '
-            'ELSE -(a."start" - b."end") END AS dist '
+            'THEN (b."start" - a."end" + 1) '
+            'ELSE -(a."start" - b."end" + 1) END AS dist '
             "FROM features_a AS a CROSS JOIN features_b AS b"
         )
         assert output == expected
@@ -766,27 +766,28 @@ class TestBaseGIQLGenerator:
             'AND a."end" > b."start" THEN 0 '
             'WHEN a."end" <= b."start" '
             "THEN CASE WHEN a.\"strand\" = '-' "
-            'THEN -(b."start" - a."end") '
-            'ELSE (b."start" - a."end") END '
+            'THEN -(b."start" - a."end" + 1) '
+            'ELSE (b."start" - a."end" + 1) END '
             "ELSE CASE WHEN a.\"strand\" = '-' "
-            'THEN (a."start" - b."end") '
-            'ELSE -(a."start" - b."end") END END AS dist '
+            'THEN (a."start" - b."end" + 1) '
+            'ELSE -(a."start" - b."end" + 1) END END AS dist '
             "FROM features_a AS a CROSS JOIN features_b AS b"
         )
         assert output == expected
 
-    def test_giqldistance_should_not_apply_gap_plus_one_for_closed_intervals(
+    def test_giqldistance_canonicalizes_closed_ends_apart_from_gap_parity(
         self, tables_with_closed_intervals
     ):
-        """Test DISTANCE on closed-interval tables omits "+1" gap counting.
+        """Test DISTANCE on closed-interval tables keeps encoding and gap "+1" separate.
 
         Given:
             Two 0-based closed-interval tables and DISTANCE.
         When:
             giqldistance_sql is called.
         Then:
-            It should canonicalize each table-side end as (end + 1) but omit
-            any "+1" from the gap branches.
+            It should canonicalize each table-side end as (end + 1) for the
+            closed->half-open conversion, distinct from the bedtools-parity
+            + 1 the gap branches add to the canonical gap.
         """
         # Arrange
         tables_with_closed_intervals.register(
@@ -807,8 +808,8 @@ class TestBaseGIQLGenerator:
             'WHEN a."start" < (b."end" + 1) '
             'AND (a."end" + 1) > b."start" THEN 0 '
             'WHEN (a."end" + 1) <= b."start" '
-            'THEN (b."start" - (a."end" + 1)) '
-            'ELSE (a."start" - (b."end" + 1)) END AS dist '
+            'THEN (b."start" - (a."end" + 1) + 1) '
+            'ELSE (a."start" - (b."end" + 1) + 1) END AS dist '
             "FROM bed_features AS a CROSS JOIN bed_features_b AS b"
         )
         assert output == expected
@@ -898,10 +899,10 @@ class TestBaseGIQLGenerator:
         assert 'peaks."strand"' in output
         assert 'genes."strand"' in output
 
-    def test_giqlnearest_should_not_apply_gap_plus_one_for_closed_intervals(
+    def test_giqlnearest_canonicalizes_closed_end_in_wrapper_apart_from_gap_parity(
         self,
     ):
-        """Test NEAREST on a closed-interval target omits "+1" gap counting.
+        """Test NEAREST on a closed-interval target keeps encoding and gap "+1" separate.
 
         Given:
             A 0-based closed-interval target table and NEAREST.
@@ -909,8 +910,8 @@ class TestBaseGIQLGenerator:
             The query is transpiled.
         Then:
             It should canonicalize the target end as (end + 1) inside the
-            wrapper CTE while the distance gap branches read the bare canonical
-            end with no trailing "+ 1".
+            wrapper CTE, distinct from the bedtools-parity + 1 the distance gap
+            branches add to the canonical gap.
         """
         # Arrange
         sql = (
@@ -923,12 +924,36 @@ class TestBaseGIQLGenerator:
         # the distance CASE reads the bare canonical columns.
         output = transpile(sql, tables=[Table("genes_closed", interval_type="closed")])
 
-        # Assert — the wrapper carries (end + 1); the gap branches carry no "+ 1".
+        # Assert — the wrapper carries the closed->half-open (end + 1); the gap
+        # branches read the canonical columns and add the bedtools-parity + 1.
         assert '("end" + 1) AS "end"' in output
-        assert 'THEN (__giql_canon_0."start" - 2000)' in output
-        assert 'ELSE (1000 - __giql_canon_0."end")' in output
-        assert '__giql_canon_0."start" - 2000 + 1' not in output
-        assert '1000 - __giql_canon_0."end" + 1' not in output
+        assert 'THEN (__giql_canon_0."start" - 2000 + 1)' in output
+        assert 'ELSE (1000 - __giql_canon_0."end" + 1)' in output
+
+    def test_giqlnearest_closed_interval_does_not_double_count_plus_one(self):
+        """Test NEAREST on a closed target never fuses the two +1 terms.
+
+        Given:
+            A 0-based closed-interval target table and NEAREST.
+        When:
+            The query is transpiled.
+        Then:
+            It should keep the encoding (end + 1) and the gap-parity + 1 as
+            separate terms — never collapsing them into a `+ 1 + 1` /
+            `(end + 1 + 1)` that would double-count the off-by-one.
+        """
+        # Arrange
+        sql = (
+            "SELECT * FROM NEAREST(genes_closed, reference := 'chr1:1000-2000', k := 3)"
+        )
+
+        # Act
+        output = transpile(sql, tables=[Table("genes_closed", interval_type="closed")])
+
+        # Assert
+        assert "+ 1 + 1" not in output
+        assert '("end" + 1 + 1)' not in output
+        assert '("start" + 1 + 1)' not in output
 
     def test_giqldistance_sql_literal_first_arg_error(self, tables_with_two_tables):
         """
@@ -1607,8 +1632,8 @@ class TestBaseGIQLGenerator:
         expected = (
             'SELECT CASE WHEN a."chrom" != b."chrom" THEN NULL '
             f"WHEN {start_a} < {end_b} AND {end_a} > {start_b} THEN 0 "
-            f"WHEN {end_a} <= {start_b} THEN ({start_b} - {end_a}) "
-            f"ELSE ({start_a} - {end_b}) END AS dist "
+            f"WHEN {end_a} <= {start_b} THEN ({start_b} - {end_a} + 1) "
+            f"ELSE ({start_a} - {end_b} + 1) END AS dist "
             "FROM dist_a AS a CROSS JOIN dist_b AS b"
         )
         assert output == expected
@@ -1642,8 +1667,8 @@ class TestBaseGIQLGenerator:
             'SELECT CASE WHEN a."chrom" != b."chrom" THEN NULL '
             'WHEN a."start" < b."end" AND a."end" > (b."start" - 1) THEN 0 '
             'WHEN a."end" <= (b."start" - 1) '
-            'THEN ((b."start" - 1) - a."end") '
-            'ELSE (a."start" - b."end") END AS dist '
+            'THEN ((b."start" - 1) - a."end" + 1) '
+            'ELSE (a."start" - b."end" + 1) END AS dist '
             "FROM bed_a AS a CROSS JOIN vcf_b AS b"
         )
         assert output == expected
@@ -1715,9 +1740,9 @@ class TestBaseGIQLGenerator:
             'WHEN 1000 < __giql_canon_0."end" AND 2000 > __giql_canon_0."start" THEN 0'
         ) in output
         assert (
-            'WHEN 2000 <= __giql_canon_0."start" THEN (__giql_canon_0."start" - 2000)'
+            'WHEN 2000 <= __giql_canon_0."start" THEN (__giql_canon_0."start" - 2000 + 1)'
         ) in output
-        assert 'ELSE (1000 - __giql_canon_0."end")' in output
+        assert 'ELSE (1000 - __giql_canon_0."end" + 1)' in output
 
     def test_giqlnearest_should_pass_target_columns_through_when_target_is_canonical(
         self,
@@ -1836,5 +1861,5 @@ class TestBaseGIQLGenerator:
             'AND vcf_b."end" > bed_a."start" THEN 0'
         ) in output
         assert 'WHEN vcf_b."end" <= bed_a."start"' in output
-        assert 'THEN (bed_a."start" - vcf_b."end")' in output
-        assert 'ELSE ((vcf_b."start" - 1) - bed_a."end")' in output
+        assert 'THEN (bed_a."start" - vcf_b."end" + 1)' in output
+        assert 'ELSE ((vcf_b."start" - 1) - bed_a."end" + 1)' in output

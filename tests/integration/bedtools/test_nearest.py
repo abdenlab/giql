@@ -45,36 +45,36 @@ def test_nearest_non_overlapping(duckdb_connection):
 
     sql = transpile(
         """
-        SELECT a.*, b.*
+        SELECT a.name, b.name, b.distance
         FROM intervals_a a
         CROSS JOIN LATERAL NEAREST(
             intervals_b,
             reference := a.interval,
             k := 1
         ) b
-        ORDER BY a.chrom, a.start
         """,
         tables=["intervals_a", "intervals_b"],
     )
     giql_result = duckdb_connection.execute(sql).fetchall()
 
-    # Verify row counts match
-    assert len(giql_result) == len(bedtools_result), (
-        f"Row count mismatch: GIQL={len(giql_result)}, bedtools={len(bedtools_result)}"
+    # Align both sides by A name; the bedtools closest row is BED6+BED6+distance,
+    # so A name is field 3, B name field 9, and distance field 12.
+    giql_by_a = {a_name: (b_name, distance) for a_name, b_name, distance in giql_result}
+    bt_by_a = {row[3]: (row[9], row[12]) for row in bedtools_result}
+
+    assert giql_by_a.keys() == bt_by_a.keys(), (
+        f"A coverage mismatch: GIQL={set(giql_by_a)}, bedtools={set(bt_by_a)}"
     )
 
-    # Verify each A interval found the correct B neighbor
-    for giql_row, bt_row in zip(
-        sorted(giql_result, key=lambda r: (r[0], r[1])),
-        sorted(bedtools_result, key=lambda r: (r[0], r[1])),
-    ):
-        # Compare A interval name
-        assert giql_row[3] == bt_row[3], (
-            f"A name mismatch: GIQL={giql_row[3]}, bedtools={bt_row[3]}"
+    for a_name, (bt_b_name, bt_distance) in bt_by_a.items():
+        giql_b_name, giql_distance = giql_by_a[a_name]
+        # Matched B neighbor must agree.
+        assert giql_b_name == bt_b_name, (
+            f"{a_name} B mismatch: GIQL={giql_b_name}, bedtools={bt_b_name}"
         )
-        # Compare matched B interval name
-        assert giql_row[9] == bt_row[9], (
-            f"B name mismatch: GIQL={giql_row[9]}, bedtools={bt_row[9]}"
+        # GIQL distance is signed; its magnitude must equal bedtools closest -d.
+        assert abs(giql_distance) == bt_distance, (
+            f"{a_name} distance mismatch: GIQL={giql_distance}, bedtools={bt_distance}"
         )
 
 
@@ -173,11 +173,11 @@ def test_nearest_boundary_cases(giql_query):
     """
     GIVEN adjacent intervals (touching but not overlapping)
     WHEN NEAREST operator is applied
-    THEN adjacent interval is reported as nearest (distance = 0)
+    THEN adjacent interval is reported as nearest (distance = 1, bedtools parity)
     """
     result = giql_query(
         """
-        SELECT a.*, b.*
+        SELECT b.name, b.distance
         FROM intervals_a a
         CROSS JOIN LATERAL NEAREST(
             intervals_b,
@@ -194,8 +194,10 @@ def test_nearest_boundary_cases(giql_query):
     )
 
     assert len(result) == 1
-    # b1 is adjacent (distance 0), b2 is far (distance 300)
-    assert result[0][9] == "b1"
+    # b1 is adjacent (book-ended), reported as distance 1 under bedtools parity;
+    # b2 is far (301).
+    assert result[0][0] == "b1"
+    assert result[0][1] == 1
 
 
 def test_nearest_k_greater_than_one(giql_query):
@@ -228,6 +230,51 @@ def test_nearest_k_greater_than_one(giql_query):
     assert set(b_names) == {"b_far", "b_near", "b_farther"}
 
 
+def test_nearest_k3_reported_distance_matches_bedtools(duckdb_connection):
+    """
+    GIVEN one query interval and three candidates at distinct (untied) gaps
+    WHEN NEAREST with k := 3 is applied and the distance column is read
+    THEN each neighbor's reported distance magnitude equals live bedtools
+        closest -d -k 3 for the same neighbor
+    """
+    intervals_a = [GenomicInterval("chr1", 200, 300, "a1", 100, "+")]
+    intervals_b = [
+        GenomicInterval("chr1", 310, 350, "b_near", 100, "+"),  # gap 10 -> 11
+        GenomicInterval("chr1", 400, 450, "b_mid", 100, "+"),  # gap 100 -> 101
+        GenomicInterval("chr1", 600, 700, "b_far", 100, "+"),  # gap 300 -> 301
+    ]
+
+    load_intervals(duckdb_connection, "intervals_a", [i.to_tuple() for i in intervals_a])
+    load_intervals(duckdb_connection, "intervals_b", [i.to_tuple() for i in intervals_b])
+
+    bedtools_result = closest(
+        [i.to_tuple() for i in intervals_a],
+        [i.to_tuple() for i in intervals_b],
+        k=3,
+    )
+    oracle_by_name = {row[9]: row[12] for row in bedtools_result}
+
+    sql = transpile(
+        """
+        SELECT b.name, b.distance
+        FROM intervals_a a
+        CROSS JOIN LATERAL NEAREST(
+            intervals_b,
+            reference := a.interval,
+            k := 3
+        ) b
+        """,
+        tables=["intervals_a", "intervals_b"],
+    )
+    giql_result = duckdb_connection.execute(sql).fetchall()
+
+    assert len(giql_result) == 3
+    for name, distance in giql_result:
+        assert abs(distance) == oracle_by_name[name], (
+            f"{name}: GIQL={distance}, bedtools={oracle_by_name[name]}"
+        )
+
+
 def test_nearest_k_exceeds_available(giql_query):
     """
     GIVEN one query interval and only two database intervals
@@ -257,13 +304,15 @@ def test_nearest_k_exceeds_available(giql_query):
 
 def test_nearest_max_distance(giql_query):
     """
-    GIVEN one query interval, one near and one far database interval
+    GIVEN candidates whose reported distances straddle max_distance := 50: one
+        below, one exactly at 50, and one at 51
     WHEN NEAREST with max_distance := 50 is applied
-    THEN only the near interval (within 50bp) is returned
+    THEN the candidates at 11 and exactly 50 are kept and the one at 51 is
+        excluded, pinning the inclusive `<= max_distance` boundary on both sides
     """
     result = giql_query(
         """
-        SELECT a.name, b.name
+        SELECT b.name, b.distance
         FROM intervals_a a
         CROSS JOIN LATERAL NEAREST(
             intervals_b,
@@ -275,14 +324,21 @@ def test_nearest_max_distance(giql_query):
         tables=["intervals_a", "intervals_b"],
         intervals_a=[GenomicInterval("chr1", 200, 300, "a1", 100, "+")],
         intervals_b=[
+            # gap 10 -> reported 11 (well within)
             GenomicInterval("chr1", 310, 350, "b_near", 100, "+"),
-            GenomicInterval("chr1", 500, 600, "b_far", 100, "+"),
+            # gap 49 -> reported 50 == max_distance (inclusive, kept)
+            GenomicInterval("chr1", 349, 400, "b_edge", 100, "+"),
+            # gap 50 -> reported 51 == max_distance + 1 (excluded)
+            GenomicInterval("chr1", 350, 450, "b_over", 100, "+"),
         ],
     )
 
-    b_names = [row[1] for row in result]
-    # b_near is 10bp away (310 - 300), b_far is 200bp away (500 - 300)
-    assert b_names == ["b_near"], f"Expected only b_near within 50bp, got {b_names}"
+    by_name = {row[0]: row[1] for row in result}
+    assert sorted(by_name) == ["b_edge", "b_near"], (
+        f"Expected b_near and b_edge within 50bp, got {sorted(by_name)}"
+    )
+    assert by_name["b_near"] == 11
+    assert by_name["b_edge"] == 50  # exactly at the boundary, kept
 
 
 def test_nearest_standalone_literal_reference(giql_query):

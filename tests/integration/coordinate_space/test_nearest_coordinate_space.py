@@ -154,9 +154,10 @@ class TestNearestCoordinateSpace:
         When:
             NEAREST runs via LATERAL join.
         Then:
-            It should return only ``b_near`` (10 bp) and ``b_far`` (50 bp,
-            inclusive boundary) regardless of encoding; ``b_mid`` (200 bp)
-            should be excluded.
+            It should return only ``b_near`` (half-open gap 10 -> reported 11)
+            regardless of encoding; under bedtools parity ``b_far`` reports 51
+            (half-open gap 50 + 1), which exceeds ``max_distance := 50``, so it
+            joins ``b_mid`` (201) in being excluded.
         """
         # Arrange
         tables = [
@@ -184,7 +185,7 @@ class TestNearestCoordinateSpace:
         )
 
         # Assert
-        assert sorted(row[0] for row in result) == ["b_far", "b_near"]
+        assert sorted(row[0] for row in result) == ["b_near"]
 
     @pytest.mark.parametrize(
         ("coordinate_system", "interval_type"),
@@ -204,9 +205,9 @@ class TestNearestCoordinateSpace:
             ``SELECT * FROM NEAREST(intervals_b, reference := ..., k := 2)``
             runs in standalone mode.
         Then:
-            It should return ``b_near`` (10 bp) and ``b_far`` (200 bp)
-            regardless of target encoding; ``b_mid`` (140 bp) is the
-            second-nearest, so the expected pair is ``{b_near, b_mid}``.
+            It should return ``b_near`` (touching, reported 1) and ``b_mid``
+            (reported 141) regardless of target encoding; ``b_far`` (reported
+            201) is farther, so the expected pair is ``{b_near, b_mid}``.
         """
         # Arrange
         tables = [make_table("intervals_b", coordinate_system, interval_type)]
@@ -227,8 +228,8 @@ class TestNearestCoordinateSpace:
         )
 
         # Assert
-        # Distances from [350, 360): b_near [310,350) -> 0 (touching),
-        # b_mid [500,600) -> 140, b_far [100,150) -> 200.
+        # Distances from [350, 360) with bedtools parity: b_near [310,350) ->
+        # 1 (touching), b_mid [500,600) -> 141, b_far [100,150) -> 201.
         assert sorted(row[0] for row in result) == ["b_mid", "b_near"]
 
     @pytest.mark.parametrize(
@@ -285,13 +286,13 @@ class TestNearestCoordinateSpace:
     def test_correlated_nearest_picks_adjacent_neighbor_when_touching_half_open_boundary(
         self, giql_query, coordinate_system, interval_type
     ):
-        """Test correlated NEAREST picks the touching candidate (gap 0) in any encoding.
+        """Test correlated NEAREST picks the touching candidate (reported 1) in any encoding.
 
         Given:
             Canonical A=[100, 200) with two B candidates -- b_adjacent at
-            canonical [200, 300) (touching half-open boundary, gap 0) and
-            b_far at [500, 600) -- re-encoded under the same convention on
-            both sides.
+            canonical [200, 300) (touching half-open boundary, reported
+            distance 1 under bedtools parity) and b_far at [500, 600) --
+            re-encoded under the same convention on both sides.
         When:
             NEAREST k=1 runs via LATERAL join.
         Then:
@@ -302,9 +303,7 @@ class TestNearestCoordinateSpace:
             make_table("intervals_a", coordinate_system, interval_type),
             make_table("intervals_b", coordinate_system, interval_type),
         ]
-        intervals_a = _encode_rows(
-            [(100, 200, "a1")], coordinate_system, interval_type
-        )
+        intervals_a = _encode_rows([(100, 200, "a1")], coordinate_system, interval_type)
         intervals_b = _encode_rows(
             [(200, 300, "b_adjacent"), (500, 600, "b_far")],
             coordinate_system,
