@@ -65,7 +65,7 @@ OPERATORS: dict[str, dict[str, Any]] = {
             {"name": "interval_a", "description": "First genomic interval"},
             {"name": "interval_b", "description": "Second genomic interval"},
         ],
-        "returns": "0 for overlapping, positive integer for gap, NULL for different chromosomes",
+        "returns": "0 for overlapping, 1 for book-ended, half-open gap + 1 for a gap, NULL for different chromosomes",
         "example": "SELECT DISTANCE(a.interval, b.interval) AS dist FROM a CROSS JOIN b",
         "doc_file": "dialect/distance-operators.rst",
     },
