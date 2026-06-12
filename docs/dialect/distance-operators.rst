@@ -16,10 +16,11 @@ Description
 ~~~~~~~~~~~
 
 The ``DISTANCE`` operator returns the number of base pairs separating two genomic
-intervals. It follows standard genomic distance conventions:
+intervals, matching ``bedtools closest -d`` semantics:
 
 - **Overlapping intervals**: Returns ``0``
-- **Non-overlapping intervals**: Returns the gap in base pairs (positive integer)
+- **Book-ended (adjacent) intervals** (``A.end == B.start`` in half-open coordinates): Returns ``1``
+- **Non-overlapping intervals**: Returns the half-open gap plus one (a raw gap of ``N`` bases reports ``N + 1``)
 - **Different chromosomes**: Returns ``NULL``
 
 Syntax
@@ -42,7 +43,8 @@ Return Value
 ~~~~~~~~~~~~
 
 - ``0`` for overlapping intervals
-- Positive integer (gap in base pairs) for non-overlapping same-chromosome intervals
+- ``1`` for book-ended (adjacent) intervals, matching ``bedtools closest -d``
+- Positive integer (half-open gap ``+ 1``) for non-overlapping same-chromosome intervals
 - ``NULL`` for intervals on different chromosomes
 
 Examples
