@@ -17,6 +17,7 @@ from giql.generators import BaseGIQLGenerator
 from giql.resolver import resolve_operator_refs
 from giql.table import Table
 from giql.table import Tables
+from giql.targets import resolve_target
 from giql.transformer import ClusterTransformer
 from giql.transformer import IntersectsBinnedJoinTransformer
 from giql.transformer import IntersectsDuckDBIEJoinTransformer
@@ -28,7 +29,7 @@ def transpile(
     giql: str,
     tables: list[str | Table] | None = None,
     *,
-    dialect: None = None,
+    dialect: Literal["datafusion"] | None = None,
     intersects_bin_size: int | None = None,
 ) -> str: ...
 
@@ -47,7 +48,7 @@ def transpile(
     giql: str,
     tables: list[str | Table] | None = None,
     *,
-    dialect: Literal["duckdb"] | None = None,
+    dialect: Literal["duckdb", "datafusion"] | None = None,
     intersects_bin_size: int | None = None,
 ) -> str:
     """Transpile a GIQL query to SQL.
@@ -64,16 +65,19 @@ def transpile(
         Table configurations. Strings use default column mappings
         (chrom, start, end, strand). :class:`Table` objects provide
         custom column name mappings.
-    dialect : Literal["duckdb"] | None
-        Optional target dialect. When set to ``"duckdb"``, column-to-column
+    dialect : Literal["duckdb", "datafusion"] | None
+        Optional target engine. Resolves to a :class:`giql.targets.Target`
+        carrying the engine's capability set; ``None`` selects the generic
+        portable target. When set to ``"duckdb"``, column-to-column
         ``INTERSECTS`` joins (INNER, SEMI, or ANTI) are transpiled into a
         per-chromosome dynamic-SQL pattern (``SET VARIABLE`` +
         ``query(getvariable(...))``) that DuckDB plans through its
-        range-join family (``IE_JOIN`` / ``PIECEWISE_MERGE_JOIN``).
-        Mutually exclusive with ``intersects_bin_size``. Defaults to
-        ``None`` (the generic binned equi-join path). Hard-error projection
-        shapes raise ``ValueError`` at transpile time; see the performance
-        guide for the full enumeration.
+        range-join family (``IE_JOIN`` / ``PIECEWISE_MERGE_JOIN``); this
+        IEJoin plan is mutually exclusive with ``intersects_bin_size``.
+        ``"datafusion"`` and ``None`` use the generic binned equi-join path
+        and accept ``intersects_bin_size``. Hard-error projection shapes
+        raise ``ValueError`` at transpile time; see the performance guide
+        for the full enumeration.
     intersects_bin_size : int | None
         Bin size for INTERSECTS equi-join optimization. When a query
         contains a full-table column-to-column INTERSECTS join, the
@@ -136,9 +140,9 @@ def transpile(
             dialect="duckdb",
         )
     """
-    if dialect is not None and dialect != "duckdb":
-        raise ValueError(f"Unknown dialect: {dialect!r}. Supported: 'duckdb' or None.")
-    if dialect == "duckdb" and intersects_bin_size is not None:
+    target = resolve_target(dialect)
+    uses_iejoin = target.capabilities.range_join_strategy == "iejoin"
+    if uses_iejoin and intersects_bin_size is not None:
         raise ValueError(
             "intersects_bin_size has no effect with dialect='duckdb'; "
             "the DuckDB dialect uses an IEJoin per-partition plan instead "
@@ -153,7 +157,7 @@ def transpile(
     # Falls back to the binned plan for unsupported shapes — see
     # IntersectsDuckDBIEJoinTransformer.transform_to_sql for the complete
     # fallback set.
-    if dialect == "duckdb":
+    if uses_iejoin:
         duckdb_transformer = IntersectsDuckDBIEJoinTransformer(tables_container)
         with _reraise_as_value_error("Transformation error"):
             duckdb_sql = duckdb_transformer.transform_to_sql(ast)
