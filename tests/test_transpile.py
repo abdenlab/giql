@@ -389,6 +389,198 @@ class TestTranspileErrors:
         with pytest.raises(ValueError, match="Parse error"):
             transpile("SELECT * FORM peaks")  # typo: FORM instead of FROM
 
+    def test_unknown_dialect(self):
+        """Test transpilation with an unrecognized dialect.
+
+        Given:
+            A GIQL query and a dialect that is not a supported target.
+        When:
+            Transpiling.
+        Then:
+            It should raise ValueError naming the supported targets.
+        """
+        # Act & assert
+        with pytest.raises(ValueError, match="Unknown dialect: 'postgres'"):
+            transpile(
+                "SELECT * FROM peaks WHERE interval INTERSECTS 'chr1:1000-2000'",
+                tables=["peaks"],
+                dialect="postgres",  # type: ignore[call-overload]
+            )
+
+
+class TestTranspileDialects:
+    """Tests for dialect/target selection."""
+
+    def test_transpile_datafusion_accepted(self):
+        """Test that the datafusion dialect is a valid target.
+
+        Given:
+            A GIQL query and dialect="datafusion".
+        When:
+            Transpiling.
+        Then:
+            It should return SQL referencing the table without raising.
+        """
+        # Act
+        sql = transpile(
+            "SELECT * FROM peaks WHERE interval INTERSECTS 'chr1:1000-2000'",
+            tables=["peaks"],
+            dialect="datafusion",
+        )
+
+        # Assert
+        assert "SELECT" in sql
+        assert "peaks" in sql
+
+    @pytest.mark.parametrize(
+        "query, tables",
+        [
+            (
+                "SELECT * FROM peaks WHERE interval INTERSECTS 'chr1:1000-2000'",
+                ["peaks"],
+            ),
+            ("SELECT * FROM peaks WHERE interval CONTAINS 'chr1:1500'", ["peaks"]),
+            (
+                "SELECT * FROM peaks WHERE interval WITHIN 'chr1:1000-2000'",
+                ["peaks"],
+            ),
+            (
+                "SELECT * FROM NEAREST(genes, reference := 'chr1:1000-2000', k := 3)",
+                ["genes"],
+            ),
+            (
+                "SELECT a.chrom, b.chrom FROM peaks a "
+                "JOIN genes b ON a.interval INTERSECTS b.interval",
+                ["peaks", "genes"],
+            ),
+            (
+                "SELECT * FROM peaks WHERE interval INTERSECTS "
+                "ANY('chr1:1000-2000', 'chr1:5000-6000')",
+                ["peaks"],
+            ),
+        ],
+        ids=["intersects_literal", "contains", "within", "nearest", "join", "any"],
+    )
+    def test_transpile_datafusion_matches_generic_output(self, query, tables):
+        """Test that datafusion routes through the generic path for now.
+
+        Given:
+            A GIQL query across the operator spread, transpiled with
+            dialect=None and with dialect="datafusion".
+        When:
+            Comparing the two outputs.
+        Then:
+            It should produce byte-identical SQL, since datafusion has no
+            engine-specific expansion yet.
+        """
+        # Act
+        generic_sql = transpile(query, tables=tables)
+        datafusion_sql = transpile(query, tables=tables, dialect="datafusion")
+
+        # Assert
+        assert datafusion_sql == generic_sql
+
+    def test_transpile_datafusion_accepts_intersects_bin_size(self):
+        """Test that datafusion honours the binned-join bin size identically.
+
+        Given:
+            A column-to-column INTERSECTS join with an explicit
+            intersects_bin_size, transpiled with dialect=None and
+            dialect="datafusion".
+        When:
+            Comparing the two outputs.
+        Then:
+            It should produce byte-identical SQL — datafusion takes the same
+            binned-join path and honours the bin size.
+        """
+        # Arrange
+        query = (
+            "SELECT a.chrom, b.chrom FROM peaks a "
+            "JOIN genes b ON a.interval INTERSECTS b.interval"
+        )
+
+        # Act
+        generic_sql = transpile(
+            query, tables=["peaks", "genes"], intersects_bin_size=50000
+        )
+        datafusion_sql = transpile(
+            query,
+            tables=["peaks", "genes"],
+            dialect="datafusion",
+            intersects_bin_size=50000,
+        )
+
+        # Assert
+        assert datafusion_sql == generic_sql
+
+    def test_transpile_duckdb_returns_sql_for_column_join(self):
+        """Test the duckdb happy path for a column-to-column INTERSECTS join.
+
+        Given:
+            A column-to-column INTERSECTS join and dialect="duckdb".
+        When:
+            Transpiling.
+        Then:
+            It should return SQL referencing the joined tables without raising.
+        """
+        # Act
+        sql = transpile(
+            "SELECT a.chrom, a.start, b.start FROM peaks a "
+            "JOIN genes b ON a.interval INTERSECTS b.interval",
+            tables=["peaks", "genes"],
+            dialect="duckdb",
+        )
+
+        # Assert
+        assert "SELECT" in sql
+        assert "peaks" in sql
+        assert "genes" in sql
+
+    def test_transpile_duckdb_rejects_intersects_bin_size(self):
+        """Test that duckdb and intersects_bin_size are mutually exclusive.
+
+        Given:
+            dialect="duckdb" combined with an explicit intersects_bin_size.
+        When:
+            Transpiling.
+        Then:
+            It should raise ValueError explaining the IEJoin plan ignores
+            the bin size.
+        """
+        # Act & assert
+        with pytest.raises(
+            ValueError,
+            match=r"intersects_bin_size has no effect.*Pass one or the other, not both\.",
+        ):
+            transpile(
+                "SELECT a.chrom, b.chrom FROM peaks a "
+                "JOIN genes b ON a.interval INTERSECTS b.interval",
+                tables=["peaks", "genes"],
+                dialect="duckdb",
+                intersects_bin_size=50000,
+            )
+
+    def test_transpile_duckdb_rejects_zero_intersects_bin_size(self):
+        """Test that a falsy-but-set bin size still triggers the duckdb guard.
+
+        Given:
+            dialect="duckdb" combined with intersects_bin_size=0.
+        When:
+            Transpiling.
+        Then:
+            It should raise ValueError — the guard is `is not None`, so 0
+            (falsy) still conflicts with the IEJoin plan.
+        """
+        # Act & assert
+        with pytest.raises(ValueError, match="intersects_bin_size has no effect"):
+            transpile(
+                "SELECT a.chrom, b.chrom FROM peaks a "
+                "JOIN genes b ON a.interval INTERSECTS b.interval",
+                tables=["peaks", "genes"],
+                dialect="duckdb",
+                intersects_bin_size=0,
+            )
+
 
 class TestModuleExports:
     """Tests for module-level exports."""
