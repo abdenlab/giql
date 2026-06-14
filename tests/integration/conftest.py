@@ -21,6 +21,18 @@ Adding a new operator case is trivial: write one ``oracle(...)`` call with the
 query, the table data, and the expected rows. Cases where a target cannot run
 an operator yet (e.g. correlated ``LATERAL`` on DataFusion) restrict the run to
 the supported targets via the ``targets`` argument.
+
+The engine-free internals live in :mod:`tests.integration._oracle` (an
+importable, non-test module) so they can be unit-tested without engines; this
+fixture is a thin wrapper around them.
+
+This lane is deliberately kept an **explicit-case fixture**. It does NOT use
+the SDLC guide's pairwise / Scenario-model / Hypothesis apparatus: each case is
+a hand-written ``(query, data, expected)`` triple so a regression points at a
+named operator scenario, and the cross-engine differential oracle -- not a
+generator -- is what makes the cases load-bearing. The coordinate-encoding
+sweep (``coordinate_space`` / #145) and strand (the schema here is
+``chrom``/``start``/``end`` only) are out of scope by design.
 """
 
 from __future__ import annotations
@@ -30,6 +42,11 @@ import pytest
 from giql import Table
 from giql import transpile
 
+from ._oracle import ENGINE_RUNNERS
+from ._oracle import assert_cross_target
+from ._oracle import normalize
+from ._oracle import resolve_routing
+
 # Default per-target schema: GIQL's default interval columns. Reserved words
 # (``end``) are quoted by the loaders below, mirroring ``test_binned_join.py``.
 DEFAULT_COLUMNS: tuple[tuple[str, str], ...] = (
@@ -38,103 +55,8 @@ DEFAULT_COLUMNS: tuple[tuple[str, str], ...] = (
     ("end", "int64"),
 )
 
-# Target -> the engine the target's SQL is meant to execute on.
-TARGET_ENGINE: dict[str, str] = {
-    "generic": "datafusion",
-    "datafusion": "datafusion",
-    "duckdb": "duckdb",
-}
-
 # Default target spread: every target executed on its intended engine.
 DEFAULT_TARGETS: tuple[str, ...] = ("generic", "datafusion", "duckdb")
-
-# transpile() dialect argument per target name.
-_TARGET_DIALECT: dict[str, str | None] = {
-    "generic": None,
-    "datafusion": "datafusion",
-    "duckdb": "duckdb",
-}
-
-
-def _normalize(rows) -> list[tuple]:
-    """Return a row multiset as a sorted list of tuples for order-free compare.
-
-    A list (not a set) preserves multiplicity so duplicate-row bugs surface;
-    sorting strips engine result ordering. Values are coerced to plain Python
-    scalars so DuckDB and DataFusion (pandas) rows compare equal.
-    """
-    out = []
-    for row in rows:
-        out.append(tuple(_scalar(v) for v in row))
-    return sorted(out, key=lambda r: tuple((v is None, v) for v in r))
-
-
-def _scalar(value):
-    """Coerce engine-specific scalars to comparable plain Python values."""
-    if value is None:
-        return None
-    # pandas / numpy nullable integers and NaN surface from DataFusion.
-    try:
-        import math
-
-        if isinstance(value, float) and math.isnan(value):
-            return None
-    except (TypeError, ValueError):
-        pass
-    if hasattr(value, "item"):
-        try:
-            return value.item()
-        except (ValueError, AttributeError):
-            return value
-    return value
-
-
-def _run_duckdb(sql: str, table_data: dict, columns) -> list[tuple]:
-    """Register tables in an in-memory DuckDB and return normalized result rows."""
-    import duckdb
-
-    conn = duckdb.connect(":memory:")
-    try:
-        for name, rows in table_data.items():
-            cols_ddl = ", ".join(
-                f'"{col}" {"VARCHAR" if kind == "utf8" else "BIGINT"}'
-                for col, kind in columns
-            )
-            conn.execute(f"CREATE TABLE {name} ({cols_ddl})")
-            if rows:
-                placeholders = ", ".join("?" for _ in columns)
-                conn.executemany(
-                    f"INSERT INTO {name} VALUES ({placeholders})",
-                    [tuple(r) for r in rows],
-                )
-        return _normalize(conn.execute(sql).fetchall())
-    finally:
-        conn.close()
-
-
-def _run_datafusion(sql: str, table_data: dict, columns) -> list[tuple]:
-    """Register tables in a DataFusion context and return normalized result rows."""
-    import pyarrow as pa
-    from datafusion import SessionContext
-
-    pa_fields = [
-        (col, pa.utf8() if kind == "utf8" else pa.int64()) for col, kind in columns
-    ]
-    schema = pa.schema(pa_fields)
-
-    ctx = SessionContext()
-    for name, rows in table_data.items():
-        arrays = {
-            col: [r[idx] for r in rows] for idx, (col, _kind) in enumerate(columns)
-        }
-        ctx.register_record_batches(name, [pa.table(arrays, schema=schema).to_batches()])
-    return _normalize(ctx.sql(sql).to_pandas().itertuples(index=False, name=None))
-
-
-_ENGINE_RUNNERS = {
-    "duckdb": _run_duckdb,
-    "datafusion": _run_datafusion,
-}
 
 
 @pytest.fixture
@@ -150,6 +72,7 @@ def cross_target_oracle():
             tables=None,
             columns=DEFAULT_COLUMNS,
             targets=DEFAULT_TARGETS,
+            engines=None,
             **table_data,
         )
 
@@ -165,7 +88,8 @@ def cross_target_oracle():
     ``columns``
         The ``(name, kind)`` schema (``kind`` in ``{"utf8", "int64"}``) used to
         register ``table_data`` into both engines. Defaults to the GIQL default
-        ``chrom``/``start``/``end`` interval schema.
+        ``chrom``/``start``/``end`` interval schema, where ``chrom`` is ``utf8``
+        and ``start``/``end`` are ``int64``.
     ``targets``
         The target names to exercise. Defaults to all three. Restrict this when
         a target cannot run the operator on its engine yet (e.g. NEAREST's
@@ -174,7 +98,7 @@ def cross_target_oracle():
         Optional ``{target: engine}`` overrides for the default routing
         (``generic``/``datafusion`` -> DataFusion, ``duckdb`` -> DuckDB). Use
         this when a target's *portable* SQL must be executed on a different
-        engine for the case at hand — e.g. routing ``generic`` to DuckDB so a
+        engine for the case at hand -- e.g. routing ``generic`` to DuckDB so a
         LATERAL-based operator can still be compared against the duckdb target.
     ``**table_data``
         ``name=[row, ...]`` table contents, where each row is a tuple matching
@@ -197,39 +121,26 @@ def cross_target_oracle():
         if tables is None:
             tables = [_default_table(name, columns) for name in table_data]
 
-        engine_for = dict(TARGET_ENGINE)
-        if engines:
-            engine_for.update(engines)
+        routing = resolve_routing(targets, engines)
 
-        expected_rows = _normalize(expected)
+        expected_rows = normalize(expected)
         results: dict[str, list[tuple]] = {}
+        sql_by_target: dict[str, str] = {}
 
+        # Collect ALL target results first; defer every assertion to
+        # assert_cross_target so the first divergent target can no longer
+        # short-circuit the cross-target comparison (Finding 1).
         for target in targets:
-            engine = engine_for[target]
-            importorskip = pytest.importorskip
-            importorskip("duckdb" if engine == "duckdb" else "datafusion")
+            engine, dialect = routing[target]
+            pytest.importorskip("duckdb" if engine == "duckdb" else "datafusion")
             if engine == "datafusion":
-                importorskip("pyarrow")
+                pytest.importorskip("pyarrow")
 
-            sql = transpile(query, tables=tables, dialect=_TARGET_DIALECT[target])
-            rows = _ENGINE_RUNNERS[engine](sql, table_data, columns)
-            results[target] = rows
+            sql = transpile(query, tables=tables, dialect=dialect)
+            sql_by_target[target] = sql
+            results[target] = ENGINE_RUNNERS[engine](sql, table_data, columns)
 
-            assert rows == expected_rows, (
-                f"target {target!r} on engine {engine!r} returned {rows!r}, "
-                f"expected {expected_rows!r}\nSQL: {sql}"
-            )
-
-        # Cross-target identity: every executed target agrees row-for-row.
-        run_targets = list(results)
-        if len(run_targets) > 1:
-            reference = run_targets[0]
-            for other in run_targets[1:]:
-                assert results[other] == results[reference], (
-                    f"targets {reference!r} and {other!r} disagree: "
-                    f"{results[reference]!r} != {results[other]!r}"
-                )
-
+        assert_cross_target(results, expected_rows, sql_by_target)
         return results
 
     return _oracle
