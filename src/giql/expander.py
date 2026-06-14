@@ -16,6 +16,14 @@ remaining steps migrate each operator onto, one at a time:
 * a :func:`register` decorator — the **public extension hook** by which a user
   adds a target or overrides an operator for one, e.g.
   ``@register(DuckDBTarget, GIQLDisjoin)``;
+* the registry's teardown seam — :meth:`ExpanderRegistry.unregister`,
+  :meth:`ExpanderRegistry.clear`, and ``in`` membership (``__contains__``) — the
+  **supported public API** for undoing a custom registration. A user who
+  registers a custom expander (e.g. in a test fixture or a plugin's teardown)
+  resets the process-wide :data:`REGISTRY` through these rather than reaching
+  into private state: ``REGISTRY.unregister(DuckDBTarget(), GIQLDisjoin)`` drops
+  one entry, ``REGISTRY.clear()`` drops them all, and
+  ``(DuckDBTarget(), GIQLDisjoin) in REGISTRY`` tests for one;
 * the :class:`ExpandOperators` pass, which runs after
   :func:`giql.canonicalizer.canonicalize_coordinates`, walks the AST, and
   replaces every opted-in GIQL operator node with the registry's expansion.
@@ -227,14 +235,34 @@ class ExpanderRegistry:
         return None
 
     def unregister(self, target: Target, operator: type) -> None:
-        """Drop the ``(target, operator)`` entry if present (test affordance)."""
+        """Drop the ``(target, operator)`` entry if present.
+
+        Part of the registry's **public teardown seam**: a caller that
+        registered a custom expander (a plugin, or a test fixture) undoes one
+        registration with this rather than mutating private state. Resolving the
+        same key afterward falls back through the chain to ``None``. Dropping an
+        absent key is a no-op.
+        """
         self._expanders.pop((target, operator), None)
 
     def clear(self) -> None:
-        """Drop every registration (test affordance)."""
+        """Drop every registration.
+
+        The bulk form of :meth:`unregister`, and the **public reset** for the
+        process-wide :data:`REGISTRY` — e.g. a test fixture that saves and
+        restores the registry around a body that registers custom expanders.
+        """
         self._expanders.clear()
 
     def __contains__(self, key: tuple[Target, type]) -> bool:
+        """Whether an *exact* ``(target, operator)`` entry is registered.
+
+        Tests the exact key only — it does **not** walk the generic fallback
+        chain :meth:`resolve` follows (``(GenericTarget(), op) in registry`` is
+        the only way ``(target, op)`` reports present via the generic entry).
+        Part of the public teardown seam, for asserting a registration landed or
+        was torn down.
+        """
         return key in self._expanders
 
 

@@ -163,6 +163,16 @@ def transpile(
         with _reraise_as_value_error("Transformation error"):
             duckdb_sql = duckdb_transformer.transform_to_sql(ast)
         if duckdb_sql is not None:
+            # WARNING: this early return emits the legacy IEJoin SQL directly and
+            # SKIPS the normalization pipeline below — pass 1 (resolution), pass 2
+            # (canonicalization), and pass 3 (ExpandOperators, constructed ~40
+            # lines down). The ExpandOperators registry is therefore NOT consulted
+            # on this path: a flagged operator on an IEJoin-eligible duckdb query
+            # is left un-expanded. This is benign today (the registry is empty and
+            # no operator opts in), but any DuckDB-pathed operator migration (#141)
+            # must either run expansion BEFORE this early return or have the IEJoin
+            # transformer defer to the registry. See the strict-xfail
+            # characterization test pinning this gap in tests/test_expander.py.
             return duckdb_sql
 
     intersects_transformer = IntersectsBinnedJoinTransformer(
