@@ -154,21 +154,26 @@ class TestCrossTargetOracleContainsWithin:
 class TestCrossTargetOracleNearest:
     """Standalone NEAREST identity on the targets whose engine supports LATERAL."""
 
-    def test_standalone_nearest_k1_agrees_on_duckdb_targets(self, cross_target_oracle):
-        """Test standalone NEAREST k=1 agrees across the LATERAL-capable targets.
+    def test_standalone_nearest_k1_agrees_generic_vs_duckdb_on_duckdb(
+        self, cross_target_oracle
+    ):
+        """Test NEAREST k=1 generic and duckdb SQL agree when both run on DuckDB.
 
         Given:
             A single-row peaks table and three candidate genes at varying
             distances on chr1.
         When:
             A correlated ``CROSS JOIN LATERAL NEAREST(..., k := 1)`` query runs
-            on the generic and duckdb targets, both executed on DuckDB.
+            for the generic and duckdb targets, both executed on DuckDB (the
+            generic target routed via ``engines={"generic": "duckdb"}``).
         Then:
-            Both targets should return the single nearest gene and agree.
+            The generic and duckdb SQL should both return the single nearest
+            gene and agree.
 
-        The generic target is routed to DuckDB here (not its default DataFusion
-        engine): the correlated LATERAL this expansion emits has no DataFusion
-        physical plan — the one documented cross-target gap.
+        This is a generic-vs-duckdb *equivalence* check, not a cross-target
+        identity check: DataFusion is never run here. The generic target is
+        routed to DuckDB because the correlated LATERAL this expansion emits has
+        no DataFusion physical plan — the one documented cross-target gap.
         """
         # Arrange / Act / Assert
         cross_target_oracle(
@@ -186,19 +191,28 @@ class TestCrossTargetOracleNearest:
             engines={"generic": "duckdb"},
         )
 
-    def test_nearest_on_datafusion_lateral_is_unsupported(self, cross_target_oracle):
-        """Test the NEAREST LATERAL expansion has no DataFusion physical plan.
+    @pytest.mark.xfail(
+        strict=True,
+        raises=Exception,
+        reason="DataFusion lacks correlated LATERAL (OuterReferenceColumn) — #142",
+    )
+    def test_nearest_full_oracle_xfails_on_datafusion_lateral(self, cross_target_oracle):
+        """Test the full NEAREST oracle xfails on DataFusion's missing LATERAL.
 
         Given:
-            The same single-row NEAREST query.
+            The single-row NEAREST query and a candidate gene on chr1.
         When:
-            The oracle is asked to run only the datafusion target on DataFusion.
+            The oracle runs all three targets — the datafusion target executes
+            the correlated LATERAL on DataFusion, which has no physical plan.
         Then:
-            DataFusion should reject the correlated LATERAL, pinning the gap that
-            justifies excluding it from the identity assertion above.
+            DataFusion should raise its ``OuterReferenceColumn`` "not
+            implemented" error, pinning the gap as a strict xfail that
+            auto-promotes (XPASS -> fail) when #142 lands. An UNRELATED
+            DataFusion error must still fail loudly, so the match is narrowed
+            to the LATERAL signature before re-raising.
         """
         # Arrange / Act
-        with pytest.raises(Exception) as excinfo:
+        try:
             cross_target_oracle(
                 "SELECT a.chrom, a.start AS a_start, b.start AS b_start "
                 "FROM peaks a "
@@ -206,8 +220,12 @@ class TestCrossTargetOracleNearest:
                 peaks=[("chr1", 200, 300)],
                 genes=[("chr1", 280, 290)],
                 expected=[("chr1", 200, 280)],
-                targets=("datafusion",),
             )
-
-        # Assert
-        assert "not implemented" in str(excinfo.value).lower()
+        except Exception as exc:  # noqa: BLE001
+            message = str(exc).lower()
+            # Assert: narrow the xfail to the documented LATERAL gap so any
+            # unrelated DataFusion failure escapes and fails the test loudly.
+            assert "outerreferencecolumn" in message or "not implemented" in message, (
+                f"unexpected DataFusion error, not the LATERAL gap: {exc!r}"
+            )
+            raise
