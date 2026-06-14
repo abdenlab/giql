@@ -144,8 +144,8 @@ def transpile(
     uses_iejoin = target.capabilities.range_join_strategy == "iejoin"
     if uses_iejoin and intersects_bin_size is not None:
         raise ValueError(
-            "intersects_bin_size has no effect with dialect='duckdb'; "
-            "the DuckDB dialect uses an IEJoin per-partition plan instead "
+            f"intersects_bin_size has no effect with dialect={target.name!r}; "
+            f"the {target.name} target uses an IEJoin per-partition plan instead "
             "of the binned equi-join. Pass one or the other, not both."
         )
 

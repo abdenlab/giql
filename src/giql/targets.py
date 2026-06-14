@@ -29,8 +29,11 @@ class Capabilities:
     Parameters
     ----------
     supports_lateral : bool
-        Whether the engine supports ``LATERAL`` / correlated joins. Drives
-        the NEAREST LATERAL-vs-window-function strategy (#142).
+        Whether the engine supports ``LATERAL`` / correlated joins. Will
+        drive the NEAREST LATERAL-vs-window-function strategy (#142). Until
+        then, :attr:`giql.generators.base.BaseGIQLGenerator.SUPPORTS_LATERAL`
+        remains the live source of truth at generation time; #142 reconciles
+        the two.
     supports_star_replace : bool
         Whether the engine supports ``SELECT * REPLACE (...)``. Drives the
         coordinate-canonicalization output: ``* REPLACE`` where supported,
@@ -38,11 +41,14 @@ class Capabilities:
         DuckDB / BigQuery / Snowflake / ClickHouse; not by PostgreSQL,
         SQLite, or DataFusion.
     supports_qualify : bool
-        Whether the engine supports the ``QUALIFY`` clause.
+        Whether the engine supports the ``QUALIFY`` clause. Reserved: no
+        emission path consumes it yet (a future window-function operator
+        port would).
     range_join_strategy : RangeJoinStrategy
         The plan used for column-to-column INTERSECTS joins: ``"binned"``
         for the generic binned equi-join, ``"iejoin"`` for DuckDB's
-        per-partition IEJoin plan.
+        per-partition IEJoin plan. The IEJoin path covers INNER / SEMI /
+        ANTI joins, with binned fallback for unsupported shapes.
     """
 
     supports_lateral: bool
@@ -51,12 +57,18 @@ class Capabilities:
     range_join_strategy: RangeJoinStrategy
 
 
+@dataclass(frozen=True)
 class Target:
     """A SQL target engine.
 
     Subclasses declare the engine ``name``, the ``sqlglot_dialect`` used to
     serialize AST for that engine (``None`` selects sqlglot's default
     generic serialization), and the engine ``capabilities``.
+
+    Targets are frozen, value-equal, and hashable: two ``DuckDBTarget()``
+    instances compare equal and hash alike, so the operator-expander registry
+    (#138) can key on a resolved target by value. Equality is class-scoped —
+    ``GenericTarget() != DataFusionTarget()`` even where their fields overlap.
     """
 
     name: str
@@ -64,6 +76,7 @@ class Target:
     capabilities: Capabilities
 
 
+@dataclass(frozen=True)
 class GenericTarget(Target):
     """Portable SQL-92-ish target with no engine-specific features.
 
@@ -72,9 +85,9 @@ class GenericTarget(Target):
     :class:`giql.generators.base.BaseGIQLGenerator` output.
     """
 
-    name = "generic"
-    sqlglot_dialect = None
-    capabilities = Capabilities(
+    name: str = "generic"
+    sqlglot_dialect: str | None = None
+    capabilities: Capabilities = Capabilities(
         supports_lateral=True,
         supports_star_replace=False,
         supports_qualify=False,
@@ -82,6 +95,7 @@ class GenericTarget(Target):
     )
 
 
+@dataclass(frozen=True)
 class DuckDBTarget(Target):
     """DuckDB target.
 
@@ -89,9 +103,9 @@ class DuckDBTarget(Target):
     per-partition plan for column-to-column INTERSECTS joins.
     """
 
-    name = "duckdb"
-    sqlglot_dialect = "duckdb"
-    capabilities = Capabilities(
+    name: str = "duckdb"
+    sqlglot_dialect: str | None = "duckdb"
+    capabilities: Capabilities = Capabilities(
         supports_lateral=True,
         supports_star_replace=True,
         supports_qualify=True,
@@ -99,6 +113,7 @@ class DuckDBTarget(Target):
     )
 
 
+@dataclass(frozen=True)
 class DataFusionTarget(Target):
     """Apache DataFusion target.
 
@@ -110,9 +125,9 @@ class DataFusionTarget(Target):
     supports ``* EXCEPT`` / ``* EXCLUDE`` but not ``* REPLACE``.
     """
 
-    name = "datafusion"
-    sqlglot_dialect = None
-    capabilities = Capabilities(
+    name: str = "datafusion"
+    sqlglot_dialect: str | None = None
+    capabilities: Capabilities = Capabilities(
         supports_lateral=False,
         supports_star_replace=False,
         supports_qualify=False,
@@ -120,8 +135,9 @@ class DataFusionTarget(Target):
     )
 
 
+# Public dialect names only. ``generic`` is intentionally absent: ``None`` is
+# the sole public way to select it (see :func:`resolve_target`).
 _TARGETS_BY_NAME: dict[str, type[Target]] = {
-    GenericTarget.name: GenericTarget,
     DuckDBTarget.name: DuckDBTarget,
     DataFusionTarget.name: DataFusionTarget,
 }
@@ -150,7 +166,7 @@ def resolve_target(dialect: str | None) -> Target:
         return GenericTarget()
 
     target_cls = _TARGETS_BY_NAME.get(dialect)
-    if target_cls is None or target_cls is GenericTarget:
+    if target_cls is None:
         raise ValueError(
             f"Unknown dialect: {dialect!r}. Supported: 'duckdb', 'datafusion', or None."
         )
