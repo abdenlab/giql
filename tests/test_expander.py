@@ -30,6 +30,9 @@ from giql.expander import OperatorExpander
 from giql.expander import expand_operators
 from giql.expander import register
 from giql.expressions import GIQLDisjoin
+from giql.expressions import GIQLMerge
+from giql.expressions import Intersects
+from giql.generators import BaseGIQLGenerator
 from giql.resolver import resolve_operator_refs
 from giql.table import Table
 from giql.table import Tables
@@ -58,6 +61,33 @@ def clean_registry():
     yield REGISTRY
     REGISTRY.clear()
     REGISTRY._expanders.update(saved)
+
+
+@pytest.fixture(autouse=True)
+def _registry_leak_guard():
+    """Assert the process-wide REGISTRY is empty at each test boundary.
+
+    A leak guard: the registry is empty at import and must return to empty after
+    every test, so a test that registers without cleaning up (a leak that would
+    silently flip the no-op pass for a later test) fails loudly. Tests that
+    register on the process-wide REGISTRY do so through ``clean_registry``, which
+    clears on the way out; this guard catches anything that bypasses it.
+    """
+    assert not REGISTRY._expanders, "REGISTRY leaked into a test from a prior one"
+    yield
+    assert not REGISTRY._expanders, "a test leaked a registration into REGISTRY"
+
+
+class _CountingExpander:
+    """An expander recording each call so a walk's dispatch count can be pinned."""
+
+    def __init__(self, label="counted"):
+        self.calls = []
+        self._label = label
+
+    def __call__(self, node, ctx):
+        self.calls.append((node, ctx))
+        return exp.Literal.string(self._label)
 
 
 class TestExpanderRegistry:
@@ -257,6 +287,139 @@ class TestExpanderRegistry:
             registry.register(GenericTarget(), GIQLDisjoin, object())
 
 
+class TestExpanderRegistryFallbackGaps:
+    """Edge cases of the registry fallback and op-scoped keying."""
+
+    def test_non_generic_target_with_no_entries_resolves_none(self):
+        """Test that a target with neither a specific nor generic entry yields None.
+
+        Given:
+            A registry with no entry for the target and no generic entry.
+        When:
+            Resolving (DataFusionTarget(), op).
+        Then:
+            It resolves to None (legacy emitter fallback), having exhausted the
+            chain.
+        """
+        # Arrange
+        registry = ExpanderRegistry()
+        registry.register(DuckDBTarget(), GIQLDisjoin, _record("duckdb"))
+
+        # Act
+        resolved = registry.resolve(DataFusionTarget(), GIQLDisjoin)
+
+        # Assert
+        assert resolved is None
+
+    def test_generic_entry_is_operator_scoped(self):
+        """Test that a generic entry for one operator does not satisfy another.
+
+        Given:
+            A generic expander registered for operator X (GIQLDisjoin) only.
+        When:
+            Resolving operator Y (GIQLMerge) for a target.
+        Then:
+            It resolves to None — the generic fallback is keyed per operator, not
+            a catch-all for the target.
+        """
+        # Arrange
+        registry = ExpanderRegistry()
+        registry.register(GenericTarget(), GIQLDisjoin, _record("generic"))
+
+        # Act
+        resolved = registry.resolve(DuckDBTarget(), GIQLMerge)
+
+        # Assert
+        assert resolved is None
+
+    def test_contains_checks_exact_key_not_fallback(self):
+        """Test that __contains__ tests the exact key, ignoring the generic chain.
+
+        Given:
+            A registry with a generic entry for op only.
+        When:
+            Testing membership of an exact (DuckDBTarget, op) key.
+        Then:
+            The exact target key reports absent while the generic key reports
+            present (membership does not walk the fallback chain).
+        """
+        # Arrange
+        registry = ExpanderRegistry()
+        registry.register(GenericTarget(), GIQLDisjoin, _record("generic"))
+
+        # Act & assert
+        assert (GenericTarget(), GIQLDisjoin) in registry
+        assert (DuckDBTarget(), GIQLDisjoin) not in registry
+
+    def test_unregister_drops_entry_and_falls_through(self):
+        """Test that unregister drops an entry so the key resolves to None after.
+
+        Given:
+            A registry with one (DuckDBTarget, op) entry.
+        When:
+            Unregistering that key.
+        Then:
+            Resolving it returns None and the key reports absent (public teardown
+            seam).
+        """
+        # Arrange
+        registry = ExpanderRegistry()
+        registry.register(DuckDBTarget(), GIQLDisjoin, _record("duckdb"))
+
+        # Act
+        registry.unregister(DuckDBTarget(), GIQLDisjoin)
+
+        # Assert
+        assert registry.resolve(DuckDBTarget(), GIQLDisjoin) is None
+        assert (DuckDBTarget(), GIQLDisjoin) not in registry
+
+    def test_unregister_absent_key_is_noop(self):
+        """Test that unregistering an absent key does not raise.
+
+        Given:
+            An empty registry.
+        When:
+            Unregistering a key that was never registered.
+        Then:
+            It returns without raising (idempotent teardown).
+        """
+        # Arrange
+        registry = ExpanderRegistry()
+
+        # Act & assert (no raise)
+        registry.unregister(DuckDBTarget(), GIQLDisjoin)
+        assert (DuckDBTarget(), GIQLDisjoin) not in registry
+
+    def test_public_teardown_seam_resets_process_registry(self):
+        """Test that the public seam tears a custom registration off REGISTRY.
+
+        Given:
+            A custom expander registered on the process-wide REGISTRY via the
+            decorator (the public extension hook).
+        When:
+            Tearing it down through the public seam — unregister, then clear —
+            without touching private state.
+        Then:
+            The key resolves to None and REGISTRY is empty again, so the leak
+            guard's post-test assertion holds (the seam is a supported reset).
+        """
+
+        # Arrange
+        @register(DuckDBTarget, GIQLDisjoin)
+        def _expander(node, ctx):
+            return exp.column("x")
+
+        assert (DuckDBTarget(), GIQLDisjoin) in REGISTRY
+
+        # Act
+        REGISTRY.unregister(DuckDBTarget(), GIQLDisjoin)
+        REGISTRY.clear()
+
+        # Assert
+        assert REGISTRY.resolve(DuckDBTarget(), GIQLDisjoin) is None
+        assert (DuckDBTarget(), GIQLDisjoin) not in REGISTRY
+
+
 class TestRegisterDecorator:
     """Tests for the @register extension-hook decorator."""
 
@@ -319,6 +482,154 @@ class TestRegisterDecorator:
         # Assert
         assert clean_registry.resolve(DuckDBTarget(), GIQLDisjoin) is _expander
 
+    def test_register_class_and_instance_land_on_same_entry(self, clean_registry):
+        """Test that the class and an instance form key the same registry entry.
+
+        Given:
+            A registration via the class form @register(DuckDBTarget, op).
+        When:
+            Registering again via the instance form @register(DuckDBTarget(), op).
+        Then:
+            The second lands on the same entry and overrides the first (the
+            decorator instantiates the class to a value-equal target key).
+        """
+
+        # Arrange
+        @register(DuckDBTarget, GIQLDisjoin)
+        def _first(node, ctx):
+            return exp.Literal.string("first")
+
+        # Act
+        @register(DuckDBTarget(), GIQLDisjoin)
+        def _second(node, ctx):
+            return exp.Literal.string("second")
+
+        # Assert
+        assert clean_registry.resolve(DuckDBTarget(), GIQLDisjoin) is _second
+
+    def test_register_stacks_one_expander_for_two_targets(self, clean_registry):
+        """Test that stacking the decorator registers one expander for two targets.
+
+        Given:
+            An expander decorated with @register for both DuckDB and DataFusion.
+        When:
+            Resolving each target's key.
+        Then:
+            Both resolve to the same single expander object.
+        """
+
+        # Arrange & act
+        @register(DuckDBTarget, GIQLDisjoin)
+        @register(DataFusionTarget, GIQLDisjoin)
+        def _shared(node, ctx):
+            return exp.Literal.string("shared")
+
+        # Assert
+        assert clean_registry.resolve(DuckDBTarget(), GIQLDisjoin) is _shared
+        assert clean_registry.resolve(DataFusionTarget(), GIQLDisjoin) is _shared
+
+    def test_register_overrides_through_decorator(self, clean_registry):
+        """Test that a second @register for one key overrides the first.
+
+        Given:
+            Two expanders decorated for the same (target, op) key in order.
+        When:
+            Resolving the key.
+        Then:
+            It resolves to the second (last-write-wins through the decorator).
+        """
+
+        # Arrange
+        @register(GenericTarget, GIQLDisjoin)
+        def _first(node, ctx):
+            return exp.Literal.string("first")
+
+        # Act
+        @register(GenericTarget, GIQLDisjoin)
+        def _second(node, ctx):
+            return exp.Literal.string("second")
+
+        # Assert
+        assert clean_registry.resolve(GenericTarget(), GIQLDisjoin) is _second
+
+    def test_register_accepts_object_form_through_decorator(self, clean_registry):
+        """Test that the decorator accepts an OperatorExpander object.
+
+        Given:
+            An OperatorExpander object passed to the @register decorator.
+        When:
+            Resolving the key and invoking it.
+        Then:
+            It resolves to a callable delegating to the object's expand method.
+        """
+
+        # Arrange
+        class _Obj:
+            def expand(self, node, ctx):
+                return exp.Literal.string("obj-form")
+
+        obj = _Obj()
+
+        # Act
+        register(GenericTarget, GIQLDisjoin)(obj)
+        resolved = clean_registry.resolve(GenericTarget(), GIQLDisjoin)
+
+        # Assert
+        assert resolved(None, None) == exp.Literal.string("obj-form")
+
+    def test_register_rejects_non_callable_through_decorator(self, clean_registry):
+        """Test that decorating a non-callable, non-expander raises TypeError.
+
+        Given:
+            A plain object that is neither callable nor an OperatorExpander.
+        When:
+            Passing it through the @register decorator.
+        Then:
+            It raises TypeError (the same guard as direct registration, proven
+            through the public decorator).
+        """
+        # Arrange & act & assert
+        with pytest.raises(TypeError):
+            register(GenericTarget, GIQLDisjoin)(object())
+
+    def test_register_does_not_leak_across_targets(self, clean_registry):
+        """Test that registering for one target leaves another target unaffected.
+
+        Given:
+            An expander registered for (DuckDBTarget, op) only.
+        When:
+            Resolving (DataFusionTarget, op), with no generic fallback present.
+        Then:
+            It resolves to None (no cross-target leakage).
+        """
+
+        # Arrange & act
+        @register(DuckDBTarget, GIQLDisjoin)
+        def _expander(node, ctx):
+            return exp.Literal.string("duck")
+
+        # Assert
+        assert clean_registry.resolve(DataFusionTarget(), GIQLDisjoin) is None
+
+    def test_register_returns_callable_decorated_function(self, clean_registry):
+        """Test that the bare decorated function stays callable standalone.
+
+        Given:
+            A function decorated with @register.
+        When:
+            Calling the decorated function directly (outside the pass).
+        Then:
+            It runs and returns its expansion, unchanged by decoration.
+        """
+
+        # Arrange & act
+        @register(GenericTarget, GIQLDisjoin)
+        def _expander(node, ctx):
+            return exp.Literal.string("callable")
+
+        # Assert
+        assert _expander(None, None) == exp.Literal.string("callable")
+
 
 class TestExpansionContext:
     """Tests for the ExpansionContext value object."""
@@ -365,6 +676,124 @@ class TestExpansionContext:
         assert first != second
         assert first.startswith(EXPAND_ALIAS_PREFIX)
         assert second.startswith(EXPAND_ALIAS_PREFIX)
+
+    def test_resolution_none_is_tolerated(self):
+        """Test that a None resolution is a tolerated first-class context state.
+
+        Given:
+            A context constructed with resolution=None.
+        When:
+            Reading its resolution attribute.
+        Then:
+            It is None without error (an un-annotated node is representable).
+        """
+        # Arrange
+        ctx = ExpansionContext(exp.true(), None, GenericTarget(), Tables())
+
+        # Act & assert
+        assert ctx.resolution is None
+
+    def test_tables_attribute_is_the_passed_container(self):
+        """Test that the context exposes the tables container it was built with.
+
+        Given:
+            A context built with a specific Tables container.
+        When:
+            Reading its tables attribute.
+        Then:
+            It is that same container (identity), threaded for the expander.
+        """
+        # Arrange
+        tables = _tables()
+        ctx = ExpansionContext(exp.true(), None, GenericTarget(), tables)
+
+        # Act & assert
+        assert ctx.tables is tables
+
+    def test_alias_uses_reserved_prefix_format(self):
+        """Test that minted aliases carry the reserved expander prefix.
+
+        Given:
+            A fresh context.
+        When:
+            Minting an alias.
+        Then:
+            It starts with the EXPAND_ALIAS_PREFIX reserved namespace.
+        """
+        # Arrange
+        ctx = ExpansionContext(exp.true(), None, GenericTarget(), Tables())
+
+        # Act
+        alias = ctx.alias()
+
+        # Assert
+        assert alias.startswith(EXPAND_ALIAS_PREFIX)
+
+    def test_alias_is_monotonic_within_one_context(self):
+        """Test that successive aliases in one context are all distinct.
+
+        Given:
+            A single context.
+        When:
+            Minting several aliases.
+        Then:
+            They are all distinct (a monotonic sequence, no repeats).
+        """
+        # Arrange
+        ctx = ExpansionContext(exp.true(), None, GenericTarget(), Tables())
+
+        # Act
+        names = [ctx.alias() for _ in range(5)]
+
+        # Assert
+        assert len(set(names)) == 5
+
+    def test_alias_continues_across_contexts_sharing_a_sequence(self):
+        """Test that two contexts sharing one sequence mint non-colliding aliases.
+
+        Given:
+            Two contexts built with the same shared name_sequence callable.
+        When:
+            Each mints an alias.
+        Then:
+            The aliases differ (the sequence threads continuity across the
+            per-node contexts of one run, preventing __giql_x_ collisions).
+        """
+        # Arrange
+        from sqlglot.helper import name_sequence
+
+        shared = name_sequence(EXPAND_ALIAS_PREFIX)
+        ctx_a = ExpansionContext(exp.true(), None, GenericTarget(), Tables(), shared)
+        ctx_b = ExpansionContext(exp.true(), None, GenericTarget(), Tables(), shared)
+
+        # Act
+        a = ctx_a.alias()
+        b = ctx_b.alias()
+
+        # Assert
+        assert a != b
+
+    def test_capabilities_delegates_on_second_target(self):
+        """Test that capabilities delegates to a different target's capability set.
+
+        Given:
+            A context built with a DataFusionTarget.
+        When:
+            Reading its capabilities property.
+        Then:
+            It is the DataFusion target's Capabilities (delegation is per-target,
+            not hardcoded to one engine).
+        """
+        # Arrange
+        target = DataFusionTarget()
+        ctx = ExpansionContext(exp.true(), None, target, Tables())
+
+        # Act
+        caps = ctx.capabilities
+
+        # Assert
+        assert caps is target.capabilities
+        assert caps.supports_lateral is False
 
 
 # A fake custom target standing in for a user-defined engine: the extension-hook
@@ -567,6 +996,731 @@ class TestNoOpWhenInert:
         # Assert
         assert actual == expected
         assert EXPAND_ALIAS_PREFIX not in actual
+
+
+# The nine GIQL operator expression classes the ExpandOperators pass inspects.
+# Every one must ship opted out (GIQL_EXPAND=False) at this step so the pass is a
+# strict no-op until a later migration flips one alongside its expander.
+from giql.expressions import Contains  # noqa: E402
+from giql.expressions import GIQLCluster  # noqa: E402
+from giql.expressions import GIQLDistance  # noqa: E402
+from giql.expressions import GIQLNearest  # noqa: E402
+from giql.expressions import SpatialSetPredicate  # noqa: E402
+from giql.expressions import Within  # noqa: E402
+
+_OPERATOR_CLASSES = (
+    Intersects,
+    Contains,
+    Within,
+    SpatialSetPredicate,
+    GIQLDistance,
+    GIQLNearest,
+    GIQLDisjoin,
+    GIQLCluster,
+    GIQLMerge,
+)
+
+
+class TestOperatorOptOut:
+    """Every operator ships opted out of the ExpandOperators pass at this step."""
+
+    @pytest.mark.parametrize("operator", _OPERATOR_CLASSES, ids=lambda c: c.__name__)
+    def test_operator_class_ships_expand_disabled(self, operator):
+        """Test that each operator class ships GIQL_EXPAND=False.
+
+        Given:
+            One of the nine GIQL operator expression classes.
+        When:
+            Reading its GIQL_EXPAND class attribute.
+        Then:
+            It should be False (no operator opts into expansion yet).
+        """
+        # Arrange & act
+        flag = operator.GIQL_EXPAND
+
+        # Assert
+        assert flag is False
+
+    def test_expand_sentinel_is_false(self):
+        """Test that the shared _EXPAND opt-out sentinel is False.
+
+        Given:
+            The expressions module's _EXPAND sentinel that every operator's
+            GIQL_EXPAND defaults to.
+        When:
+            Reading it.
+        Then:
+            It should be False, the single source the per-class flags inherit.
+        """
+        # Arrange & act
+        from giql.expressions import _EXPAND
+
+        # Assert
+        assert _EXPAND is False
+
+
+class TestOptedInRestoresFlag:
+    """The _opted_in helper restores GIQL_EXPAND even when its body raises."""
+
+    def test_opted_in_restores_flag_after_exception(self):
+        """Test that _opted_in restores GIQL_EXPAND when the body raises.
+
+        Given:
+            An operator class at its default GIQL_EXPAND=False.
+        When:
+            Its _opted_in body raises an exception.
+        Then:
+            The flag should be restored to False (the manager is exception-safe,
+            so a raising expansion test cannot leak an opt-in into a later test).
+        """
+        # Arrange
+        assert GIQLMerge.GIQL_EXPAND is False
+
+        # Act
+        with pytest.raises(RuntimeError):
+            with _opted_in(GIQLMerge):
+                assert GIQLMerge.GIQL_EXPAND is True
+                raise RuntimeError("boom")
+
+        # Assert
+        assert GIQLMerge.GIQL_EXPAND is False
+
+
+class TestIEJoinEarlyReturnSkipsExpansion:
+    """Pin Finding 2: the duckdb IEJoin early return skips the ExpandOperators pass."""
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason="#141: the duckdb IEJoin early return in transpile() emits before "
+        "ExpandOperators runs, so a flagged operator on an IEJoin-eligible query "
+        "is not expanded. Flips to pass when #141 runs expansion before the "
+        "early return (or defers the IEJoin transformer to the registry).",
+    )
+    def test_iejoin_query_expands_flagged_operator(self, clean_registry):
+        """Test that an IEJoin-eligible duckdb query expands a flagged operator.
+
+        Given:
+            A column-to-column INTERSECTS join eligible for the duckdb IEJoin
+            path, with Intersects flagged GIQL_EXPAND and an expander registered.
+        When:
+            Transpiling with dialect='duckdb'.
+        Then:
+            The expander's sentinel should appear (currently it does NOT — the
+            IEJoin early return skips the pass; this xfail flips when #141 lands).
+        """
+        # Arrange
+        clean_registry.register(
+            DuckDBTarget(), Intersects, lambda n, c: exp.column("__giql_iejoin_sentinel")
+        )
+        query = (
+            "SELECT a.start FROM peaks a "
+            "JOIN genes b ON a.interval INTERSECTS b.interval"
+        )
+
+        # Act
+        with _opted_in(Intersects):
+            sql = transpile(query, tables=["peaks", "genes"], dialect="duckdb")
+
+        # Assert
+        assert "__giql_iejoin_sentinel" in sql
+
+    def test_iejoin_query_emits_legacy_sql_unchanged(self, clean_registry):
+        """Test that the legacy IEJoin SQL is emitted regardless of a flagged op.
+
+        Given:
+            The same IEJoin-eligible duckdb query with Intersects flagged and an
+            expander registered.
+        When:
+            Transpiling with dialect='duckdb'.
+        Then:
+            The legacy IEJoin SET VARIABLE SQL is emitted and the expander's
+            sentinel is absent (characterizing the current skip; the companion
+            xfail surfaces when #141 fixes it).
+        """
+        # Arrange
+        clean_registry.register(
+            DuckDBTarget(), Intersects, lambda n, c: exp.column("__giql_iejoin_sentinel")
+        )
+        query = (
+            "SELECT a.start FROM peaks a "
+            "JOIN genes b ON a.interval INTERSECTS b.interval"
+        )
+
+        # Act
+        with _opted_in(Intersects):
+            sql = transpile(query, tables=["peaks", "genes"], dialect="duckdb")
+
+        # Assert
+        assert "SET VARIABLE __giql_iejoin_" in sql
+        assert "__giql_iejoin_sentinel" not in sql
+
+
+class TestTranspileExpanderDispatch:
+    """Dispatch driven through the public transpile() entry point."""
+
+    def test_target_entry_dispatches_for_matching_dialect(self, clean_registry):
+        """Test that a (DuckDBTarget, op) entry dispatches for dialect='duckdb'.
+
+        Given:
+            An expander registered for (DuckDBTarget, GIQLDisjoin) and the
+            operator flagged.
+        When:
+            Transpiling a DISJOIN query with dialect='duckdb'.
+        Then:
+            The expander's sentinel should reach the generated SQL.
+        """
+        # Arrange
+        clean_registry.register(
+            DuckDBTarget(), GIQLDisjoin, lambda n, c: exp.column("DUCK_SENTINEL")
+        )
+
+        # Act
+        with _opted_in(GIQLDisjoin):
+            sql = transpile(
+                "SELECT * FROM DISJOIN(variants)", tables=["variants"], dialect="duckdb"
+            )
+
+        # Assert
+        assert "DUCK_SENTINEL" in sql
+
+    @pytest.mark.parametrize("dialect", [None, "datafusion"])
+    def test_target_entry_falls_through_for_other_dialects(
+        self, clean_registry, dialect
+    ):
+        """Test that a target-specific entry does not fire for other dialects.
+
+        Given:
+            An expander registered only for (DuckDBTarget, GIQLDisjoin), flagged.
+        When:
+            Transpiling with dialect=None or 'datafusion'.
+        Then:
+            The sentinel should be absent and the legacy SQL emitted (the
+            target-specific entry does not resolve for a different target).
+        """
+        # Arrange
+        clean_registry.register(
+            DuckDBTarget(), GIQLDisjoin, lambda n, c: exp.column("DUCK_SENTINEL")
+        )
+
+        # Act
+        with _opted_in(GIQLDisjoin):
+            sql = transpile(
+                "SELECT * FROM DISJOIN(variants)", tables=["variants"], dialect=dialect
+            )
+
+        # Assert
+        assert "DUCK_SENTINEL" not in sql
+
+    @pytest.mark.parametrize("dialect", [None, "duckdb", "datafusion"])
+    def test_generic_entry_covers_all_dialects(self, clean_registry, dialect):
+        """Test that a (GenericTarget, op) entry dispatches via fallback everywhere.
+
+        Given:
+            An expander registered only for (GenericTarget, GIQLDisjoin), flagged.
+        When:
+            Transpiling with each of the three dialects.
+        Then:
+            The generic expander's sentinel should reach the SQL in every case
+            (the fallback chain routes every target to the generic entry).
+        """
+        # Arrange
+        clean_registry.register(
+            GenericTarget(), GIQLDisjoin, lambda n, c: exp.column("GENERIC_SENTINEL")
+        )
+
+        # Act
+        with _opted_in(GIQLDisjoin):
+            sql = transpile(
+                "SELECT * FROM DISJOIN(variants)", tables=["variants"], dialect=dialect
+            )
+
+        # Assert
+        assert "GENERIC_SENTINEL" in sql
+
+    def test_target_entry_shadows_generic_per_dialect(self, clean_registry):
+        """Test that a target entry shadows the generic entry for its dialect only.
+
+        Given:
+            Both a (DuckDBTarget, op) and a (GenericTarget, op) expander, flagged.
+        When:
+            Transpiling with dialect='duckdb' versus dialect=None.
+        Then:
+            The duckdb path uses the target sentinel; the generic path uses the
+            generic sentinel (per-dialect shadowing through transpile()).
+        """
+        # Arrange
+        clean_registry.register(
+            DuckDBTarget(), GIQLDisjoin, lambda n, c: exp.column("DUCK_SENTINEL")
+        )
+        clean_registry.register(
+            GenericTarget(), GIQLDisjoin, lambda n, c: exp.column("GENERIC_SENTINEL")
+        )
+
+        # Act
+        with _opted_in(GIQLDisjoin):
+            duck_sql = transpile(
+                "SELECT * FROM DISJOIN(variants)", tables=["variants"], dialect="duckdb"
+            )
+            generic_sql = transpile(
+                "SELECT * FROM DISJOIN(variants)", tables=["variants"], dialect=None
+            )
+
+        # Assert
+        assert "DUCK_SENTINEL" in duck_sql and "GENERIC_SENTINEL" not in duck_sql
+        assert "GENERIC_SENTINEL" in generic_sql and "DUCK_SENTINEL" not in generic_sql
+
+    def test_context_target_matches_resolved_dialect(self, clean_registry):
+        """Test that ctx.target equals resolve_target(dialect) at dispatch.
+
+        Given:
+            A flagged DISJOIN and an expander capturing its context.
+        When:
+            Transpiling with dialect='datafusion'.
+        Then:
+            The captured ctx.target should equal resolve_target('datafusion').
+        """
+        # Arrange
+        from giql.targets import resolve_target
+
+        captured = {}
+
+        def _capture(node, ctx):
+            captured["target"] = ctx.target
+            return exp.column("ok")
+
+        clean_registry.register(GenericTarget(), GIQLDisjoin, _capture)
+
+        # Act
+        with _opted_in(GIQLDisjoin):
+            transpile(
+                "SELECT * FROM DISJOIN(variants)",
+                tables=["variants"],
+                dialect="datafusion",
+            )
+
+        # Assert
+        assert captured["target"] == resolve_target("datafusion")
+
+    def test_throwing_expander_wraps_in_expansion_error(self, clean_registry):
+        """Test that an unexpected expander error is wrapped as an Expansion error.
+
+        Given:
+            A flagged DISJOIN whose expander raises a non-ValueError.
+        When:
+            Transpiling.
+        Then:
+            transpile() should raise ValueError whose message starts with
+            'Expansion error: ' (the stage boundary wraps unexpected errors).
+        """
+
+        # Arrange
+        def _boom(node, ctx):
+            raise RuntimeError("kaboom")
+
+        clean_registry.register(GenericTarget(), GIQLDisjoin, _boom)
+
+        # Act & assert
+        with _opted_in(GIQLDisjoin):
+            with pytest.raises(ValueError, match=r"^Expansion error: "):
+                transpile("SELECT * FROM DISJOIN(variants)", tables=["variants"])
+
+    def test_value_error_from_expander_passes_verbatim(self, clean_registry):
+        """Test that a ValueError raised by an expander propagates unwrapped.
+
+        Given:
+            A flagged DISJOIN whose expander raises a ValueError with a targeted
+            diagnostic.
+        When:
+            Transpiling.
+        Then:
+            The same ValueError message should propagate verbatim (the boundary
+            lets user-facing ValueErrors through untouched).
+        """
+
+        # Arrange
+        def _raise(node, ctx):
+            raise ValueError("a targeted diagnostic")
+
+        clean_registry.register(GenericTarget(), GIQLDisjoin, _raise)
+
+        # Act & assert
+        with _opted_in(GIQLDisjoin):
+            with pytest.raises(ValueError, match=r"^a targeted diagnostic$"):
+                transpile("SELECT * FROM DISJOIN(variants)", tables=["variants"])
+
+    def test_expander_sees_canonicalized_operands(self, clean_registry):
+        """Test that expansion runs after canonicalization (pass ordering).
+
+        Given:
+            A flagged DISJOIN with a non-canonical (1-based) target table, which
+            pass 2 wraps in a __giql_canon_ CTE, and an expander capturing its
+            node's resolution at dispatch.
+        When:
+            Transpiling.
+        Then:
+            The expander runs after canonicalization, so the surviving query
+            already carries the canonical wrapper CTE (expansion sees pass-2
+            output, not the raw AST).
+        """
+        # Arrange
+        captured = {}
+
+        def _capture(node, ctx):
+            captured["resolution"] = ctx.resolution
+            # Returning the node unchanged leaves the canonical CTE in the tree.
+            return node
+
+        clean_registry.register(GenericTarget(), GIQLDisjoin, _capture)
+        one_based = Table("variants", coordinate_system="1based")
+
+        # Act
+        with _opted_in(GIQLDisjoin):
+            sql = transpile("SELECT * FROM DISJOIN(variants)", tables=[one_based])
+
+        # Assert
+        assert captured["resolution"] is not None
+        assert "__giql_canon_" in sql
+
+    def test_replacement_reaches_generator(self, clean_registry):
+        """Test that the expander's replacement node is what the generator renders.
+
+        Given:
+            A flagged DISJOIN and an expander returning a distinctive sentinel.
+        When:
+            Transpiling.
+        Then:
+            The sentinel appears in the final SQL and no DISJOIN remains, so the
+            replacement reached the generator (end-to-end).
+        """
+        # Arrange
+        clean_registry.register(
+            GenericTarget(), GIQLDisjoin, lambda n, c: exp.column("REACHED_GENERATOR")
+        )
+
+        # Act
+        with _opted_in(GIQLDisjoin):
+            sql = transpile("SELECT * FROM DISJOIN(variants)", tables=["variants"])
+
+        # Assert
+        assert "REACHED_GENERATOR" in sql
+        assert "DISJOIN" not in sql.upper()
+
+    def test_unknown_dialect_raises_before_dispatch(self, clean_registry):
+        """Test that an unknown dialect raises before any expander dispatches.
+
+        Given:
+            A flagged DISJOIN and a generic expander that would record a call.
+        When:
+            Transpiling with an unrecognized dialect.
+        Then:
+            transpile() raises ValueError for the unknown dialect and the
+            expander never runs (dialect resolution precedes dispatch).
+        """
+        # Arrange
+        counting = _CountingExpander()
+        clean_registry.register(GenericTarget(), GIQLDisjoin, counting)
+
+        # Act & assert
+        with _opted_in(GIQLDisjoin):
+            with pytest.raises(ValueError, match="Unknown dialect"):
+                transpile(
+                    "SELECT * FROM DISJOIN(variants)",
+                    tables=["variants"],
+                    dialect="postgres",
+                )
+        assert counting.calls == []
+
+
+class TestExpandOperatorsWalk:
+    """Real-AST walk behavior of the ExpandOperators pass."""
+
+    def test_walk_visits_every_sibling_operator(self, clean_registry):
+        """Test that the pass dispatches once per sibling operator and clears them.
+
+        Given:
+            A query with two sibling DISJOIN operators, flagged, and a counting
+            expander.
+        When:
+            Running the pass.
+        Then:
+            The expander is called exactly twice and no DISJOIN node remains.
+        """
+        # Arrange
+        counting = _CountingExpander()
+        clean_registry.register(GenericTarget(), GIQLDisjoin, counting)
+        tables = _tables(("variants", "genes"))
+        ast = _prepare(
+            "SELECT * FROM DISJOIN(variants) UNION ALL SELECT * FROM DISJOIN(genes)",
+            tables,
+        )
+        pass_ = ExpandOperators(GenericTarget(), tables, clean_registry)
+
+        # Act
+        with _opted_in(GIQLDisjoin):
+            result = pass_.transform(ast)
+
+        # Assert
+        assert len(counting.calls) == 2
+        assert not list(result.find_all(GIQLDisjoin))
+
+    def test_walk_reaches_nested_operator(self, clean_registry):
+        """Test that the walk reaches an operator nested in a derived table.
+
+        Given:
+            A DISJOIN nested inside a derived table, flagged, with a counting
+            expander.
+        When:
+            Running the pass.
+        Then:
+            The nested operator is dispatched exactly once.
+        """
+        # Arrange
+        counting = _CountingExpander()
+        clean_registry.register(GenericTarget(), GIQLDisjoin, counting)
+        tables = _tables()
+        ast = _prepare("SELECT * FROM (SELECT * FROM DISJOIN(variants)) t", tables)
+        pass_ = ExpandOperators(GenericTarget(), tables, clean_registry)
+
+        # Act
+        with _opted_in(GIQLDisjoin):
+            pass_.transform(ast)
+
+        # Assert
+        assert len(counting.calls) == 1
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "SELECT * FROM peaks WHERE interval INTERSECTS 'chr1:1-100'",
+            "SELECT * FROM peaks a JOIN genes b ON a.interval INTERSECTS 'chr1:1-100'",
+            "SELECT * FROM (SELECT * FROM peaks WHERE interval INTERSECTS 'chr1:1-100') t",
+            "WITH d AS (SELECT * FROM peaks WHERE interval INTERSECTS 'chr1:1-100') "
+            "SELECT * FROM d",
+        ],
+        ids=["where", "join_on", "subquery", "cte"],
+    )
+    def test_walk_reaches_operator_in_each_location(self, clean_registry, query):
+        """Test that the walk reaches an operator in any clause location.
+
+        Given:
+            An INTERSECTS predicate placed in a WHERE, JOIN-ON, subquery, or CTE,
+            flagged, with a counting expander.
+        When:
+            Running the pass.
+        Then:
+            The operator is dispatched exactly once regardless of location.
+        """
+        # Arrange
+        counting = _CountingExpander()
+        clean_registry.register(GenericTarget(), Intersects, counting)
+        tables = _tables(("peaks", "genes"))
+        ast = _prepare(query, tables)
+        pass_ = ExpandOperators(GenericTarget(), tables, clean_registry)
+
+        # Act
+        with _opted_in(Intersects):
+            pass_.transform(ast)
+
+        # Assert
+        assert len(counting.calls) == 1
+
+    def test_walk_replacement_serializes_through_generator(self, clean_registry):
+        """Test that the pass's replacement serializes cleanly to SQL.
+
+        Given:
+            A flagged DISJOIN and an expander returning a column sentinel.
+        When:
+            Running the pass and serializing the result with BaseGIQLGenerator.
+        Then:
+            The sentinel appears in the serialized SQL (replacement integrity).
+        """
+        # Arrange
+        clean_registry.register(
+            GenericTarget(), GIQLDisjoin, lambda n, c: exp.column("WALK_SENTINEL")
+        )
+        tables = _tables()
+        ast = _prepare("SELECT * FROM DISJOIN(variants)", tables)
+        pass_ = ExpandOperators(GenericTarget(), tables, clean_registry)
+
+        # Act
+        with _opted_in(GIQLDisjoin):
+            result = pass_.transform(ast)
+        sql = BaseGIQLGenerator(tables=tables).generate(result)
+
+        # Assert
+        assert "WALK_SENTINEL" in sql
+
+    def test_walk_identity_return_leaves_node_in_place(self, clean_registry):
+        """Test that an expander returning the node itself triggers no replacement.
+
+        Given:
+            A flagged DISJOIN whose expander returns the node unchanged.
+        When:
+            Running the pass.
+        Then:
+            The DISJOIN node remains in the tree (the identity-return guard skips
+            the replace call).
+        """
+        # Arrange
+        clean_registry.register(GenericTarget(), GIQLDisjoin, lambda n, c: n)
+        tables = _tables()
+        ast = _prepare("SELECT * FROM DISJOIN(variants)", tables)
+        pass_ = ExpandOperators(GenericTarget(), tables, clean_registry)
+
+        # Act
+        with _opted_in(GIQLDisjoin):
+            result = pass_.transform(ast)
+
+        # Assert
+        assert list(result.find_all(GIQLDisjoin))
+
+    def test_walk_dispatches_mixed_operator_types_per_type(self, clean_registry):
+        """Test that the walk dispatches each operator type to its own expander.
+
+        Given:
+            A query containing both a DISJOIN and an INTERSECTS, both flagged,
+            each with its own counting expander.
+        When:
+            Running the pass.
+        Then:
+            Each expander is called once, dispatched by operator type.
+        """
+        # Arrange
+        disjoin_counter = _CountingExpander("disjoin")
+        intersects_counter = _CountingExpander("intersects")
+        clean_registry.register(GenericTarget(), GIQLDisjoin, disjoin_counter)
+        clean_registry.register(GenericTarget(), Intersects, intersects_counter)
+        tables = _tables(("variants", "peaks"))
+        ast = _prepare(
+            "SELECT * FROM DISJOIN(variants) "
+            "WHERE EXISTS (SELECT * FROM peaks WHERE interval INTERSECTS 'chr1:1-100')",
+            tables,
+        )
+        pass_ = ExpandOperators(GenericTarget(), tables, clean_registry)
+
+        # Act
+        with _opted_in(GIQLDisjoin):
+            with _opted_in(Intersects):
+                pass_.transform(ast)
+
+        # Assert
+        assert len(disjoin_counter.calls) == 1
+        assert len(intersects_counter.calls) == 1
+
+    def test_walk_partial_opt_in_replaces_only_flagged_type(self, clean_registry):
+        """Test that only the flagged operator type is replaced when both registered.
+
+        Given:
+            A DISJOIN and an INTERSECTS, both with registered expanders, but only
+            INTERSECTS flagged GIQL_EXPAND.
+        When:
+            Running the pass.
+        Then:
+            The INTERSECTS is replaced while the DISJOIN node remains (the gate is
+            per-type).
+        """
+        # Arrange
+        clean_registry.register(
+            GenericTarget(), GIQLDisjoin, lambda n, c: exp.column("DJ")
+        )
+        clean_registry.register(
+            GenericTarget(), Intersects, lambda n, c: exp.column("IX")
+        )
+        tables = _tables(("variants", "peaks"))
+        ast = _prepare(
+            "SELECT * FROM DISJOIN(variants) "
+            "WHERE EXISTS (SELECT * FROM peaks WHERE interval INTERSECTS 'chr1:1-100')",
+            tables,
+        )
+        pass_ = ExpandOperators(GenericTarget(), tables, clean_registry)
+
+        # Act
+        with _opted_in(Intersects):
+            result = pass_.transform(ast)
+
+        # Assert
+        assert list(result.find_all(GIQLDisjoin))
+        assert not list(result.find_all(Intersects))
+
+    def test_walk_shares_alias_sequence_across_sibling_expanders(self, clean_registry):
+        """Test that sibling expanders draw from one alias sequence (no collision).
+
+        Given:
+            Two sibling DISJOIN operators, flagged, with an expander that mints an
+            alias per call and records it.
+        When:
+            Running the pass.
+        Then:
+            The two minted aliases differ (the run threads a single
+            name_sequence across every per-node context, so no __giql_x_
+            collision).
+        """
+        # Arrange
+        seen = []
+
+        def _mint(node, ctx):
+            seen.append(ctx.alias())
+            return exp.column("c")
+
+        clean_registry.register(GenericTarget(), GIQLDisjoin, _mint)
+        tables = _tables(("variants", "genes"))
+        ast = _prepare(
+            "SELECT * FROM DISJOIN(variants) UNION ALL SELECT * FROM DISJOIN(genes)",
+            tables,
+        )
+        pass_ = ExpandOperators(GenericTarget(), tables, clean_registry)
+
+        # Act
+        with _opted_in(GIQLDisjoin):
+            pass_.transform(ast)
+
+        # Assert
+        assert len(seen) == 2
+        assert seen[0] != seen[1]
+        assert all(a.startswith(EXPAND_ALIAS_PREFIX) for a in seen)
+
+    def test_lazy_import_has_no_cycle_in_fresh_process(self):
+        """Test that importing the expander module standalone raises no cycle.
+
+        Given:
+            A fresh Python process with nothing pre-imported.
+        When:
+            Importing giql.expander and calling its lazy operator accessor.
+        Then:
+            It imports and resolves the nine operator classes without an import
+            cycle (the lazy _giql_operators import breaks the module cycle).
+        """
+        # Arrange
+        import os
+        import subprocess
+        import sys
+
+        code = (
+            "import giql.expander as e; "
+            "ops = e._giql_operators(); "
+            "assert len(ops) == 9, ops; "
+            "print('ok')"
+        )
+        # Strip coverage's subprocess auto-start hooks so the child is a genuinely
+        # clean interpreter exercising only the import (not the parent run's
+        # coverage instrumentation, which is irrelevant to the cycle check).
+        env = {
+            k: v
+            for k, v in os.environ.items()
+            if not k.startswith("COV_CORE") and k != "COVERAGE_PROCESS_START"
+        }
+
+        # Act
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+
+        # Assert
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "ok"
 
 
 def _tables(names=("variants",)) -> Tables:
