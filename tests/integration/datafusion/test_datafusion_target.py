@@ -97,27 +97,33 @@ class TestDataFusionTargetExecution:
             executed.
         Then:
             It should be accepted (not rejected as it would be for duckdb),
-            route through the binned path, and return exactly one row — the
-            overlap, de-duplicated across the shared bins.
+            the explicit bin size should reach emission (changing the SQL vs
+            the default), and execution should return exactly one row — the
+            overlap, de-duplicated by the pairs CTE across the shared bins.
         """
         # Arrange
         ctx = datafusion_ctx(
             peaks=[("chr1", 0, 5000)],
             genes=[("chr1", 500, 4500)],
         )
-        sql = transpile(
+        query = (
             'SELECT a.chrom, a.start, a."end", '
             'b.start AS b_start, b."end" AS b_end '
-            "FROM peaks a JOIN genes b ON a.interval INTERSECTS b.interval",
+            "FROM peaks a JOIN genes b ON a.interval INTERSECTS b.interval"
+        )
+        default_sql = transpile(query, tables=["peaks", "genes"], dialect="datafusion")
+        sized_sql = transpile(
+            query,
             tables=["peaks", "genes"],
             dialect="datafusion",
             intersects_bin_size=1000,
         )
 
         # Act
-        df = ctx.sql(sql).to_pandas()
+        df = ctx.sql(sized_sql).to_pandas()
 
         # Assert
-        assert len(df) == 1
+        assert sized_sql != default_sql  # the explicit bin size reaches emission
+        assert len(df) == 1  # de-duplicated across the shared bins
         assert df.iloc[0]["start"] == 0
         assert df.iloc[0]["b_start"] == 500

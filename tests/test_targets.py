@@ -1,5 +1,6 @@
 """Tests for the target-engine model."""
 
+import re
 from dataclasses import FrozenInstanceError
 
 import pytest
@@ -196,6 +197,57 @@ class TestDataFusionTarget:
         assert target.capabilities.range_join_strategy == "binned"
 
 
+class TestTarget:
+    """Tests for the shared Target value semantics."""
+
+    def test___eq___same_target_type(self):
+        """Test that two instances of the same target are value-equal.
+
+        Given:
+            Two separately constructed DuckDBTarget instances.
+        When:
+            They are compared for equality.
+        Then:
+            It should treat them as equal (frozen value semantics), so a
+            resolved target is a stable registry key.
+        """
+        # Act & assert
+        assert DuckDBTarget() == DuckDBTarget()
+
+    def test___eq___different_target_types(self):
+        """Test that distinct target classes are never equal.
+
+        Given:
+            A GenericTarget and a DataFusionTarget (whose fields partly
+            overlap).
+        When:
+            They are compared for equality.
+        Then:
+            It should treat them as unequal, since equality is class-scoped.
+        """
+        # Act & assert
+        assert GenericTarget() != DataFusionTarget()
+
+    def test___hash___supports_set_and_dict_keys(self):
+        """Test that targets are hashable and usable as keys.
+
+        Given:
+            Value-equal and value-distinct target instances.
+        When:
+            They are placed in a set and used as dict keys.
+        Then:
+            It should dedup equal instances and resolve a key built from a
+            separately constructed equal instance — the contract the
+            operator-expander registry (#138) relies on.
+        """
+        # Arrange
+        registry = {(DuckDBTarget(), "Intersects"): "expander"}
+
+        # Act & assert
+        assert len({DuckDBTarget(), DuckDBTarget(), GenericTarget()}) == 2
+        assert registry[(DuckDBTarget(), "Intersects")] == "expander"
+
+
 def test_resolve_target_with_none_returns_generic():
     """Test resolution of the default dialect.
 
@@ -271,10 +323,12 @@ def test_resolve_target_with_unsupported_dialect_raises(dialect):
         supported targets.
     """
     # Act & assert
-    with pytest.raises(
-        ValueError,
-        match=rf"Unknown dialect: {dialect!r}\..*'duckdb', 'datafusion', or None\.",
-    ):
+    pattern = (
+        re.escape(f"Unknown dialect: {dialect!r}.")
+        + r".*"
+        + re.escape("'duckdb', 'datafusion', or None.")
+    )
+    with pytest.raises(ValueError, match=pattern):
         resolve_target(dialect)
 
 

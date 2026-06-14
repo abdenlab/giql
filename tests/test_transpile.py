@@ -462,16 +462,19 @@ class TestTranspileDialects:
         ids=["intersects_literal", "contains", "within", "nearest", "join", "any"],
     )
     def test_transpile_datafusion_matches_generic_output(self, query, tables):
-        """Test that datafusion routes through the generic path for now.
+        """Test that datafusion is currently a pure alias for the generic target.
 
         Given:
-            A GIQL query across the operator spread, transpiled with
-            dialect=None and with dialect="datafusion".
+            A GIQL query transpiled with dialect=None and with
+            dialect="datafusion". The operator spread is a regression net,
+            not codepath coverage: datafusion has no engine-specific
+            expansion yet, so every query funnels through the same generic
+            path.
         When:
             Comparing the two outputs.
         Then:
-            It should produce byte-identical SQL, since datafusion has no
-            engine-specific expansion yet.
+            It should produce byte-identical SQL for every query, pinning
+            datafusion as a generic alias until later steps diverge it.
         """
         # Act
         generic_sql = transpile(query, tables=tables)
@@ -557,7 +560,7 @@ class TestTranspileDialects:
                 "JOIN genes b ON a.interval INTERSECTS b.interval",
                 tables=["peaks", "genes"],
                 dialect="duckdb",
-                intersects_bin_size=50000,
+                intersects_bin_size=50000,  # type: ignore[call-overload]
             )
 
     def test_transpile_duckdb_rejects_zero_intersects_bin_size(self):
@@ -578,7 +581,7 @@ class TestTranspileDialects:
                 "JOIN genes b ON a.interval INTERSECTS b.interval",
                 tables=["peaks", "genes"],
                 dialect="duckdb",
-                intersects_bin_size=0,
+                intersects_bin_size=0,  # type: ignore[call-overload]
             )
 
 
