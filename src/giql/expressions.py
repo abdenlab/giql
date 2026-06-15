@@ -232,6 +232,10 @@ class GIQLCluster(exp.Func):
         "predicate": False,  # pairwise boolean gate (current row vs PREV(col))
     }
 
+    # Inert today: the CLUSTER/MERGE transformers rewrite these nodes before the
+    # ExpandOperators pass runs, so the pass never sees a GIQLCluster to dispatch
+    # and this flag is not a live opt-in. It is forward-looking for #144, which
+    # migrates these operators onto the expander registry.
     GIQL_EXPAND = _EXPAND
 
     @classmethod
@@ -275,6 +279,10 @@ class GIQLMerge(exp.Func):
         "predicate": False,  # pairwise boolean gate (current row vs PREV(col))
     }
 
+    # Inert today: the CLUSTER/MERGE transformers rewrite these nodes before the
+    # ExpandOperators pass runs, so the pass never sees a GIQLMerge to dispatch
+    # and this flag is not a live opt-in. It is forward-looking for #144, which
+    # migrates these operators onto the expander registry.
     GIQL_EXPAND = _EXPAND
 
     @classmethod
