@@ -11,11 +11,15 @@ run on every machine and localize oracle bugs away from engine bugs.
 import math
 
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
 from tests.integration._oracle import assert_cross_target
 from tests.integration._oracle import normalize
 from tests.integration._oracle import resolve_routing
 from tests.integration._oracle import scalar
+
+pytestmark = pytest.mark.integration
 
 
 class _FakeNumpyScalar:
@@ -319,29 +323,43 @@ class TestAssertCrossTarget:
         with pytest.raises(AssertionError):
             assert_cross_target(results, normalize([("chr1", 5, 2)]))
 
-    def test_coercion_normalizes_type_but_preserves_value_diff(self):
-        """Test type coercion does not mask a genuine value difference.
+    def test_coercion_passes_when_coerced_value_matches_expected(self):
+        """Test type coercion lets a coerced scalar compare equal to a plain int.
 
         Given:
-            Targets whose values are numpy-like scalars equal to expected ints
-            in one case and differing in another.
+            Targets whose values are numpy-like scalars equal to the expected
+            plain ints once coerced.
         When:
             assert_cross_target() compares the coerced multisets.
         Then:
-            The equal case passes and the differing case raises — coercion
-            normalizes type without hiding a real difference.
+            It should pass — coercion normalizes type so the values match.
         """
         # Arrange
-        equal_rows = normalize([("chr1", _FakeNumpyScalar(1), _FakeNumpyScalar(2))])
-        diff_rows = normalize([("chr1", _FakeNumpyScalar(1), _FakeNumpyScalar(2))])
+        rows = normalize([("chr1", _FakeNumpyScalar(1), _FakeNumpyScalar(2))])
 
         # Act / Assert
         assert_cross_target(
-            {"generic": equal_rows, "duckdb": equal_rows}, normalize([("chr1", 1, 2)])
+            {"generic": rows, "duckdb": rows}, normalize([("chr1", 1, 2)])
         )
+
+    def test_coercion_preserves_genuine_value_difference(self):
+        """Test type coercion does not mask a genuine value difference.
+
+        Given:
+            Targets whose coerced values genuinely differ from expected.
+        When:
+            assert_cross_target() compares the coerced multisets.
+        Then:
+            It should raise — coercion normalizes type without hiding a real
+            difference.
+        """
+        # Arrange
+        rows = normalize([("chr1", _FakeNumpyScalar(1), _FakeNumpyScalar(2))])
+
+        # Act / Assert
         with pytest.raises(AssertionError):
             assert_cross_target(
-                {"generic": diff_rows, "duckdb": diff_rows},
+                {"generic": rows, "duckdb": rows},
                 normalize([("chr1", 1, 99)]),
             )
 
@@ -370,6 +388,49 @@ class TestAssertCrossTarget:
         message = str(excinfo.value)
         assert "engines disagree" in message
         assert "generic" in message and "duckdb" in message
+
+    def test_three_targets_all_agree_passes(self):
+        """Test three agreeing targets pass, mirroring the production spread.
+
+        Given:
+            Three targets (generic, datafusion, duckdb) returning identical rows
+            and a matching expectation — the real three-target run shape.
+        When:
+            assert_cross_target() runs.
+        Then:
+            It should not raise.
+        """
+        # Arrange
+        rows = normalize([("chr1", 1, 2)])
+        results = {"generic": rows, "datafusion": rows, "duckdb": rows}
+
+        # Act / Assert
+        assert_cross_target(results, normalize([("chr1", 1, 2)]))
+
+    def test_three_targets_last_diverges_raises(self):
+        """Test a divergence in only the LAST of three targets still raises.
+
+        Given:
+            Three targets where the first two agree but the last (duckdb)
+            returns a different row — the differential phase compares each target
+            against the reference, so a trailing divergence must not slip past.
+        When:
+            assert_cross_target() runs.
+        Then:
+            It should raise the engines-disagree error naming the divergent
+            target.
+        """
+        # Arrange
+        rows = normalize([("chr1", 1, 2)])
+        results = {
+            "generic": rows,
+            "datafusion": rows,
+            "duckdb": normalize([("chr1", 9, 9)]),
+        }
+
+        # Act / Assert
+        with pytest.raises(AssertionError, match="engines disagree"):
+            assert_cross_target(results, rows)
 
     def test_disagreement_checked_before_expectation(self):
         """Test the differential phase fires even when one target matches expected.
@@ -475,3 +536,78 @@ class TestResolveRouting:
         # Arrange / Act / Assert
         with pytest.raises(ValueError, match="Unknown target"):
             resolve_routing(("generic",), engines={"nope": "duckdb"})
+
+
+# Per-column-HOMOGENEOUS row strategy: column 0 is always text, columns 1-2 are
+# nullable ints. This keeps each column type-homogeneous so the property tests
+# exercise normal multiset behaviour rather than the mixed-type sort-key edge.
+_interval_rows = st.lists(
+    st.tuples(
+        st.text(max_size=5),
+        st.integers() | st.none(),
+        st.integers() | st.none(),
+    ),
+    max_size=8,
+)
+
+
+class TestNormalizeProperties:
+    """Property-based invariants of `normalize` (Tier-3, Hypothesis)."""
+
+    @given(_interval_rows)
+    def test_normalize_is_order_invariant(self, rows):
+        """Test normalize is invariant to input row ordering.
+
+        Given:
+            An arbitrary list of type-homogeneous rows and a shuffled copy.
+        When:
+            normalize() is applied to both orderings.
+        Then:
+            The two results should be identical — order-free multiset semantics.
+        """
+        # Arrange
+        shuffled = list(reversed(rows))
+
+        # Act / Assert
+        assert normalize(rows) == normalize(shuffled)
+
+    @given(_interval_rows)
+    def test_normalize_is_idempotent(self, rows):
+        """Test normalize applied twice equals normalize applied once.
+
+        Given:
+            An arbitrary list of type-homogeneous rows.
+        When:
+            normalize() is applied, then applied again to its own output.
+        Then:
+            The second application should leave the result unchanged.
+        """
+        # Arrange / Act
+        once = normalize(rows)
+        twice = normalize(once)
+
+        # Assert
+        assert once == twice
+
+
+class TestResolveRoutingProperties:
+    """Property-based totality of `resolve_routing` (Tier-3, Hypothesis)."""
+
+    @given(st.lists(st.text(max_size=10), max_size=5))
+    def test_resolve_routing_returns_dict_or_raises_value_error(self, targets):
+        """Test resolve_routing is total: it returns a dict or raises ValueError.
+
+        Given:
+            An arbitrary list of target-name strings (known or unknown).
+        When:
+            resolve_routing() resolves them.
+        Then:
+            It should either return a dict or raise ValueError — never any other
+            exception type.
+        """
+        # Arrange / Act / Assert
+        try:
+            result = resolve_routing(targets)
+        except ValueError:
+            return
+        assert isinstance(result, dict)
