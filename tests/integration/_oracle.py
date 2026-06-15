@@ -66,6 +66,11 @@ def scalar(value):
             return None
         if isinstance(value, float) and math.isnan(value):
             return None
+    # DataFusion promotes int64 -> float64 on NULL-bearing columns (1 -> 1.0).
+    # Coerce an integral float back to int so a NULL-bearing column compares
+    # type-stably against DuckDB's plain ints in the multiset.
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
     return value
 
 
@@ -77,7 +82,11 @@ def normalize(rows) -> list[tuple]:
     scalars so DuckDB and DataFusion (pandas) rows compare equal.
     """
     out = [tuple(scalar(v) for v in row) for row in rows]
-    return sorted(out, key=lambda r: tuple((v is None, v) for v in r))
+    # Include ``type(v).__name__`` in the key so a column carrying mixed scalar
+    # types sorts on a total order instead of raising ``TypeError`` on an
+    # ``int`` < ``str`` comparison. A genuine type divergence then surfaces as a
+    # clean multiset inequality rather than a crash.
+    return sorted(out, key=lambda r: tuple((v is None, type(v).__name__, v) for v in r))
 
 
 def resolve_routing(targets, engines=None) -> dict[str, tuple[str, str | None]]:
@@ -108,6 +117,10 @@ def resolve_routing(targets, engines=None) -> dict[str, tuple[str, str | None]]:
         If a target name is not a known target, or an override routes to an
         unknown engine.
     """
+    # Normalize to a tuple so a one-shot generator is not exhausted here and
+    # then silently empty when the fixture iterates ``targets`` again.
+    targets = tuple(targets)
+
     engine_for = dict(TARGET_ENGINE)
     if engines:
         for target, engine in engines.items():
@@ -159,6 +172,10 @@ def assert_cross_target(results, expected, sql_by_target=None) -> None:
     """
     sql_by_target = sql_by_target or {}
     run_targets = list(results)
+
+    # Guard against a vacuous pass: an empty ``results`` would skip both phases
+    # and never check ``expected`` at all.
+    assert run_targets, "oracle invoked with no targets"
 
     # Phase 1: engines must agree with each other (the differential oracle).
     if len(run_targets) > 1:
