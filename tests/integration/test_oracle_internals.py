@@ -129,7 +129,7 @@ class TestNormalize:
         # Assert
         assert result == [("chr1", 1, 2), ("chr1", 1, 2)]
 
-    def test_normalize_is_determinor_under_shuffle(self):
+    def test_normalize_is_deterministic_under_shuffle(self):
         """Test normalize yields an identical result under row shuffling.
 
         Given:
