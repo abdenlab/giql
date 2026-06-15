@@ -188,11 +188,22 @@ def register_record_batches(ctx, name, rows, schema, columns) -> None:
     The single pyarrow loader dance shared by :func:`run_datafusion` and the
     #132 ``datafusion_ctx`` fixture (Finding 8). ``columns`` is the
     ``(name, kind)`` schema; ``schema`` is the matching :class:`pyarrow.Schema`.
+
+    Empty ``rows`` need care: ``pa.table(...).to_batches()`` yields an EMPTY
+    batch *list* for zero rows, and ``SessionContext.register_record_batches``
+    PANICS on an empty partition (``index out of bounds`` in DataFusion's Rust
+    core). DuckDB sidesteps this with an ``if rows`` guard in :func:`run_duckdb`;
+    DataFusion has no such guard, so this helper synthesizes a single empty
+    record batch with the declared schema instead. This keeps empty-input cases
+    runnable on DataFusion (T4 pins both the panic and this guard).
     """
     import pyarrow as pa
 
     arrays = {col: [r[idx] for r in rows] for idx, (col, _kind) in enumerate(columns)}
-    ctx.register_record_batches(name, [pa.table(arrays, schema=schema).to_batches()])
+    batches = pa.table(arrays, schema=schema).to_batches()
+    if not batches:
+        batches = [pa.RecordBatch.from_pylist([], schema=schema)]
+    ctx.register_record_batches(name, [batches])
 
 
 def arrow_schema(columns):
