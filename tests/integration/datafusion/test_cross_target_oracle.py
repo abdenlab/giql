@@ -7,11 +7,20 @@ CONTAINS, WITHIN, and standalone NEAREST. No operator has been migrated to the
 expander registry yet (epic #137), so this lane locks in the verification path
 every later migration (#140-#144) will consume.
 
+For the non-join operators (DISTANCE, CONTAINS, WITHIN, ANY/ALL, CLUSTER,
+MERGE) the generic and datafusion targets emit byte-identical SQL and both run
+on the DataFusion engine, so the load-bearing comparison there is
+DataFusion-vs-DuckDB. Only the column-to-column INTERSECTS join produces
+genuinely divergent SQL across targets (the DuckDB IEJoin vs. the binned
+equi-join).
+
 NEAREST's expansion uses a correlated ``LATERAL`` subquery, which DataFusion has
 no physical plan for today; its generic-vs-duckdb equivalence case runs both on
-DuckDB, and the full three-target oracle is pinned as a strict xfail (#142) that
-auto-promotes when DataFusion gains correlated LATERAL — the one documented
-cross-target gap.
+DuckDB, and the full three-target oracle is pinned by a
+``pytest.raises(match="OuterReferenceColumn")`` test (#142) that fails loudly on
+an unrelated error and trips "DID NOT RAISE" — forcing conversion to a real
+identity test — when DataFusion gains correlated LATERAL. DISJOIN has an
+analogous pending-#153 gap (duplicate ``end`` output names).
 """
 
 import pytest
@@ -195,13 +204,8 @@ class TestCrossTargetOracleNearest:
             engines={"generic": "duckdb"},
         )
 
-    @pytest.mark.xfail(
-        strict=True,
-        raises=Exception,
-        reason="DataFusion lacks correlated LATERAL (OuterReferenceColumn) — #142",
-    )
-    def test_nearest_full_oracle_xfails_on_datafusion_lateral(self, cross_target_oracle):
-        """Test the full NEAREST oracle xfails on DataFusion's missing LATERAL.
+    def test_nearest_on_datafusion_unsupported_pending_142(self, cross_target_oracle):
+        """Test the full NEAREST oracle raises DataFusion's missing-LATERAL error.
 
         Given:
             The single-row NEAREST query and a candidate gene on chr1.
@@ -210,13 +214,14 @@ class TestCrossTargetOracleNearest:
             the correlated LATERAL on DataFusion, which has no physical plan.
         Then:
             DataFusion should raise its ``OuterReferenceColumn`` "not
-            implemented" error, pinning the gap as a strict xfail that
-            auto-promotes (XPASS -> fail) when #142 lands. An UNRELATED
-            DataFusion error must still fail loudly, so the match is narrowed
-            to the LATERAL signature before re-raising.
+            implemented" error. This pins the known #142 gap: the ``match``
+            narrows to the LATERAL signature so an unrelated/reworded DataFusion
+            error fails loudly, and a closed gap (no exception) trips pytest's
+            "DID NOT RAISE", forcing this to be converted into a real
+            cross-target identity test when DataFusion gains correlated LATERAL.
         """
-        # Arrange / Act
-        try:
+        # Arrange / Act / Assert
+        with pytest.raises(Exception, match="OuterReferenceColumn"):
             cross_target_oracle(
                 "SELECT a.chrom, a.start AS a_start, b.start AS b_start "
                 "FROM peaks a "
@@ -225,14 +230,6 @@ class TestCrossTargetOracleNearest:
                 genes=[("chr1", 280, 290)],
                 expected=[("chr1", 200, 280)],
             )
-        except Exception as exc:  # noqa: BLE001
-            message = str(exc).lower()
-            # Assert: narrow the xfail to the documented LATERAL gap so any
-            # unrelated DataFusion failure escapes and fails the test loudly.
-            assert "outerreferencecolumn" in message or "not implemented" in message, (
-                f"unexpected DataFusion error, not the LATERAL gap: {exc!r}"
-            )
-            raise
 
 
 class TestCrossTargetOracleIntersectsAnyAll:
@@ -342,6 +339,49 @@ class TestCrossTargetOracleDistance:
             peaks=[("chr1", 100, 200)],
             genes=[("chr1", 250, 300), ("chr1", 5000, 5100)],
             expected=[(100, 250)],
+        )
+
+    def test_distance_upstream_gap_b_precedes_a(self, cross_target_oracle):
+        """Test DISTANCE measures the upstream gap when B precedes A.
+
+        Given:
+            A peak and a gene that ends before the peak begins on the same
+            chromosome, exercising the ``ELSE`` (upstream-gap) CASE branch.
+        When:
+            A DISTANCE(a, b) < threshold join runs on every target.
+        Then:
+            Every target should return the pair, the gap being measured from B's
+            end to A's start.
+        """
+        # Arrange / Act / Assert
+        cross_target_oracle(
+            "SELECT a.start AS a_start, b.start AS b_start "
+            "FROM peaks a JOIN genes b ON a.chrom = b.chrom "
+            "WHERE DISTANCE(a.interval, b.interval) < 100",
+            peaks=[("chr1", 250, 300)],
+            genes=[("chr1", 100, 200)],
+            expected=[(250, 100)],
+        )
+
+    def test_distance_overlapping_pair_is_zero(self, cross_target_oracle):
+        """Test DISTANCE is zero for overlapping intervals.
+
+        Given:
+            A peak and a gene that overlap on the same chromosome, exercising the
+            overlap (``THEN 0``) CASE branch.
+        When:
+            A DISTANCE(a, b) < threshold join runs on every target.
+        Then:
+            Every target should return the pair, the overlap yielding distance 0.
+        """
+        # Arrange / Act / Assert
+        cross_target_oracle(
+            "SELECT a.start AS a_start, b.start AS b_start "
+            "FROM peaks a JOIN genes b ON a.chrom = b.chrom "
+            "WHERE DISTANCE(a.interval, b.interval) < 100",
+            peaks=[("chr1", 100, 300)],
+            genes=[("chr1", 200, 400)],
+            expected=[(100, 200)],
         )
 
     def test_distance_no_pair_within_threshold_returns_zero_rows(
@@ -462,7 +502,12 @@ class TestCrossTargetOracleMerge:
 
 
 class TestCrossTargetOracleDisjoin:
-    """DISJOIN behaviour: a DuckDB-only case plus the DataFusion duplicate-end gap."""
+    """DISJOIN: a DuckDB-only case plus the DataFusion duplicate-``end`` gap (#153).
+
+    The DataFusion gap is the unaliased duplicate ``t."end"`` columns in the
+    ``__giql_dj_cuts`` CTE UNION branches, which DataFusion rejects as non-unique
+    projection names (DuckDB tolerates them).
+    """
 
     def test_disjoin_splits_overlaps_on_duckdb(self, cross_target_oracle):
         """Test DISJOIN splits overlapping intervals at breakpoints on DuckDB.
@@ -489,31 +534,28 @@ class TestCrossTargetOracleDisjoin:
             targets=("duckdb",),
         )
 
-    @pytest.mark.xfail(
-        strict=True,
-        raises=Exception,
-        reason='DISJOIN CTE * passthrough emits duplicate t."end" columns — #145',
-    )
-    def test_disjoin_full_oracle_xfails_on_datafusion_duplicate_end(
-        self, cross_target_oracle
-    ):
-        """Test the full DISJOIN oracle xfails on DataFusion's duplicate-end names.
+    def test_disjoin_on_datafusion_unsupported_pending_153(self, cross_target_oracle):
+        """Test the full DISJOIN oracle raises DataFusion's duplicate-name error.
 
         Given:
             The same two overlapping intervals.
         When:
             The oracle runs all three targets — the datafusion target executes
-            DISJOIN's CTE ``*`` passthrough, which projects ``t."end"`` twice.
+            DISJOIN's ``__giql_dj_cuts`` CTE, whose UNION branches project the
+            unaliased ``t."end"`` column twice.
         Then:
             DataFusion should reject the projection for non-unique expression
-            names (DuckDB tolerates it). This is a strict xfail that promotes
-            when DISJOIN's passthrough is de-duplicated; an unrelated DataFusion
-            error escapes and fails loudly. Note: the cause is the duplicate
-            output-column name, NOT canonicalization or ``* REPLACE`` (no
-            ``* REPLACE`` is emitted today).
+            names (DuckDB tolerates it). This pins the known #153 gap: the
+            ``match`` narrows to the duplicate-output-name signature so an
+            unrelated/reworded DataFusion error fails loudly, and a closed gap
+            (no exception) trips pytest's "DID NOT RAISE", forcing this to be
+            converted into a real cross-target identity test when the duplicate
+            ``end`` columns in the ``__giql_dj_cuts`` UNION branches are aliased.
         """
-        # Arrange / Act
-        try:
+        # Arrange / Act / Assert
+        with pytest.raises(
+            Exception, match="Projections require unique expression names"
+        ):
             cross_target_oracle(
                 'SELECT chrom, start, "end", disjoin_start, disjoin_end '
                 "FROM DISJOIN(peaks)",
@@ -526,14 +568,6 @@ class TestCrossTargetOracleDisjoin:
                     ("chr1", 50, 150, 100, 150),
                 ],
             )
-        except Exception as exc:  # noqa: BLE001
-            message = str(exc).lower()
-            # Assert: narrow to the duplicate-column-name signature so unrelated
-            # DataFusion failures escape and fail the test loudly.
-            assert "unique" in message and "name" in message, (
-                f"unexpected DataFusion error, not the duplicate-end gap: {exc!r}"
-            )
-            raise
 
 
 class TestCrossTargetOracleDataShapes:
@@ -638,22 +672,25 @@ class TestCrossTargetOracleDataShapes:
         )
 
     def test_large_interval_spanning_bins_is_not_duplicated(self, cross_target_oracle):
-        """Test a multi-bin interval yields one pair, not duplicates.
+        """Test two intervals sharing many bins yield one pair, not duplicates.
 
         Given:
-            A peak spanning many join bins and a single gene inside it.
+            A peak (0-500000) and a gene (5000-495000) that co-occupy dozens of
+            shared join bins (the bin width is 10000), so the binned candidate
+            join produces the same pair once per shared bin.
         When:
             A column-to-column INTERSECTS join runs on every target.
         Then:
-            Every target should return exactly one pair — the binned join must
-            dedup the cross-bin candidates, the oracle's multiset compare being
-            what would catch a duplicate-row regression.
+            Every target should return exactly one pair — the binned join's
+            ``SELECT DISTINCT`` must collapse the duplicate cross-bin candidates,
+            and the oracle's multiset compare is what would catch a stripped
+            DISTINCT as a duplicate-row regression.
         """
         # Arrange / Act / Assert
         cross_target_oracle(
             "SELECT a.start AS a_start, b.start AS b_start "
             "FROM peaks a JOIN genes b ON a.interval INTERSECTS b.interval",
             peaks=[("chr1", 0, 500000)],
-            genes=[("chr1", 250000, 250100)],
-            expected=[(0, 250000)],
+            genes=[("chr1", 5000, 495000)],
+            expected=[(0, 5000)],
         )
