@@ -119,6 +119,13 @@ def cross_target_oracle():
         **table_data,
     ) -> dict[str, list[tuple]]:
         if tables is None:
+            if columns != DEFAULT_COLUMNS:
+                raise ValueError(
+                    "Custom 'columns' require an explicit 'tables=' list: the "
+                    "default table mapping registers chrom/start/end, which "
+                    "would silently mis-register the custom column names. Pass "
+                    "tables=[Table(name, ...)] for each table."
+                )
             tables = [_default_table(name, columns) for name in table_data]
 
         routing = resolve_routing(targets, engines)
