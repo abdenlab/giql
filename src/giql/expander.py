@@ -57,6 +57,7 @@ from sqlglot.helper import name_sequence
 
 from giql.resolver import META_KEY
 from giql.resolver import OperatorResolution
+from giql.resolver import ResolutionError
 from giql.table import Tables
 from giql.targets import GenericTarget
 from giql.targets import Target
@@ -76,11 +77,6 @@ __all__ = [
 #: leading double underscore keeps synthesized names clear of user identifiers,
 #: mirroring the ``__giql_canon_`` / ``__giql_dj_`` reserved prefixes.
 EXPAND_ALIAS_PREFIX = "__giql_x_"
-
-#: The GIQL operator expression classes the pass inspects. Membership alone does
-#: not opt an operator in: the per-class ``GIQL_EXPAND`` flag plus a registered
-#: expander do (see module docstring). Imported lazily inside the pass to avoid a
-#: module-level import cycle with :mod:`giql.expressions`.
 
 
 class ExpansionContext:
@@ -165,7 +161,10 @@ ExpanderFn = Callable[[exp.Expression, ExpansionContext], exp.Expression]
 
 def _as_callable(expander: OperatorExpander | ExpanderFn) -> ExpanderFn:
     """Normalize an expander to a plain ``(node, ctx) -> Expression`` callable."""
-    if isinstance(expander, OperatorExpander):
+    # ``@runtime_checkable`` only checks an ``expand`` attribute *exists*, so an
+    # object with a non-callable ``expand`` would pass the isinstance check; guard
+    # that the attribute is actually callable before trusting the protocol branch.
+    if isinstance(expander, OperatorExpander) and callable(expander.expand):
         return expander.expand
     if callable(expander):
         return expander
@@ -265,6 +264,20 @@ class ExpanderRegistry:
         """
         return key in self._expanders
 
+    def __len__(self) -> int:
+        """The number of registered ``(target, operator)`` entries.
+
+        Part of the public introspection surface (alongside ``in``): emptiness is
+        observable without reaching into private state, so a teardown fixture or
+        leak guard can assert the registry is clear via ``len(registry)`` or
+        ``bool(registry)``.
+        """
+        return len(self._expanders)
+
+    def __bool__(self) -> bool:
+        """Whether any expander is registered (``False`` when empty)."""
+        return bool(self._expanders)
+
 
 #: The process-wide registry the :func:`register` decorator writes to and the
 #: :class:`ExpandOperators` pass reads from. Empty as of this issue, so the pass
@@ -299,7 +312,19 @@ def register(
         A decorator that registers its argument and returns it unchanged, so the
         decorated object stays usable on its own.
     """
-    target_instance = target() if isinstance(target, type) else target
+    if isinstance(target, type):
+        try:
+            target_instance: Target = target()
+        except TypeError as exc:
+            raise TypeError(
+                f"register() could not instantiate target class {target.__name__!r} "
+                "with no arguments: a custom Target subclass with required fields "
+                "cannot be defaulted. Pass an instance (e.g. "
+                f"@register({target.__name__}(...), ...)) or give its fields "
+                "defaults so the class form can construct it."
+            ) from exc
+    else:
+        target_instance = target
 
     def decorator(
         expander: OperatorExpander | ExpanderFn,
@@ -310,8 +335,13 @@ def register(
     return decorator
 
 
+# The GIQL operator expression classes the pass inspects. Membership alone does
+# not opt an operator in: the per-class ``GIQL_EXPAND`` flag plus a registered
+# expander do (see module docstring). Imported lazily as a precaution; there is no
+# real cycle (``canonicalizer.py`` imports the same classes eagerly at module
+# level), so a later step may hoist these to module scope to match that sibling.
 def _giql_operators() -> tuple[type, ...]:
-    """Return the GIQL operator classes, imported lazily to avoid a cycle."""
+    """Return the GIQL operator classes, imported lazily as a precaution."""
     from giql.expressions import Contains
     from giql.expressions import GIQLCluster
     from giql.expressions import GIQLDisjoin
@@ -389,16 +419,54 @@ def expand_operators(
             continue
         pending.append((node, fn))
 
+    # Replace deepest-first: replacing an ancestor node detaches any collected
+    # descendant, whose later ``node.replace`` would be a silent no-op (the
+    # detached node's parent is gone), so the inner operator would never expand.
+    # Mutating leaves first keeps every still-collected ancestor attached. A
+    # detached node is skipped defensively as a second line of defence (#154).
+    pending.sort(key=lambda item: _node_depth(item[0]), reverse=True)
+
     for node, fn in pending:
+        if node is not expression and node.parent is None:
+            # An ancestor expansion already detached this node from the tree;
+            # replacing it would be a no-op, so skip it.
+            continue
         resolution = node.meta.get(META_KEY)
         if not isinstance(resolution, OperatorResolution):
-            resolution = None
+            # Pass 1 guarantees every operator node carries its resolution; a
+            # missing or malformed one is an internal invariant violation, not a
+            # user error, so fail loudly rather than minting a None-resolution
+            # context the expander would then dereference blindly.
+            raise ResolutionError(
+                f"{type(node).__name__} reached the ExpandOperators pass without "
+                "valid resolution metadata; pass 1 (resolve_operator_refs) must "
+                "run first and annotate every operator node."
+            )
         ctx = ExpansionContext(node, resolution, target, tables, alias_seq)
         replacement = fn(node, ctx)
+        if not isinstance(replacement, exp.Expression):
+            raise TypeError(
+                f"expander {fn!r} for {type(node).__name__} returned "
+                f"{type(replacement).__name__}, not exp.Expression"
+            )
         if replacement is not node:
             node.replace(replacement)
 
     return expression
+
+
+def _node_depth(node: exp.Expression) -> int:
+    """The number of ancestors above *node* (root is depth 0).
+
+    Used to order the collect-then-replace loop deepest-first so replacing an
+    ancestor never detaches a still-pending descendant before its own replace.
+    """
+    depth = 0
+    parent = node.parent
+    while parent is not None:
+        depth += 1
+        parent = parent.parent
+    return depth
 
 
 class ExpandOperators:
