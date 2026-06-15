@@ -55,12 +55,16 @@ def _record(label: str):
 
 @pytest.fixture
 def clean_registry():
-    """Isolate the process-wide REGISTRY, restoring its contents afterward."""
-    saved = dict(REGISTRY._expanders)
+    """Isolate the process-wide REGISTRY, leaving it empty afterward.
+
+    The registry is empty at import (the pass ships inert), so a test that opts
+    in clears on the way out; emptiness is asserted through the public
+    ``bool()``/``len()`` surface rather than private state.
+    """
+    assert not REGISTRY, "REGISTRY was non-empty entering clean_registry"
     REGISTRY.clear()
     yield REGISTRY
     REGISTRY.clear()
-    REGISTRY._expanders.update(saved)
 
 
 @pytest.fixture(autouse=True)
@@ -71,11 +75,33 @@ def _registry_leak_guard():
     every test, so a test that registers without cleaning up (a leak that would
     silently flip the no-op pass for a later test) fails loudly. Tests that
     register on the process-wide REGISTRY do so through ``clean_registry``, which
-    clears on the way out; this guard catches anything that bypasses it.
+    clears on the way out; this guard catches anything that bypasses it. Both
+    checks go through the public ``bool()`` surface (A5), not private state.
     """
-    assert not REGISTRY._expanders, "REGISTRY leaked into a test from a prior one"
+    assert not REGISTRY, "REGISTRY leaked into a test from a prior one"
     yield
-    assert not REGISTRY._expanders, "a test leaked a registration into REGISTRY"
+    assert not REGISTRY, "a test leaked a registration into REGISTRY"
+
+
+@pytest.fixture(autouse=True)
+def _expand_flag_leak_guard():
+    """Assert every operator's GIQL_EXPAND is restored at each test boundary.
+
+    The symmetric partner of the registry leak guard: each operator class ships
+    opted out (its own GIQL_EXPAND attribute is False), and a test that flips one
+    via ``_opted_in`` must restore it. A leaked opt-in would silently flip the
+    no-op pass for a later test, so this catches anything that bypasses the
+    exception-safe ``_opted_in`` manager.
+    """
+    for op in _OPERATOR_CLASSES:
+        assert op.__dict__.get("GIQL_EXPAND") is False, (
+            f"{op.__name__}.GIQL_EXPAND leaked into a test from a prior one"
+        )
+    yield
+    for op in _OPERATOR_CLASSES:
+        assert op.__dict__.get("GIQL_EXPAND") is False, (
+            f"a test leaked a GIQL_EXPAND opt-in on {op.__name__}"
+        )
 
 
 class _CountingExpander:
@@ -286,6 +312,29 @@ class TestExpanderRegistry:
         with pytest.raises(TypeError):
             registry.register(GenericTarget(), GIQLDisjoin, object())
 
+    def test_register_rejects_object_with_non_callable_expand(self):
+        """Test that an object whose expand attribute is not callable is rejected.
+
+        Given:
+            An object exposing an 'expand' attribute that is data, not a method,
+            so it passes the runtime-checkable protocol's attribute check.
+        When:
+            Registering it.
+        Then:
+            It should raise TypeError (the registry requires a callable expand,
+            not merely the attribute's presence).
+        """
+
+        # Arrange
+        class _BadExpander:
+            expand = "not callable"
+
+        registry = ExpanderRegistry()
+
+        # Act & assert
+        with pytest.raises(TypeError):
+            registry.register(GenericTarget(), GIQLDisjoin, _BadExpander())
+
 
 class TestExpanderRegistryFallbackGaps:
     """Edge cases of the registry fallback and op-scoped keying."""
@@ -390,7 +439,7 @@ class TestExpanderRegistryFallbackGaps:
         registry.unregister(DuckDBTarget(), GIQLDisjoin)
         assert (DuckDBTarget(), GIQLDisjoin) not in registry
 
-    def test_public_teardown_seam_resets_process_registry(self):
+    def test_public_teardown_seam_resets_process_registry(self, clean_registry):
         """Test that the public seam tears a custom registration off REGISTRY.
 
         Given:
@@ -1041,23 +1090,6 @@ class TestOperatorOptOut:
         # Assert
         assert flag is False
 
-    def test_expand_sentinel_is_false(self):
-        """Test that the shared _EXPAND opt-out sentinel is False.
-
-        Given:
-            The expressions module's _EXPAND sentinel that every operator's
-            GIQL_EXPAND defaults to.
-        When:
-            Reading it.
-        Then:
-            It should be False, the single source the per-class flags inherit.
-        """
-        # Arrange & act
-        from giql.expressions import _EXPAND
-
-        # Assert
-        assert _EXPAND is False
-
 
 class TestOptedInRestoresFlag:
     """The _opted_in helper restores GIQL_EXPAND even when its body raises."""
@@ -1366,6 +1398,10 @@ class TestTranspileExpanderDispatch:
         captured = {}
 
         def _capture(node, ctx):
+            # Snapshot the node's SQL *at dispatch* — canonicalization ran before
+            # this pass, so a non-canonical target is already wrapped in a
+            # __giql_canon_ CTE the expander sees in its operand.
+            captured["node_sql"] = ctx.node.sql(dialect=GIQLDialect)
             captured["resolution"] = ctx.resolution
             # Returning the node unchanged leaves the canonical CTE in the tree.
             return node
@@ -1375,11 +1411,11 @@ class TestTranspileExpanderDispatch:
 
         # Act
         with _opted_in(GIQLDisjoin):
-            sql = transpile("SELECT * FROM DISJOIN(variants)", tables=[one_based])
+            transpile("SELECT * FROM DISJOIN(variants)", tables=[one_based])
 
         # Assert
         assert captured["resolution"] is not None
-        assert "__giql_canon_" in sql
+        assert "__giql_canon_" in captured["node_sql"]
 
     def test_replacement_reaches_generator(self, clean_registry):
         """Test that the expander's replacement node is what the generator renders.
@@ -1483,10 +1519,11 @@ class TestExpandOperatorsWalk:
 
         # Act
         with _opted_in(GIQLDisjoin):
-            pass_.transform(ast)
+            result = pass_.transform(ast)
 
         # Assert
         assert len(counting.calls) == 1
+        assert not list(result.find_all(GIQLDisjoin))
 
     @pytest.mark.parametrize(
         "query",
@@ -1519,10 +1556,11 @@ class TestExpandOperatorsWalk:
 
         # Act
         with _opted_in(Intersects):
-            pass_.transform(ast)
+            result = pass_.transform(ast)
 
         # Assert
         assert len(counting.calls) == 1
+        assert not list(result.find_all(Intersects))
 
     def test_walk_replacement_serializes_through_generator(self, clean_registry):
         """Test that the pass's replacement serializes cleanly to SQL.
@@ -1679,16 +1717,107 @@ class TestExpandOperatorsWalk:
         assert seen[0] != seen[1]
         assert all(a.startswith(EXPAND_ALIAS_PREFIX) for a in seen)
 
+    def test_walk_expands_inner_before_outer_replaces_subtree(self, clean_registry):
+        """Test that a nested operator expands into the live tree before its ancestor.
+
+        Given:
+            An outer DISJOIN whose reference subquery contains an inner DISJOIN,
+            both flagged. The outer's expander returns a fresh node that does NOT
+            re-attach the inner subtree, and inspects its own subtree so the
+            recorded order reveals whether the inner had already expanded when the
+            outer ran.
+        When:
+            Running the pass.
+        Then:
+            BOTH operators expand and the outer sees the inner already gone — the
+            deepest-first order expands the inner into the live tree before the
+            outer replaces it. Under the former outer-first order
+            the outer replacement detached the still-pending inner, whose later
+            replace() landed in a discarded subtree, so the inner never reached
+            the live tree (#154). The recorded order pins the discriminator: the
+            inner must expand first.
+        """
+        # Arrange
+        order = []
+        tables = _tables(("variants", "genes"))
+        ast = _prepare(
+            "SELECT * FROM "
+            "DISJOIN(variants, reference := (SELECT * FROM DISJOIN(genes)))",
+            tables,
+        )
+        # Identify the outer node up front: it is the one carrying a descendant
+        # DISJOIN. Tag by identity so the label survives the inner's replacement.
+        outer = next(
+            n for n in ast.find_all(GIQLDisjoin) if list(n.find_all(GIQLDisjoin))[1:]
+        )
+
+        def _expander(node, ctx):
+            if node is outer:
+                # When the outer runs, the inner must already be gone from the
+                # outer's subtree (deepest-first expanded and replaced it). Under
+                # the old outer-first order an un-expanded inner DISJOIN would
+                # still be present here.
+                order.append(
+                    "outer_sees_no_inner"
+                    if not list(node.find_all(GIQLDisjoin))[1:]
+                    else "outer_sees_inner"
+                )
+                return exp.column("EXPANDED_outer")
+            order.append("inner")
+            return exp.column("EXPANDED_inner")
+
+        clean_registry.register(GenericTarget(), GIQLDisjoin, _expander)
+        pass_ = ExpandOperators(GenericTarget(), tables, clean_registry)
+
+        # Act
+        with _opted_in(GIQLDisjoin):
+            result = pass_.transform(ast)
+
+        # Assert
+        # The inner expands first, into the live tree, so the outer sees it gone.
+        assert order == ["inner", "outer_sees_no_inner"]
+        assert not list(result.find_all(GIQLDisjoin))
+
+    def test_transform_raises_on_node_missing_resolution(self, clean_registry):
+        """Test that the pass raises when an operator lacks resolution metadata.
+
+        Given:
+            A flagged DISJOIN whose pass-1 resolution metadata has been stripped
+            (an internal invariant violation), with a registered expander.
+        When:
+            Running the pass.
+        Then:
+            It raises ResolutionError rather than dispatching with a None
+            resolution (pass 1 must annotate every operator node).
+        """
+        # Arrange
+        from giql.resolver import META_KEY
+        from giql.resolver import ResolutionError
+
+        clean_registry.register(GenericTarget(), GIQLDisjoin, _record("x"))
+        tables = _tables()
+        ast = _prepare("SELECT * FROM DISJOIN(variants)", tables)
+        for node in ast.find_all(GIQLDisjoin):
+            node.meta.pop(META_KEY, None)
+        pass_ = ExpandOperators(GenericTarget(), tables, clean_registry)
+
+        # Act & assert
+        with _opted_in(GIQLDisjoin):
+            with pytest.raises(ResolutionError):
+                pass_.transform(ast)
+
     def test_lazy_import_has_no_cycle_in_fresh_process(self):
         """Test that importing the expander module standalone raises no cycle.
 
         Given:
             A fresh Python process with nothing pre-imported.
         When:
-            Importing giql.expander and calling its lazy operator accessor.
+            Importing giql.expander and running its public expand_operators pass
+            over a parsed operator AST.
         Then:
-            It imports and resolves the nine operator classes without an import
-            cycle (the lazy _giql_operators import breaks the module cycle).
+            It imports and runs the inert pass without an import cycle, leaving at
+            least one operator node intact (the empty registry is a no-op), so the
+            lazy operator import resolves through a public entry point.
         """
         # Arrange
         import os
@@ -1696,9 +1825,17 @@ class TestExpandOperatorsWalk:
         import sys
 
         code = (
-            "import giql.expander as e; "
-            "ops = e._giql_operators(); "
-            "assert len(ops) == 9, ops; "
+            "from giql.expander import expand_operators, ExpanderRegistry; "
+            "from giql.expressions import GIQLDisjoin; "
+            "from giql.dialect import GIQLDialect; "
+            "from giql.table import Table, Tables; "
+            "from giql.targets import GenericTarget; "
+            "from sqlglot import parse_one; "
+            "t = Tables(); t.register('variants', Table('variants')); "
+            "ast = parse_one('SELECT * FROM DISJOIN(variants)', dialect=GIQLDialect); "
+            "out = expand_operators(ast, GenericTarget(), t, ExpanderRegistry()); "
+            "ops = list(out.find_all(GIQLDisjoin)); "
+            "assert len(ops) >= 1, ops; "
             "print('ok')"
         )
         # Strip coverage's subprocess auto-start hooks so the child is a genuinely
