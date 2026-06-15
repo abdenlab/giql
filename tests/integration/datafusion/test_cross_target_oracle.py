@@ -8,8 +8,10 @@ expander registry yet (epic #137), so this lane locks in the verification path
 every later migration (#140-#144) will consume.
 
 NEAREST's expansion uses a correlated ``LATERAL`` subquery, which DataFusion has
-no physical plan for today; its case therefore restricts the oracle to the
-DuckDB-executed targets and is the one documented cross-target gap.
+no physical plan for today; its generic-vs-duckdb equivalence case runs both on
+DuckDB, and the full three-target oracle is pinned as a strict xfail (#142) that
+auto-promotes when DataFusion gains correlated LATERAL — the one documented
+cross-target gap.
 """
 
 import pytest
@@ -17,6 +19,8 @@ import pytest
 pytest.importorskip("duckdb")
 pytest.importorskip("datafusion")
 pytest.importorskip("pyarrow")
+
+from giql import Table  # noqa: E402
 
 pytestmark = pytest.mark.integration
 
@@ -229,3 +233,427 @@ class TestCrossTargetOracleNearest:
                 f"unexpected DataFusion error, not the LATERAL gap: {exc!r}"
             )
             raise
+
+
+class TestCrossTargetOracleIntersectsAnyAll:
+    """INTERSECTS ANY/ALL identity across all targets (T2)."""
+
+    def test_intersects_any_returns_rows_matching_either_range(
+        self, cross_target_oracle
+    ):
+        """Test INTERSECTS ANY returns rows overlapping at least one range.
+
+        Given:
+            Peaks overlapping the first range, the second range, neither, and a
+            different chromosome.
+        When:
+            An INTERSECTS ANY query over two ranges runs on every target.
+        Then:
+            Every target should return exactly the two peaks overlapping a
+            listed range, in agreement.
+        """
+        # Arrange / Act / Assert
+        cross_target_oracle(
+            'SELECT chrom, start, "end" FROM peaks '
+            "WHERE interval INTERSECTS ANY('chr1:1000-2000', 'chr1:5000-6000')",
+            peaks=[
+                ("chr1", 1500, 1800),
+                ("chr1", 5500, 5600),
+                ("chr1", 3000, 3100),
+                ("chr2", 1500, 1800),
+            ],
+            expected=[("chr1", 1500, 1800), ("chr1", 5500, 5600)],
+        )
+
+    def test_intersects_any_no_match_returns_zero_rows(self, cross_target_oracle):
+        """Test INTERSECTS ANY with no overlapping peak returns zero rows.
+
+        Given:
+            A peak overlapping neither listed range.
+        When:
+            The INTERSECTS ANY query runs on every target.
+        Then:
+            Every target should return zero rows in agreement.
+        """
+        # Arrange / Act / Assert
+        cross_target_oracle(
+            'SELECT chrom, start, "end" FROM peaks '
+            "WHERE interval INTERSECTS ANY('chr1:1000-2000', 'chr1:5000-6000')",
+            peaks=[("chr1", 8000, 8100)],
+            expected=[],
+        )
+
+    def test_intersects_all_returns_rows_matching_every_range(self, cross_target_oracle):
+        """Test INTERSECTS ALL returns rows overlapping every listed range.
+
+        Given:
+            One peak overlapping both ranges and one overlapping neither.
+        When:
+            An INTERSECTS ALL query over two ranges runs on every target.
+        Then:
+            Every target should return only the peak overlapping both ranges.
+        """
+        # Arrange / Act / Assert
+        cross_target_oracle(
+            'SELECT chrom, start, "end" FROM peaks '
+            "WHERE interval INTERSECTS ALL('chr1:1000-2000', 'chr1:1500-1700')",
+            peaks=[("chr1", 1400, 1800), ("chr1", 100, 200)],
+            expected=[("chr1", 1400, 1800)],
+        )
+
+    def test_intersects_all_no_full_match_returns_zero_rows(self, cross_target_oracle):
+        """Test INTERSECTS ALL returns zero rows when no peak overlaps all ranges.
+
+        Given:
+            Peaks each overlapping only one of the two ranges.
+        When:
+            The INTERSECTS ALL query runs on every target.
+        Then:
+            Every target should return zero rows in agreement.
+        """
+        # Arrange / Act / Assert
+        cross_target_oracle(
+            'SELECT chrom, start, "end" FROM peaks '
+            "WHERE interval INTERSECTS ALL('chr1:1000-1200', 'chr1:5000-6000')",
+            peaks=[("chr1", 1050, 1100), ("chr1", 5050, 5100)],
+            expected=[],
+        )
+
+
+class TestCrossTargetOracleDistance:
+    """DISTANCE column-to-column identity across all targets (T2)."""
+
+    def test_distance_column_to_column_filters_near_pairs(self, cross_target_oracle):
+        """Test a column-to-column DISTANCE predicate agrees across targets.
+
+        Given:
+            A peak and two genes: one within the distance threshold and one far
+            beyond it on the same chromosome.
+        When:
+            A DISTANCE(a, b) < threshold join runs on every target.
+        Then:
+            Every target should return only the near pair.
+        """
+        # Arrange / Act / Assert
+        cross_target_oracle(
+            "SELECT a.start AS a_start, b.start AS b_start "
+            "FROM peaks a JOIN genes b ON a.chrom = b.chrom "
+            "WHERE DISTANCE(a.interval, b.interval) < 100",
+            peaks=[("chr1", 100, 200)],
+            genes=[("chr1", 250, 300), ("chr1", 5000, 5100)],
+            expected=[(100, 250)],
+        )
+
+    def test_distance_no_pair_within_threshold_returns_zero_rows(
+        self, cross_target_oracle
+    ):
+        """Test a column-to-column DISTANCE predicate with no near pair is empty.
+
+        Given:
+            A peak and a single gene beyond the distance threshold.
+        When:
+            The DISTANCE join runs on every target.
+        Then:
+            Every target should return zero rows in agreement.
+        """
+        # Arrange / Act / Assert
+        cross_target_oracle(
+            "SELECT a.start AS a_start, b.start AS b_start "
+            "FROM peaks a JOIN genes b ON a.chrom = b.chrom "
+            "WHERE DISTANCE(a.interval, b.interval) < 5",
+            peaks=[("chr1", 100, 200)],
+            genes=[("chr1", 5000, 5100)],
+            expected=[],
+        )
+
+
+class TestCrossTargetOracleCluster:
+    """CLUSTER identity across all targets (T2)."""
+
+    def test_cluster_assigns_shared_ids_to_overlapping_runs(self, cross_target_oracle):
+        """Test CLUSTER assigns identical run ids across targets.
+
+        Given:
+            Two overlapping intervals and one isolated interval on chr1.
+        When:
+            A CLUSTER(interval) projection runs on every target.
+        Then:
+            Every target should assign cluster id 1 to the overlapping run and 2
+            to the isolated interval, in agreement.
+        """
+        # Arrange / Act / Assert
+        cross_target_oracle(
+            'SELECT chrom, start, "end", CLUSTER(interval) AS cid FROM peaks',
+            peaks=[
+                ("chr1", 100, 200),
+                ("chr1", 150, 300),
+                ("chr1", 5000, 6000),
+            ],
+            expected=[
+                ("chr1", 100, 200, 1),
+                ("chr1", 150, 300, 1),
+                ("chr1", 5000, 6000, 2),
+            ],
+        )
+
+    def test_cluster_empty_input_returns_zero_rows(self, cross_target_oracle):
+        """Test CLUSTER over an empty table returns zero rows on every target.
+
+        Given:
+            An empty peaks table.
+        When:
+            The CLUSTER projection runs on every target (DataFusion via the
+            synthesized empty record batch).
+        Then:
+            Every target should return zero rows in agreement.
+        """
+        # Arrange / Act / Assert
+        cross_target_oracle(
+            'SELECT chrom, start, "end", CLUSTER(interval) AS cid FROM peaks',
+            peaks=[],
+            expected=[],
+        )
+
+
+class TestCrossTargetOracleMerge:
+    """MERGE identity across all targets (T2)."""
+
+    def test_merge_collapses_overlapping_intervals(self, cross_target_oracle):
+        """Test MERGE collapses overlapping intervals identically across targets.
+
+        Given:
+            Two overlapping intervals and one isolated interval on chr1.
+        When:
+            A MERGE(interval) query runs on every target.
+        Then:
+            Every target should return the merged span and the isolated
+            interval, in agreement.
+        """
+        # Arrange / Act / Assert
+        cross_target_oracle(
+            "SELECT MERGE(interval) FROM peaks",
+            tables=[Table("peaks")],
+            peaks=[
+                ("chr1", 100, 200),
+                ("chr1", 150, 300),
+                ("chr1", 5000, 6000),
+            ],
+            expected=[("chr1", 100, 300), ("chr1", 5000, 6000)],
+        )
+
+    def test_merge_empty_input_returns_zero_rows(self, cross_target_oracle):
+        """Test MERGE over an empty table returns zero rows on every target.
+
+        Given:
+            An empty peaks table.
+        When:
+            The MERGE query runs on every target (DataFusion via the synthesized
+            empty record batch).
+        Then:
+            Every target should return zero rows in agreement.
+        """
+        # Arrange / Act / Assert
+        cross_target_oracle(
+            "SELECT MERGE(interval) FROM peaks",
+            tables=[Table("peaks")],
+            peaks=[],
+            expected=[],
+        )
+
+
+class TestCrossTargetOracleDisjoin:
+    """DISJOIN behaviour: a DuckDB-only case plus the DataFusion duplicate-end gap."""
+
+    def test_disjoin_splits_overlaps_on_duckdb(self, cross_target_oracle):
+        """Test DISJOIN splits overlapping intervals at breakpoints on DuckDB.
+
+        Given:
+            Two overlapping intervals on chr1.
+        When:
+            A DISJOIN query runs on the duckdb target only.
+        Then:
+            DuckDB should return each original interval paired with the
+            sub-segments cut at every breakpoint.
+        """
+        # Arrange / Act / Assert
+        cross_target_oracle(
+            'SELECT chrom, start, "end", disjoin_start, disjoin_end FROM DISJOIN(peaks)',
+            tables=[Table("peaks")],
+            peaks=[("chr1", 0, 100), ("chr1", 50, 150)],
+            expected=[
+                ("chr1", 0, 100, 0, 50),
+                ("chr1", 0, 100, 50, 100),
+                ("chr1", 50, 150, 50, 100),
+                ("chr1", 50, 150, 100, 150),
+            ],
+            targets=("duckdb",),
+        )
+
+    @pytest.mark.xfail(
+        strict=True,
+        raises=Exception,
+        reason='DISJOIN CTE * passthrough emits duplicate t."end" columns — #145',
+    )
+    def test_disjoin_full_oracle_xfails_on_datafusion_duplicate_end(
+        self, cross_target_oracle
+    ):
+        """Test the full DISJOIN oracle xfails on DataFusion's duplicate-end names.
+
+        Given:
+            The same two overlapping intervals.
+        When:
+            The oracle runs all three targets — the datafusion target executes
+            DISJOIN's CTE ``*`` passthrough, which projects ``t."end"`` twice.
+        Then:
+            DataFusion should reject the projection for non-unique expression
+            names (DuckDB tolerates it). This is a strict xfail that promotes
+            when DISJOIN's passthrough is de-duplicated; an unrelated DataFusion
+            error escapes and fails loudly. Note: the cause is the duplicate
+            output-column name, NOT canonicalization or ``* REPLACE`` (no
+            ``* REPLACE`` is emitted today).
+        """
+        # Arrange / Act
+        try:
+            cross_target_oracle(
+                'SELECT chrom, start, "end", disjoin_start, disjoin_end '
+                "FROM DISJOIN(peaks)",
+                tables=[Table("peaks")],
+                peaks=[("chr1", 0, 100), ("chr1", 50, 150)],
+                expected=[
+                    ("chr1", 0, 100, 0, 50),
+                    ("chr1", 0, 100, 50, 100),
+                    ("chr1", 50, 150, 50, 100),
+                    ("chr1", 50, 150, 100, 150),
+                ],
+            )
+        except Exception as exc:  # noqa: BLE001
+            message = str(exc).lower()
+            # Assert: narrow to the duplicate-column-name signature so unrelated
+            # DataFusion failures escape and fail the test loudly.
+            assert "unique" in message and "name" in message, (
+                f"unexpected DataFusion error, not the duplicate-end gap: {exc!r}"
+            )
+            raise
+
+
+class TestCrossTargetOracleDataShapes:
+    """Data-shape coverage for the oracle (T3)."""
+
+    def test_multi_chrom_join_does_not_cross_chromosomes(self, cross_target_oracle):
+        """Test a multi-chromosome join keeps overlaps within each chromosome.
+
+        Given:
+            Peaks on chr1 and chr2 and genes on chr1, chr2, and chr3 where only
+            same-chromosome pairs overlap by coordinate.
+        When:
+            A column-to-column INTERSECTS join runs on every target.
+        Then:
+            Every target should return only the same-chromosome overlaps and
+            never a cross-chromosome pair.
+        """
+        # Arrange / Act / Assert
+        cross_target_oracle(
+            "SELECT a.chrom AS chrom, a.start AS a_start, b.start AS b_start "
+            "FROM peaks a JOIN genes b ON a.interval INTERSECTS b.interval",
+            peaks=[("chr1", 100, 500), ("chr2", 100, 500)],
+            genes=[("chr1", 300, 400), ("chr2", 300, 400), ("chr3", 300, 400)],
+            expected=[("chr1", 100, 300), ("chr2", 100, 300)],
+        )
+
+    def test_join_path_with_no_overlap_returns_zero_rows(self, cross_target_oracle):
+        """Test the JOIN path returns zero rows when nothing overlaps.
+
+        Given:
+            A peak and a gene that do not overlap.
+        When:
+            A column-to-column INTERSECTS join runs on every target.
+        Then:
+            Every target should return zero rows in agreement.
+        """
+        # Arrange / Act / Assert
+        cross_target_oracle(
+            "SELECT a.start AS a_start, b.start AS b_start "
+            "FROM peaks a JOIN genes b ON a.interval INTERSECTS b.interval",
+            peaks=[("chr1", 100, 200)],
+            genes=[("chr1", 5000, 6000)],
+            expected=[],
+        )
+
+    def test_empty_input_table_returns_zero_rows(self, cross_target_oracle):
+        """Test an empty input table yields zero rows on every target.
+
+        Given:
+            An empty peaks table.
+        When:
+            A literal INTERSECTS query runs on every target — DataFusion
+            registers the empty table via the synthesized empty record batch.
+        Then:
+            Every target should return zero rows in agreement.
+        """
+        # Arrange / Act / Assert
+        cross_target_oracle(
+            'SELECT chrom, start, "end" FROM peaks '
+            "WHERE interval INTERSECTS 'chr1:1000-2000'",
+            peaks=[],
+            expected=[],
+        )
+
+    def test_half_open_touching_intervals_do_not_overlap(self, cross_target_oracle):
+        """Test half-open adjacent intervals (end == start) do not overlap.
+
+        Given:
+            A peak ending exactly where a gene begins (half-open adjacency).
+        When:
+            A column-to-column INTERSECTS join runs on every target.
+        Then:
+            Every target should return zero rows — touching is not overlap under
+            half-open semantics.
+        """
+        # Arrange / Act / Assert
+        cross_target_oracle(
+            "SELECT a.start AS a_start, b.start AS b_start "
+            "FROM peaks a JOIN genes b ON a.interval INTERSECTS b.interval",
+            peaks=[("chr1", 100, 200)],
+            genes=[("chr1", 200, 300)],
+            expected=[],
+        )
+
+    def test_one_base_pair_overlap_matches(self, cross_target_oracle):
+        """Test a single-base-pair overlap is counted as an overlap.
+
+        Given:
+            A peak extending one base past a gene's start.
+        When:
+            A column-to-column INTERSECTS join runs on every target.
+        Then:
+            Every target should return the single overlapping pair.
+        """
+        # Arrange / Act / Assert
+        cross_target_oracle(
+            "SELECT a.start AS a_start, b.start AS b_start "
+            "FROM peaks a JOIN genes b ON a.interval INTERSECTS b.interval",
+            peaks=[("chr1", 100, 201)],
+            genes=[("chr1", 200, 300)],
+            expected=[(100, 200)],
+        )
+
+    def test_large_interval_spanning_bins_is_not_duplicated(self, cross_target_oracle):
+        """Test a multi-bin interval yields one pair, not duplicates.
+
+        Given:
+            A peak spanning many join bins and a single gene inside it.
+        When:
+            A column-to-column INTERSECTS join runs on every target.
+        Then:
+            Every target should return exactly one pair — the binned join must
+            dedup the cross-bin candidates, the oracle's multiset compare being
+            what would catch a duplicate-row regression.
+        """
+        # Arrange / Act / Assert
+        cross_target_oracle(
+            "SELECT a.start AS a_start, b.start AS b_start "
+            "FROM peaks a JOIN genes b ON a.interval INTERSECTS b.interval",
+            peaks=[("chr1", 0, 500000)],
+            genes=[("chr1", 250000, 250100)],
+            expected=[(0, 250000)],
+        )
