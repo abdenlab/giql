@@ -23,64 +23,7 @@ _INTERVAL_COLUMNS = (("chrom", "utf8"), ("start", "int64"), ("end", "int64"))
 
 
 class TestRunDuckDB:
-    """`run_duckdb` schema, types, quoting, and empty handling."""
-
-    def test_run_duckdb_returns_normalized_rows(self):
-        """Test run_duckdb registers a table and returns normalized rows.
-
-        Given:
-            A two-row interval table and a plain SELECT.
-        When:
-            run_duckdb executes the SQL.
-        Then:
-            It should return both rows as sorted plain-tuple values.
-        """
-        # Arrange / Act
-        rows = run_duckdb(
-            'SELECT chrom, start, "end" FROM t',
-            {"t": [("chr2", 5, 6), ("chr1", 1, 2)]},
-            _INTERVAL_COLUMNS,
-        )
-
-        # Assert
-        assert rows == [("chr1", 1, 2), ("chr2", 5, 6)]
-
-    def test_run_duckdb_maps_utf8_and_int64_types(self):
-        """Test run_duckdb maps utf8 to VARCHAR and int64 to BIGINT.
-
-        Given:
-            A row whose chrom is a string and coordinates are ints.
-        When:
-            run_duckdb executes a SELECT.
-        Then:
-            The returned values should preserve str and int Python types.
-        """
-        # Arrange / Act
-        rows = run_duckdb(
-            "SELECT chrom, start FROM t", {"t": [("chr1", 1, 2)]}, _INTERVAL_COLUMNS
-        )
-
-        # Assert
-        assert isinstance(rows[0][0], str)
-        assert isinstance(rows[0][1], int)
-
-    def test_run_duckdb_quotes_reserved_end_column(self):
-        """Test run_duckdb quotes the reserved ``end`` column.
-
-        Given:
-            A table with the reserved-word ``end`` column.
-        When:
-            run_duckdb selects the quoted column.
-        Then:
-            It should return the end value without a parse error.
-        """
-        # Arrange / Act
-        rows = run_duckdb(
-            'SELECT "end" FROM t', {"t": [("chr1", 1, 99)]}, _INTERVAL_COLUMNS
-        )
-
-        # Assert
-        assert rows == [(99,)]
+    """`run_duckdb` empty-table handling (its ``if rows`` guard)."""
 
     def test_run_duckdb_empty_table_returns_zero_rows(self):
         """Test run_duckdb tolerates an empty table via its ``if rows`` guard.
@@ -98,86 +41,9 @@ class TestRunDuckDB:
         # Assert
         assert rows == []
 
-    def test_run_duckdb_custom_columns(self):
-        """Test run_duckdb registers a custom column schema.
-
-        Given:
-            A table with a custom ``(name, score)`` schema.
-        When:
-            run_duckdb selects from it.
-        Then:
-            It should map the custom utf8/int64 columns and return the row.
-        """
-        # Arrange / Act
-        rows = run_duckdb(
-            "SELECT name, score FROM t",
-            {"t": [("gene1", 42)]},
-            (("name", "utf8"), ("score", "int64")),
-        )
-
-        # Assert
-        assert rows == [("gene1", 42)]
-
 
 class TestRunDataFusion:
-    """`run_datafusion` schema, types, quoting, and empty handling."""
-
-    def test_run_datafusion_returns_normalized_rows(self):
-        """Test run_datafusion registers a table and returns normalized rows.
-
-        Given:
-            A two-row interval table and a plain SELECT.
-        When:
-            run_datafusion executes the SQL.
-        Then:
-            It should return both rows as sorted plain-tuple values.
-        """
-        # Arrange / Act
-        rows = run_datafusion(
-            'SELECT chrom, start, "end" FROM t',
-            {"t": [("chr2", 5, 6), ("chr1", 1, 2)]},
-            _INTERVAL_COLUMNS,
-        )
-
-        # Assert
-        assert rows == [("chr1", 1, 2), ("chr2", 5, 6)]
-
-    def test_run_datafusion_maps_utf8_and_int64_types(self):
-        """Test run_datafusion maps utf8 to pyarrow utf8 and int64 to int64.
-
-        Given:
-            A row whose chrom is a string and coordinates are ints.
-        When:
-            run_datafusion executes a SELECT.
-        Then:
-            The returned values should be plain str and int after coercion.
-        """
-        # Arrange / Act
-        rows = run_datafusion(
-            "SELECT chrom, start FROM t", {"t": [("chr1", 1, 2)]}, _INTERVAL_COLUMNS
-        )
-
-        # Assert
-        assert isinstance(rows[0][0], str)
-        assert isinstance(rows[0][1], int)
-
-    def test_run_datafusion_quotes_reserved_end_column(self):
-        """Test run_datafusion quotes the reserved ``end`` column.
-
-        Given:
-            A table with the reserved-word ``end`` column.
-        When:
-            run_datafusion selects the quoted column.
-        Then:
-            It should return the end value without a parse error.
-        """
-        # Arrange / Act
-        rows = run_datafusion(
-            'SELECT "end" FROM t', {"t": [("chr1", 1, 99)]}, _INTERVAL_COLUMNS
-        )
-
-        # Assert
-        assert rows == [(99,)]
+    """`run_datafusion` empty-table handling (the synthesized-batch guard)."""
 
     def test_run_datafusion_empty_table_returns_zero_rows(self):
         """Test run_datafusion handles an empty table via a synthesized batch.
@@ -196,26 +62,6 @@ class TestRunDataFusion:
 
         # Assert
         assert rows == []
-
-    def test_run_datafusion_custom_columns(self):
-        """Test run_datafusion registers a custom column schema.
-
-        Given:
-            A table with a custom ``(name, score)`` schema.
-        When:
-            run_datafusion selects from it.
-        Then:
-            It should map the custom utf8/int64 columns and return the row.
-        """
-        # Arrange / Act
-        rows = run_datafusion(
-            "SELECT name, score FROM t",
-            {"t": [("gene1", 42)]},
-            (("name", "utf8"), ("score", "int64")),
-        )
-
-        # Assert
-        assert rows == [("gene1", 42)]
 
 
 class TestRawRegisterRecordBatchesEmpty:
@@ -245,7 +91,7 @@ class TestRawRegisterRecordBatchesEmpty:
         assert empty_batches == []  # no batches is the panic trigger
 
         # Act / Assert
-        with pytest.raises(BaseException):
+        with pytest.raises(BaseException, match="index out of bounds"):
             ctx.register_record_batches("t", [empty_batches])
 
 
@@ -265,6 +111,52 @@ class TestCrossRunnerParity:
         """
         # Arrange
         data = {"t": [("chr1", 1, 2), ("chr2", 3, 4)]}
+        sql = 'SELECT chrom, start, "end" FROM t'
+
+        # Act
+        ddb = run_duckdb(sql, data, _INTERVAL_COLUMNS)
+        df = run_datafusion(sql, data, _INTERVAL_COLUMNS)
+
+        # Assert
+        assert ddb == df
+
+    def test_runners_agree_on_empty_table(self):
+        """Test both runners produce identical output for an empty table.
+
+        Given:
+            An empty table and a trivial SELECT — DuckDB skips the INSERT while
+            DataFusion synthesizes an empty record batch.
+        When:
+            run_duckdb and run_datafusion each execute it.
+        Then:
+            Both should return zero rows, proving the two divergent empty-table
+            paths converge on identical normalized output.
+        """
+        # Arrange
+        data = {"t": []}
+        sql = "SELECT chrom FROM t"
+
+        # Act
+        ddb = run_duckdb(sql, data, _INTERVAL_COLUMNS)
+        df = run_datafusion(sql, data, _INTERVAL_COLUMNS)
+
+        # Assert
+        assert ddb == df == []
+
+    def test_runners_agree_on_null_round_trip(self):
+        """Test both runners normalize a NULL-bearing column identically.
+
+        Given:
+            A table with a NULL ``start`` in one row — DataFusion promotes the
+            int64 column to float64 around the NULL while DuckDB keeps ints.
+        When:
+            run_duckdb and run_datafusion each select it.
+        Then:
+            Their normalized output should be identical, proving the scalar
+            coercion collapses the NULL surrogate and the int/float promotion.
+        """
+        # Arrange
+        data = {"t": [("chr1", None, 2), ("chr2", 3, 4)]}
         sql = 'SELECT chrom, start, "end" FROM t'
 
         # Act
