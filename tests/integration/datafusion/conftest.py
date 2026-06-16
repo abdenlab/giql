@@ -12,6 +12,12 @@ pytest.importorskip("pyarrow")
 
 pytestmark = pytest.mark.integration
 
+from .._oracle import arrow_schema  # noqa: E402
+from .._oracle import register_record_batches  # noqa: E402
+
+# The default GIQL interval schema, shared with the cross-target oracle.
+_INTERVAL_COLUMNS = (("chrom", "utf8"), ("start", "int64"), ("end", "int64"))
+
 
 @pytest.fixture
 def datafusion_ctx():
@@ -21,29 +27,19 @@ def datafusion_ctx():
     arguments and yields a DataFusion ``SessionContext`` with each table
     registered under the default ``chrom``/``start``/``end`` schema (matching
     the default :class:`giql.Table` column mapping).
+
+    The pyarrow loader dance is the one shared helper in
+    :mod:`tests.integration._oracle` (Finding 8), so this fixture and the
+    cross-target oracle register tables identically.
     """
-    import pyarrow as pa
     from datafusion import SessionContext
 
-    schema = pa.schema(
-        [
-            ("chrom", pa.utf8()),
-            ("start", pa.int64()),
-            ("end", pa.int64()),
-        ]
-    )
+    schema = arrow_schema(_INTERVAL_COLUMNS)
 
     def _build(**tables):
         ctx = SessionContext()
         for name, rows in tables.items():
-            arrays = {
-                "chrom": [r[0] for r in rows],
-                "start": [r[1] for r in rows],
-                "end": [r[2] for r in rows],
-            }
-            ctx.register_record_batches(
-                name, [pa.table(arrays, schema=schema).to_batches()]
-            )
+            register_record_batches(ctx, name, rows, schema, _INTERVAL_COLUMNS)
         return ctx
 
     return _build
