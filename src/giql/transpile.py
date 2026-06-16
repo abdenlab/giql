@@ -13,6 +13,7 @@ from sqlglot import parse_one
 
 from giql.canonicalizer import canonicalize_coordinates
 from giql.dialect import GIQLDialect
+from giql.expander import ExpandOperators
 from giql.generators import BaseGIQLGenerator
 from giql.resolver import resolve_operator_refs
 from giql.table import Table
@@ -162,6 +163,16 @@ def transpile(
         with _reraise_as_value_error("Transformation error"):
             duckdb_sql = duckdb_transformer.transform_to_sql(ast)
         if duckdb_sql is not None:
+            # WARNING: this early return emits the legacy IEJoin SQL directly and
+            # SKIPS the normalization pipeline below — pass 1 (resolution), pass 2
+            # (canonicalization), and pass 3 (ExpandOperators, constructed ~40
+            # lines down). The ExpandOperators registry is therefore NOT consulted
+            # on this path: a flagged operator on an IEJoin-eligible duckdb query
+            # is left un-expanded. This is benign today (the registry is empty and
+            # no operator opts in), but any DuckDB-pathed operator migration (#141)
+            # must either run expansion BEFORE this early return or have the IEJoin
+            # transformer defer to the registry. See the strict-xfail
+            # characterization test pinning this gap in tests/test_expander.py.
             return duckdb_sql
 
     intersects_transformer = IntersectsBinnedJoinTransformer(
@@ -190,6 +201,15 @@ def transpile(
     # is a strict no-op until the per-operator port issues (#122, #123) land.
     with _reraise_as_value_error("Canonicalization error"):
         ast = canonicalize_coordinates(ast)
+
+    # Pass 3 of the normalization pipeline (epic #137): replace each opted-in
+    # GIQL operator node with the AST its registered expander produces for the
+    # active target. No operator sets GIQL_EXPAND and the registry is empty, so
+    # this is a strict no-op until the per-operator migration issues land; the
+    # legacy *_sql emitters on the generator remain the fallback.
+    expand_operators = ExpandOperators(target, tables_container)
+    with _reraise_as_value_error("Expansion error"):
+        ast = expand_operators.transform(ast)
 
     with _reraise_as_value_error("Transpilation error"):
         sql = generator.generate(ast)

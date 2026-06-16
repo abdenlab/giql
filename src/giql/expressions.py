@@ -110,6 +110,14 @@ class SpatialPredicate(exp.Binary):
 #: half-open) operands are left untouched and the emitted SQL stays byte-identical.
 _CANONICALIZE = True
 
+#: Default opt-out from the ``ExpandOperators`` pass (epic #137, step 2). The
+#: per-operator ``GIQL_EXPAND`` flag mirrors ``GIQL_CANONICALIZE``: an operator
+#: takes the new AST-expansion path only when it sets ``GIQL_EXPAND = True`` *and*
+#: an expander is registered for it; otherwise the legacy ``*_sql`` emitter runs.
+#: Every operator defaults to ``False`` here, so the pass is a strict no-op until a
+#: later migration step (#140+) flips one operator's flag alongside its expander.
+_EXPAND = False
+
 
 class Intersects(SpatialPredicate):
     """INTERSECTS spatial predicate.
@@ -118,6 +126,7 @@ class Intersects(SpatialPredicate):
     """
 
     GIQL_CANONICALIZE = _CANONICALIZE
+    GIQL_EXPAND = _EXPAND
 
     GIQL_SLOTS = (
         SlotSpec("this", frozenset({"column"}), required=True),
@@ -132,6 +141,7 @@ class Contains(SpatialPredicate):
     """
 
     GIQL_CANONICALIZE = _CANONICALIZE
+    GIQL_EXPAND = _EXPAND
 
     GIQL_SLOTS = (
         SlotSpec("this", frozenset({"column"}), required=True),
@@ -146,6 +156,7 @@ class Within(SpatialPredicate):
     """
 
     GIQL_CANONICALIZE = _CANONICALIZE
+    GIQL_EXPAND = _EXPAND
 
     GIQL_SLOTS = (
         SlotSpec("this", frozenset({"column"}), required=True),
@@ -169,6 +180,7 @@ class SpatialSetPredicate(exp.Expression):
     }
 
     GIQL_CANONICALIZE = _CANONICALIZE
+    GIQL_EXPAND = _EXPAND
 
     GIQL_SLOTS = (
         SlotSpec("this", frozenset({"column"}), required=True),
@@ -220,6 +232,12 @@ class GIQLCluster(exp.Func):
         "predicate": False,  # pairwise boolean gate (current row vs PREV(col))
     }
 
+    # Inert today: the CLUSTER/MERGE transformers rewrite these nodes before the
+    # ExpandOperators pass runs, so the pass never sees a GIQLCluster to dispatch
+    # and this flag is not a live opt-in. It is forward-looking for #144, which
+    # migrates these operators onto the expander registry.
+    GIQL_EXPAND = _EXPAND
+
     @classmethod
     def from_arg_list(cls, args):
         kwargs, positional_args = _split_named_and_positional(args)
@@ -261,6 +279,12 @@ class GIQLMerge(exp.Func):
         "predicate": False,  # pairwise boolean gate (current row vs PREV(col))
     }
 
+    # Inert today: the CLUSTER/MERGE transformers rewrite these nodes before the
+    # ExpandOperators pass runs, so the pass never sees a GIQLMerge to dispatch
+    # and this flag is not a live opt-in. It is forward-looking for #144, which
+    # migrates these operators onto the expander registry.
+    GIQL_EXPAND = _EXPAND
+
     @classmethod
     def from_arg_list(cls, args):
         kwargs, positional_args = _split_named_and_positional(args)
@@ -297,6 +321,7 @@ class GIQLDistance(exp.Func):
     }
 
     GIQL_CANONICALIZE = _CANONICALIZE
+    GIQL_EXPAND = _EXPAND
 
     GIQL_SLOTS = (
         SlotSpec("this", frozenset({"column"}), required=True),
@@ -344,6 +369,7 @@ class GIQLNearest(exp.Func):
     #: half-open) operands are left untouched and the emitted SQL stays
     #: byte-identical.
     GIQL_CANONICALIZE = _CANONICALIZE
+    GIQL_EXPAND = _EXPAND
 
     GIQL_SLOTS = (
         SlotSpec("this", frozenset({"registered_table"}), required=True),
@@ -393,6 +419,7 @@ class GIQLDisjoin(exp.Func):
     #: (0-based half-open) operands are left unwrapped and the emitted SQL stays
     #: byte-identical.
     GIQL_CANONICALIZE = True
+    GIQL_EXPAND = _EXPAND
 
     GIQL_SLOTS = (
         SlotSpec("this", frozenset({"registered_table"}), required=True),
