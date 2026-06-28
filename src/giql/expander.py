@@ -253,6 +253,31 @@ class ExpanderRegistry:
         """
         self._expanders.clear()
 
+    def snapshot(self) -> dict[tuple[Target, type], ExpanderFn]:
+        """Return a shallow copy of the current registrations.
+
+        The save half of the registry's **public save/restore seam**: a test
+        fixture (or a plugin) that mutates the process-wide :data:`REGISTRY`
+        around a body — registering or clearing entries — captures the baseline
+        with this and hands it back to :meth:`restore` afterward, so the
+        built-in expanders registered at import survive an isolating fixture
+        that would otherwise :meth:`clear` them permanently.
+
+        The returned dict is a fresh mapping (mutating it does not affect the
+        registry), keyed by the same ``(target, operator)`` tuples.
+        """
+        return dict(self._expanders)
+
+    def restore(self, snapshot: dict[tuple[Target, type], ExpanderFn]) -> None:
+        """Replace all registrations with those captured by :meth:`snapshot`.
+
+        The restore half of the save/restore seam. Drops every current entry and
+        re-installs exactly the *snapshot* contents, so a fixture can return the
+        registry to a previously captured baseline regardless of what its body
+        registered or cleared.
+        """
+        self._expanders = dict(snapshot)
+
     def __contains__(self, key: tuple[Target, type]) -> bool:
         """Whether an *exact* ``(target, operator)`` entry is registered.
 
