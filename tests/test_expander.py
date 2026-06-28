@@ -53,34 +53,48 @@ def _record(label: str):
     return _expander
 
 
+#: The registry contents at import — the built-in expanders registered by
+#: ``giql.expanders`` for already-migrated operators (DISJOIN as of #143). The
+#: leak guards and ``clean_registry`` treat this as the baseline rather than an
+#: empty registry, so the real built-in registrations survive isolating fixtures
+#: and a leaking test is still caught against the true baseline.
+_REGISTRY_BASELINE = REGISTRY.snapshot()
+
+
 @pytest.fixture
 def clean_registry():
-    """Isolate the process-wide REGISTRY, leaving it empty afterward.
+    """Isolate the process-wide REGISTRY, restoring its baseline afterward.
 
-    The registry is empty at import (the pass ships inert), so a test that opts
-    in clears on the way out; emptiness is asserted through the public
-    ``bool()``/``len()`` surface rather than private state.
+    Saves the import-time baseline (the built-in expanders), empties the registry
+    so a test sees only what it registers, and restores the baseline on the way
+    out through the public ``snapshot()``/``restore()`` seam — so a test that
+    registers a stand-in expander cannot leak it, and the built-in registrations
+    survive this fixture's isolation.
     """
-    assert not REGISTRY, "REGISTRY was non-empty entering clean_registry"
+    saved = REGISTRY.snapshot()
     REGISTRY.clear()
     yield REGISTRY
-    REGISTRY.clear()
+    REGISTRY.restore(saved)
 
 
 @pytest.fixture(autouse=True)
 def _registry_leak_guard():
-    """Assert the process-wide REGISTRY is empty at each test boundary.
+    """Assert the process-wide REGISTRY matches its baseline at each boundary.
 
-    A leak guard: the registry is empty at import and must return to empty after
-    every test, so a test that registers without cleaning up (a leak that would
-    silently flip the no-op pass for a later test) fails loudly. Tests that
-    register on the process-wide REGISTRY do so through ``clean_registry``, which
-    clears on the way out; this guard catches anything that bypasses it. Both
-    checks go through the public ``bool()`` surface (A5), not private state.
+    A leak guard: the registry holds the built-in expanders at import and must
+    return to exactly that baseline after every test, so a test that registers
+    without cleaning up (a leak that would silently change dispatch for a later
+    test) fails loudly. Tests that mutate the process-wide REGISTRY do so through
+    ``clean_registry``, which restores the baseline on the way out; this guard
+    catches anything that bypasses it.
     """
-    assert not REGISTRY, "REGISTRY leaked into a test from a prior one"
+    assert REGISTRY.snapshot() == _REGISTRY_BASELINE, (
+        "REGISTRY differed from its baseline entering a test"
+    )
     yield
-    assert not REGISTRY, "a test leaked a registration into REGISTRY"
+    assert REGISTRY.snapshot() == _REGISTRY_BASELINE, (
+        "a test leaked a registration into REGISTRY"
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -88,18 +102,19 @@ def _expand_flag_leak_guard():
     """Assert every operator's GIQL_EXPAND is restored at each test boundary.
 
     The symmetric partner of the registry leak guard: each operator class ships
-    opted out (its own GIQL_EXPAND attribute is False), and a test that flips one
-    via ``_opted_in`` must restore it. A leaked opt-in would silently flip the
-    no-op pass for a later test, so this catches anything that bypasses the
-    exception-safe ``_opted_in`` manager.
+    a shipped GIQL_EXPAND default (``True`` for a migrated operator like DISJOIN,
+    ``False`` otherwise), and a test that flips one via ``_opted_in`` must restore
+    it. A leaked flip would silently change the pass for a later test, so this
+    catches anything that bypasses the exception-safe ``_opted_in`` manager by
+    comparing against each operator's shipped default rather than a blanket False.
     """
     for op in _OPERATOR_CLASSES:
-        assert op.__dict__.get("GIQL_EXPAND") is False, (
+        assert op.__dict__.get("GIQL_EXPAND") is _SHIPPED_EXPAND_FLAGS[op], (
             f"{op.__name__}.GIQL_EXPAND leaked into a test from a prior one"
         )
     yield
     for op in _OPERATOR_CLASSES:
-        assert op.__dict__.get("GIQL_EXPAND") is False, (
+        assert op.__dict__.get("GIQL_EXPAND") is _SHIPPED_EXPAND_FLAGS[op], (
             f"a test leaked a GIQL_EXPAND opt-in on {op.__name__}"
         )
 
@@ -467,6 +482,55 @@ class TestExpanderRegistryFallbackGaps:
         # Assert
         assert REGISTRY.resolve(DuckDBTarget(), GIQLDisjoin) is None
         assert (DuckDBTarget(), GIQLDisjoin) not in REGISTRY
+
+    def test_snapshot_is_independent_of_later_registrations(self):
+        """Test that a snapshot does not observe registrations made after it.
+
+        Given:
+            A registry with one entry, captured by snapshot.
+        When:
+            A second entry is registered after the snapshot is taken.
+        Then:
+            The snapshot should still hold only the first entry (it is a copy,
+            not a live view).
+        """
+        # Arrange
+        registry = ExpanderRegistry()
+        registry.register(DuckDBTarget(), GIQLDisjoin, _record("first"))
+
+        # Act
+        saved = registry.snapshot()
+        registry.register(GenericTarget(), Intersects, _record("second"))
+
+        # Assert
+        assert (DuckDBTarget(), GIQLDisjoin) in saved
+        assert (GenericTarget(), Intersects) not in saved
+
+    def test_restore_replaces_entries_with_snapshot_contents(self):
+        """Test that restore returns the registry to a captured snapshot.
+
+        Given:
+            A snapshot of a registry with one entry, after which the registry is
+            cleared and a different entry registered.
+        When:
+            Restoring the snapshot.
+        Then:
+            The original entry should resolve again and the post-snapshot entry
+            should be gone.
+        """
+        # Arrange
+        registry = ExpanderRegistry()
+        registry.register(DuckDBTarget(), GIQLDisjoin, _record("original"))
+        saved = registry.snapshot()
+        registry.clear()
+        registry.register(GenericTarget(), Intersects, _record("transient"))
+
+        # Act
+        registry.restore(saved)
+
+        # Assert
+        assert (DuckDBTarget(), GIQLDisjoin) in registry
+        assert (GenericTarget(), Intersects) not in registry
 
 
 class TestRegisterDecorator:
@@ -956,7 +1020,8 @@ class TestExpandOperatorsPass:
 
         Given:
             An expander registered for (GenericTarget, GIQLDisjoin) but the
-            operator's GIQL_EXPAND flag left at its default False.
+            operator's GIQL_EXPAND flag held off (DISJOIN ships it on, so the
+            control opts it out to isolate the per-type gate).
         When:
             Running the pass.
         Then:
@@ -968,8 +1033,9 @@ class TestExpandOperatorsPass:
         ast = _prepare("SELECT * FROM DISJOIN(variants)", tables)
         pass_ = ExpandOperators(GenericTarget(), tables, clean_registry)
 
-        # Act (GIQL_EXPAND is False by default — no opt-in context)
-        result = pass_.transform(ast)
+        # Act
+        with _opted_out(GIQLDisjoin):
+            result = pass_.transform(ast)
 
         # Assert
         assert list(result.find_all(GIQLDisjoin))
@@ -1022,14 +1088,18 @@ class TestNoOpWhenInert:
         assert list(result.find_all(GIQLDisjoin))
 
     def test_transpile_sql_unchanged_with_pass_inert(self):
-        """Test that transpile output is byte-identical with the pass inert.
+        """Test that transpile output is byte-identical for an unmigrated operator.
 
         Given:
-            A DISJOIN query, the default (empty) registry, and no operator flagged.
+            A DISJOIN query (an operator not migrated onto the pass, so its
+            GIQL_EXPAND is False and no expander resolves), with the default
+            registry.
         When:
-            Transpiling with the wired-in pass versus a pass-bypassed reference.
+            Transpiling with the wired-in pass versus a pass-bypassed reference
+            (its legacy emitter run directly).
         Then:
-            The SQL should match exactly and carry no expander alias prefix.
+            The SQL should match exactly and carry no expander alias prefix — the
+            pass is inert for any operator that has not been migrated.
         """
         # Arrange
         query = "SELECT * FROM DISJOIN(variants)"
@@ -1069,26 +1139,66 @@ _OPERATOR_CLASSES = (
     GIQLMerge,
 )
 
+#: Each operator's shipped GIQL_EXPAND default, captured from its own class dict
+#: at import. A migrated operator (DISJOIN, #143) ships ``True``; the rest ship
+#: ``False`` until their migrations land. The flag leak guard restores to these
+#: shipped values rather than a blanket ``False``.
+_SHIPPED_EXPAND_FLAGS = {op: op.__dict__.get("GIQL_EXPAND") for op in _OPERATOR_CLASSES}
+
+
+#: Operators migrated onto the ExpandOperators pass — they ship GIQL_EXPAND=True.
+_MIGRATED_OPERATORS = tuple(
+    op for op in _OPERATOR_CLASSES if op.__dict__.get("GIQL_EXPAND") is True
+)
+#: Operators not yet migrated — they ship GIQL_EXPAND=False.
+_UNMIGRATED_OPERATORS = tuple(
+    op for op in _OPERATOR_CLASSES if op not in _MIGRATED_OPERATORS
+)
+
 
 class TestOperatorOptOut:
-    """Every operator ships opted out of the ExpandOperators pass at this step."""
+    """Migrated operators opt into the pass; the rest still ship opted out."""
 
-    @pytest.mark.parametrize("operator", _OPERATOR_CLASSES, ids=lambda c: c.__name__)
+    @pytest.mark.parametrize(
+        "operator", _UNMIGRATED_OPERATORS, ids=lambda c: c.__name__
+    )
     def test_operator_class_ships_expand_disabled(self, operator):
-        """Test that each operator class ships GIQL_EXPAND=False.
+        """Test that each unmigrated operator class ships GIQL_EXPAND=False.
 
         Given:
-            One of the nine GIQL operator expression classes.
+            A GIQL operator expression class that has not been migrated onto the
+            ExpandOperators pass.
         When:
             Reading its GIQL_EXPAND class attribute.
         Then:
-            It should be False (no operator opts into expansion yet).
+            It should be False (the operator still uses the legacy emitter).
         """
         # Arrange & act
         flag = operator.GIQL_EXPAND
 
         # Assert
         assert flag is False
+
+    @pytest.mark.parametrize(
+        "operator", _MIGRATED_OPERATORS, ids=lambda c: c.__name__
+    )
+    def test_operator_class_ships_expand_enabled(self, operator):
+        """Test that each migrated operator class ships GIQL_EXPAND=True.
+
+        Given:
+            A GIQL operator expression class migrated onto the ExpandOperators
+            pass (DISJOIN, #143).
+        When:
+            Reading its GIQL_EXPAND class attribute.
+        Then:
+            It should be True (the operator expands through its registered
+            expander instead of the deleted legacy emitter).
+        """
+        # Arrange & act
+        flag = operator.GIQL_EXPAND
+
+        # Assert
+        assert flag is True
 
 
 class TestOptedInRestoresFlag:
@@ -1672,8 +1782,8 @@ class TestExpandOperatorsWalk:
         )
         pass_ = ExpandOperators(GenericTarget(), tables, clean_registry)
 
-        # Act
-        with _opted_in(Intersects):
+        # Act (DISJOIN ships flagged, so opt it out to hold it as the control)
+        with _opted_in(Intersects), _opted_out(GIQLDisjoin):
             result = pass_.transform(ast)
 
         # Assert
@@ -1883,6 +1993,28 @@ class _opted_in:
 
     def __enter__(self):
         self._operator.GIQL_EXPAND = True
+        return self._operator
+
+    def __exit__(self, *exc):
+        self._operator.GIQL_EXPAND = self._prior
+        return False
+
+
+class _opted_out:
+    """Context manager opting an operator class out of GIQL_EXPAND for a test.
+
+    The complement of :class:`_opted_in`: used by a control test that needs a
+    *migrated* operator (DISJOIN ships GIQL_EXPAND=True) to behave as if
+    unflagged, so the test can prove the pass gates per-type without the
+    operator's shipped opt-in interfering. Restores the prior flag on exit.
+    """
+
+    def __init__(self, operator: type) -> None:
+        self._operator = operator
+        self._prior = operator.__dict__.get("GIQL_EXPAND", False)
+
+    def __enter__(self):
+        self._operator.GIQL_EXPAND = False
         return self._operator
 
     def __exit__(self, *exc):

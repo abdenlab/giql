@@ -8,25 +8,32 @@ import duckdb
 import pytest
 from sqlglot import parse_one
 
+import giql  # noqa: F401  (ensures the built-in expanders are registered)
 from giql.canonicalizer import canonicalize_coordinates
 from giql.dialect import GIQLDialect
+from giql.expander import ExpandOperators
 from giql.generators import BaseGIQLGenerator
 from giql.resolver import resolve_operator_refs
 from giql.table import Tables
+from giql.targets import GenericTarget
 
 
 def _generate(sql: str) -> str:
-    """Parse, run normalization passes 1 and 2, then generate SQL.
+    """Parse, run normalization passes 1-3, then generate SQL.
 
     DISTANCE operand resolution and coordinate canonicalization moved out of the
     emitter and into the ResolveOperatorRefs / CanonicalizeCoordinates passes
-    (epic #114, issues #119 / #123). These behavioral tests must run both passes
-    before generating, exactly as :func:`giql.transpile.transpile` does, rather
-    than calling ``generate`` on a bare parsed AST.
+    (epic #114, issues #119 / #123), and DISTANCE generation itself moved onto
+    the registry's AST-expansion pass (epic #137, issue #140). These behavioral
+    tests must run all three passes before generating, exactly as
+    :func:`giql.transpile.transpile` does, rather than calling ``generate`` on a
+    bare parsed AST.
     """
+    tables = Tables()
     ast = parse_one(sql, dialect=GIQLDialect)
-    ast = resolve_operator_refs(ast, Tables())
+    ast = resolve_operator_refs(ast, tables)
     ast = canonicalize_coordinates(ast)
+    ast = ExpandOperators(GenericTarget(), tables).transform(ast)
     return BaseGIQLGenerator().generate(ast)
 
 
