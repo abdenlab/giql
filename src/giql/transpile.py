@@ -11,6 +11,7 @@ from typing import overload
 
 from sqlglot import parse_one
 
+import giql.expanders  # noqa: F401
 from giql.canonicalizer import canonicalize_coordinates
 from giql.dialect import GIQLDialect
 from giql.expander import ExpandOperators

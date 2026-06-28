@@ -5,7 +5,6 @@ from giql.canonical import decanonical_end
 from giql.canonical import decanonical_start
 from giql.expressions import Contains
 from giql.expressions import GIQLDisjoin
-from giql.expressions import GIQLDistance
 from giql.expressions import GIQLNearest
 from giql.expressions import Intersects
 from giql.expressions import SpatialSetPredicate
@@ -492,85 +491,6 @@ class BaseGIQLGenerator(Generator):
         return (
             f't.* REPLACE ({pt_start} AS "{target_start}", {pt_end} AS "{target_end}")'
         )
-
-    def giqldistance_sql(self, expression: GIQLDistance) -> str:
-        """Generate SQL CASE expression for DISTANCE function.
-
-        Reads the :class:`~giql.resolver.ResolvedColumn` metadata that
-        ``ResolveOperatorRefs`` (pass 1) attaches to each interval operand. When
-        the pass deferred an operand (a literal range, or an unqualified column)
-        the emitter raises the historical literal-range diagnostic.
-
-        Coordinate canonicalization is owned by ``CanonicalizeCoordinates``
-        (pass 2, issue #123): the resolved metadata's endpoints are already
-        canonicalized in place, so the emitter consumes them verbatim.
-
-        :param expression:
-            GIQLDistance expression node
-        :return:
-            SQL CASE expression string calculating genomic distance
-        """
-        stranded = self._extract_bool_param(expression.args.get("stranded"))
-        signed = self._extract_bool_param(expression.args.get("signed"))
-
-        col_a = self._distance_operand(expression, "this", "first")
-        col_b = self._distance_operand(expression, "expression", "second")
-
-        # Strand columns are consumed only in stranded mode (matching the
-        # historical 3-tuple vs 4-tuple branching in the legacy emitter).
-        strand_a = col_a.strand if stranded else None
-        strand_b = col_b.strand if stranded else None
-
-        # Distance math below assumes 0-based half-open. Input canonicalization is
-        # owned by CanonicalizeCoordinates (pass 2, issue #123): each operand's
-        # start/end fragments are canonicalized in place by the pass, so the
-        # emitter consumes them verbatim with no in-emitter canonicalization. The
-        # returned distance is an encoding-invariant base count, so it needs no
-        # output de-canonicalization.
-
-        # Generate CASE expression
-        return self._generate_distance_case(
-            col_a.chrom,
-            col_a.start,
-            col_a.end,
-            strand_a,
-            col_b.chrom,
-            col_b.start,
-            col_b.end,
-            strand_b,
-            stranded=stranded,
-            signed=signed,
-        )
-
-    def _distance_operand(
-        self, expression: GIQLDistance, arg: str, position: str
-    ) -> ResolvedColumn:
-        """Return the :class:`ResolvedColumn` for one DISTANCE interval operand.
-
-        Reads the metadata attached by ``ResolveOperatorRefs`` (pass 1). When the
-        pass deferred the operand — a literal range or an unqualified column it
-        could not resolve — no column is attached and this raises the historical
-        literal-range diagnostic.
-
-        :param expression:
-            GIQLDistance expression node
-        :param arg:
-            The operand arg key (``"this"`` or ``"expression"``)
-        :param position:
-            Human-readable operand position for the error message (``"first"``
-            or ``"second"``)
-        :return:
-            The resolved column operand
-        :raises ValueError:
-            If the operand is a literal range rather than a column reference
-        """
-        resolution = expression.meta.get(META_KEY)
-        if isinstance(resolution, OperatorResolution):
-            resolved = resolution.column(arg)
-            if resolved is not None:
-                return resolved
-
-        raise ValueError(f"Literal range as {position} argument not yet supported")
 
     def _generate_distance_case(
         self,
