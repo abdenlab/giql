@@ -46,18 +46,40 @@ def _frag(fragment: str) -> exp.Expression:
     fragments (e.g. ``a."end"``, or ``'chr1'`` for a literal range) already
     canonicalized in place by pass 2, so they are parsed — not rebuilt — back
     into AST under the GIQL dialect.
+
+    Parameters
+    ----------
+    fragment : str
+        A canonicalized SQL fragment (a column reference or literal).
+
+    Returns
+    -------
+    exp.Expression
+        The parsed fragment as a sqlglot AST node.
     """
     return parse_one(fragment, dialect=GIQLDialect)
 
 
-def _gap(near_start: str, far_end: str) -> exp.Expression:
-    """Build ``(near_start - far_end + 1)`` — the bedtools-parity gap magnitude.
+def _gap(minuend: str, subtrahend: str) -> exp.Expression:
+    """Build ``(minuend - subtrahend + 1)`` — the bedtools-parity gap magnitude.
 
     Mirrors the legacy ``({start} - {end} + 1)`` fragment: the ``+ 1`` lifts a
     book-ended (adjacent) pair from a raw half-open gap of ``0`` to a reported
     distance of ``1``.
+
+    Parameters
+    ----------
+    minuend : str
+        The SQL fragment subtracted *from* (the left operand of the ``-``).
+    subtrahend : str
+        The SQL fragment subtracted (the right operand of the ``-``).
+
+    Returns
+    -------
+    exp.Expression
+        The parenthesized ``(minuend - subtrahend + 1)`` AST.
     """
-    diff = exp.Sub(this=_frag(near_start), expression=_frag(far_end))
+    diff = exp.Sub(this=_frag(minuend), expression=_frag(subtrahend))
     return exp.paren(exp.Add(this=diff, expression=exp.Literal.number(1)))
 
 
@@ -67,6 +89,16 @@ def _bool_param(param: exp.Expression | None) -> bool:
     Mirrors ``BaseGIQLGenerator._extract_bool_param`` so the expander reads the
     ``stranded`` / ``signed`` keyword arguments identically to the legacy
     emitter.
+
+    Parameters
+    ----------
+    param : exp.Expression | None
+        The ``stranded`` or ``signed`` argument node, or ``None`` if absent.
+
+    Returns
+    -------
+    bool
+        The coerced Python boolean (``False`` when the argument is absent).
     """
     if not param:
         return False
@@ -82,7 +114,30 @@ def _operand(ctx: ExpansionContext, arg: str, position: str) -> ResolvedColumn:
     literal range, or an unqualified column the resolver could not resolve) has
     no column attached; this raises the historical literal-range diagnostic so
     the public error contract is preserved.
+
+    Parameters
+    ----------
+    ctx : ExpansionContext
+        The expansion context carrying the node's pass-1 resolution.
+    arg : str
+        The operand slot key (``"this"`` or ``"expression"``).
+    position : str
+        Human-readable operand position (``"first"`` / ``"second"``) for the
+        diagnostic message.
+
+    Returns
+    -------
+    ResolvedColumn
+        The resolved column metadata for the operand.
+
+    Raises
+    ------
+    ValueError
+        If the operand was deferred (a literal range or unresolved column).
     """
+    # TODO(#146): this read-required-column-or-raise pattern is duplicated across
+    # expanders; hoist it to a shared ``ExpansionContext.require_column`` helper
+    # once a second expander needs it.
     resolution = ctx.resolution
     if resolution is not None:
         resolved = resolution.column(arg)
@@ -131,21 +186,21 @@ def _stranded_distance(
     down_gap = _gap(col_b.start, col_a.end)
     up_gap = _gap(col_a.start, col_b.end)
 
+    # Downstream (B after A) is identical across the signed and unsigned arms:
+    # positive by default, flipped negative on A's '-' strand. Only *upstream*
+    # differs between the arms, so hoist downstream and compute upstream per arm.
+    downstream = _strand_flip_case(
+        strand_a, neg=exp.Neg(this=down_gap), pos=down_gap.copy()
+    )
     if signed:
-        # Stranded + signed: strand flip AND directional sign. Downstream (B
-        # after A) is positive by default but flips negative on A's '-' strand;
-        # upstream (B before A) is negative by default but flips positive on '-'.
-        downstream = _strand_flip_case(
-            strand_a, neg=exp.Neg(this=down_gap), pos=down_gap.copy()
-        )
+        # Stranded + signed: upstream (B before A) is negative by default but
+        # flips positive on A's '-' strand (the directional sign layered on top
+        # of the strand flip).
         upstream = _strand_flip_case(
             strand_a, neg=up_gap, pos=exp.Neg(this=up_gap.copy())
         )
     else:
-        # Stranded but not signed: strand flip only.
-        downstream = _strand_flip_case(
-            strand_a, neg=exp.Neg(this=down_gap), pos=down_gap.copy()
-        )
+        # Stranded but not signed: upstream carries the strand flip only.
         upstream = _strand_flip_case(
             strand_a, neg=exp.Neg(this=up_gap), pos=up_gap.copy()
         )
@@ -176,9 +231,21 @@ def _wrap_overlap_case(
     """Build the shared distance CASE skeleton common to all four branches.
 
     ``CASE WHEN chrom_a != chrom_b THEN NULL WHEN <overlap> THEN 0 WHEN
-    end_a <= start_b THEN <downstream> ELSE <upstream> END`` — *downstream* is
-    the B-after-A gap, *upstream* the B-before-A gap (each already carrying any
-    sign / strand flip).
+    end_a <= start_b THEN <downstream> ELSE <upstream> END``.
+
+    Parameters
+    ----------
+    col_a, col_b : ResolvedColumn
+        The resolved A and B interval operands.
+    downstream : exp.Expression
+        The B-after-A gap expression (already carrying any sign / strand flip).
+    upstream : exp.Expression
+        The B-before-A gap expression (already carrying any sign / strand flip).
+
+    Returns
+    -------
+    exp.Expression
+        The assembled distance ``CASE`` expression.
     """
     overlap = exp.and_(
         exp.LT(this=_frag(col_a.start), expression=_frag(col_b.end)),
@@ -200,10 +267,24 @@ def _prepend_strand_guards(
 ) -> exp.Case:
     """Insert the strand-validity WHEN guards after the chrom guard.
 
-    Returns a CASE whose WHEN order is: chrom mismatch -> NULL, either strand
-    NULL -> NULL, strand_a is '.'/'?' -> NULL, strand_b is '.'/'?' -> NULL,
-    then the overlap/gap branches from *case*. Distance is undefined for an
-    unstranded ('.'/'?') or missing strand, matching the legacy emitter.
+    Distance is undefined for an unstranded (``'.'``/``'?'``) or missing strand,
+    matching the legacy emitter.
+
+    Parameters
+    ----------
+    case : exp.Case
+        The overlap/gap ``CASE`` to prepend the strand guards onto (mutated in
+        place).
+    strand_a, strand_b : str
+        The A and B strand-column SQL fragments.
+
+    Returns
+    -------
+    exp.Case
+        The same *case*, whose WHEN order is now: chrom mismatch -> NULL, either
+        strand NULL -> NULL, ``strand_a`` is ``'.'``/``'?'`` -> NULL,
+        ``strand_b`` is ``'.'``/``'?'`` -> NULL, then the original overlap/gap
+        branches.
     """
     sa = _frag(strand_a)
     sb = _frag(strand_b)
@@ -229,6 +310,13 @@ def _prepend_strand_guards(
     return case
 
 
+# KEEP IN SYNC: this expander and
+# ``BaseGIQLGenerator._generate_distance_case`` (base.py) build the *same*
+# distance CASE by two routes. The legacy method is retained only because
+# NEAREST still calls it for its ORDER BY / filter math; once NEAREST migrates
+# to the expander path that method can be deleted and this duplication retired.
+# Until then, any change to the distance math here must be mirrored there (and
+# vice versa). The parity test in tests/test_distance_udf.py guards the drift.
 @register(GenericTarget, GIQLDistance)
 def expand_distance(node: exp.Expression, ctx: ExpansionContext) -> exp.Expression:
     """Expand a ``GIQLDistance`` node into a standard SQL ``CASE`` expression.
@@ -236,8 +324,20 @@ def expand_distance(node: exp.Expression, ctx: ExpansionContext) -> exp.Expressi
     The portable expander registered for every target. Reads ``stranded`` /
     ``signed`` from the node and the pass-1 resolved interval operands, then
     builds the matching one of the four CASE shapes
-    (unsigned/signed x non-stranded/stranded). The result replaces the operator
-    node and is rendered by the active target's serializer.
+    (unsigned/signed x non-stranded/stranded).
+
+    Parameters
+    ----------
+    node : exp.Expression
+        The ``GIQLDistance`` operator node being expanded.
+    ctx : ExpansionContext
+        The expansion context carrying the node's pass-1 resolution.
+
+    Returns
+    -------
+    exp.Expression
+        The distance ``CASE`` that replaces the operator node and is rendered by
+        the active target's serializer.
     """
     stranded = _bool_param(node.args.get("stranded"))
     signed = _bool_param(node.args.get("signed"))

@@ -1152,7 +1152,7 @@ class TestBaseGIQLGenerator:
     ):
         """
         GIVEN a GIQLDistance with stranded parameter in various truthy representations
-        WHEN giqldistance_sql is called
+        WHEN the DISTANCE node is expanded
         THEN The parameter is parsed as True and strand-aware distance is calculated.
         """
         sql = (
@@ -1175,7 +1175,7 @@ class TestBaseGIQLGenerator:
     ):
         """
         GIVEN a GIQLDistance with stranded parameter in various falsy representations
-        WHEN giqldistance_sql is called
+        WHEN the DISTANCE node is expanded
         THEN The parameter is parsed as False and basic distance is calculated.
         """
         sql = (
@@ -1197,7 +1197,7 @@ class TestBaseGIQLGenerator:
     ):
         """
         GIVEN a GIQLDistance with signed parameter in various truthy representations
-        WHEN giqldistance_sql is called
+        WHEN the DISTANCE node is expanded
         THEN The parameter is parsed as True and signed distance is calculated.
         """
         sql = (
@@ -1219,7 +1219,7 @@ class TestBaseGIQLGenerator:
     ):
         """
         GIVEN a GIQLDistance with signed parameter in various falsy representations
-        WHEN giqldistance_sql is called
+        WHEN the DISTANCE node is expanded
         THEN The parameter is parsed as False and unsigned distance is calculated.
         """
         sql = (

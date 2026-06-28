@@ -458,8 +458,21 @@ class TestTranspileDialects:
                 "ANY('chr1:1000-2000', 'chr1:5000-6000')",
                 ["peaks"],
             ),
+            (
+                "SELECT DISTANCE(a.interval, b.interval) AS d "
+                "FROM peaks a, genes b",
+                ["peaks", "genes"],
+            ),
         ],
-        ids=["intersects_literal", "contains", "within", "nearest", "join", "any"],
+        ids=[
+            "intersects_literal",
+            "contains",
+            "within",
+            "nearest",
+            "join",
+            "any",
+            "distance",
+        ],
     )
     def test_transpile_datafusion_matches_generic_output(self, query, tables):
         """Test that datafusion is currently a pure alias for the generic target.
@@ -482,6 +495,52 @@ class TestTranspileDialects:
 
         # Assert
         assert datafusion_sql == generic_sql
+
+    @pytest.mark.parametrize(
+        "query, tables",
+        [
+            (
+                "SELECT DISTANCE(a.interval, b.interval) AS d FROM peaks a, genes b",
+                ["peaks", "genes"],
+            ),
+            (
+                "SELECT DISTANCE(a.interval, b.interval, stranded := true) AS d "
+                "FROM peaks a, genes b",
+                ["peaks", "genes"],
+            ),
+            (
+                "SELECT DISTANCE(a.interval, b.interval, signed := true) AS d "
+                "FROM peaks a, genes b",
+                ["peaks", "genes"],
+            ),
+            (
+                "SELECT DISTANCE(a.interval, b.interval, stranded := true, "
+                "signed := true) AS d FROM peaks a, genes b",
+                ["peaks", "genes"],
+            ),
+        ],
+        ids=["unsigned", "stranded", "signed", "stranded_signed"],
+    )
+    def test_transpile_distance_is_byte_identical_across_targets(self, query, tables):
+        """Test that the migrated DISTANCE operator emits identical SQL everywhere.
+
+        Given:
+            A DISTANCE query in each of the four shapes (unsigned/signed x
+            non-stranded/stranded), which migrated onto the AST-expansion pass
+            with a single generic expander.
+        When:
+            Transpiling it with dialect=None, "duckdb", and "datafusion".
+        Then:
+            The three outputs should be byte-identical — the generic expander
+            covers every target and DISTANCE has no engine-specific divergence.
+        """
+        # Act
+        generic_sql = transpile(query, tables=tables, dialect=None)
+        duckdb_sql = transpile(query, tables=tables, dialect="duckdb")
+        datafusion_sql = transpile(query, tables=tables, dialect="datafusion")
+
+        # Assert
+        assert generic_sql == duckdb_sql == datafusion_sql
 
     def test_transpile_datafusion_accepts_intersects_bin_size(self):
         """Test that datafusion honours the binned-join bin size identically.

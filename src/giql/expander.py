@@ -39,10 +39,11 @@ An operator takes the new AST-expansion path **only when both** hold:
   i.e. a ``(target, op)`` or ``(generic, op)`` expander is registered.
 
 Otherwise it falls through to the legacy ``*_sql`` emitter on
-:class:`giql.generators.base.BaseGIQLGenerator`. As of this issue **no operator
-sets ``GIQL_EXPAND`` and the registry is empty, so the pass is a strict no-op**:
-no node is touched and the emitted SQL is byte-identical. Each later migration PR
-(epic #137 steps 4-9) registers a generic expander, flips one operator's
+:class:`giql.generators.base.BaseGIQLGenerator`. The built-in expanders register
+at import time via :mod:`giql.expanders`; the pass rewrites a node only when
+``GIQL_EXPAND=True`` **and** an expander resolves for ``(active target, operator
+type)``, and is a no-op for any operator that is unflagged or has no registered
+expander. A migration PR registers an expander, flips one operator's
 ``GIQL_EXPAND`` flag, and deletes that operator's ``*_sql`` method.
 """
 
@@ -149,6 +150,14 @@ class OperatorExpander(Protocol):
     a registered object satisfies it. A plain function is *not* an
     ``OperatorExpander`` (it has no ``expand`` method); register one by wrapping
     it (see :func:`register`, which accepts either form).
+
+    An expander is **node-local**: ``expand(node, ctx) -> exp.Expression`` sees
+    one operator node and returns the expression that replaces it in place. It
+    cannot express a whole-query rewrite such as the INTERSECTS IEJoin fold,
+    which restructures the surrounding query (joins, CTEs) rather than a single
+    node. That fold is therefore deferred — it would need a separate
+    query-level mechanism — and is handled by the pre-pass join transformers, not
+    by an expander.
     """
 
     def expand(self, node: exp.Expression, ctx: ExpansionContext) -> exp.Expression: ...
@@ -215,6 +224,16 @@ class ExpanderRegistry:
         expander : OperatorExpander | ExpanderFn
             The expander object or function. A later registration for the same
             key replaces an earlier one (last-write-wins override).
+
+        Notes
+        -----
+        Registering a *non-generic* ``(target, operator)`` expander where the
+        operator has a built-in whole-query join rewrite (notably
+        :class:`~giql.expressions.Intersects`, whose binned equi-join / DuckDB
+        IEJoin transformers run before expansion) signals that this expander
+        assumes responsibility for that rewrite: the built-in join transformers
+        are bypassed for that target so the operator node flows untouched into
+        :class:`ExpandOperators`. See :meth:`has_override`.
         """
         self._expanders[(target, operator)] = _as_callable(expander)
 
@@ -223,6 +242,12 @@ class ExpanderRegistry:
 
         Tries the exact ``(target, op)`` entry, then the
         ``(GenericTarget(), op)`` fallback, then ``None`` (legacy emitter).
+
+        A non-generic exact ``(target, op)`` entry is also a *join-rewrite
+        override* for operators with a built-in whole-query join rewrite (notably
+        :class:`~giql.expressions.Intersects`): registering one bypasses the
+        built-in binned / IEJoin transformers for that target (see
+        :meth:`register` and :meth:`has_override`).
         """
         fn = self._expanders.get((target, operator))
         if fn is not None:
@@ -232,6 +257,19 @@ class ExpanderRegistry:
             if fn is not None:
                 return fn
         return None
+
+    def has_override(self, target: Target, operator: type) -> bool:
+        """Whether an exact non-generic override supersedes built-in handling.
+
+        Returns ``True`` only when *target* is not :class:`~giql.targets.GenericTarget`
+        and an exact ``(target, operator)`` entry is registered. Such an entry is a
+        target-specific override that supersedes built-in handling for that target
+        (e.g. it takes responsibility for the whole-query join rewrite that the
+        built-in transformers would otherwise perform); the portable
+        ``(GenericTarget(), operator)`` fallback is *not* an override and does not
+        count here.
+        """
+        return target != GenericTarget() and (target, operator) in self._expanders
 
     def unregister(self, target: Target, operator: type) -> None:
         """Drop the ``(target, operator)`` entry if present.
@@ -256,12 +294,12 @@ class ExpanderRegistry:
     def snapshot(self) -> dict[tuple[Target, type], ExpanderFn]:
         """Return a shallow copy of the current registrations.
 
-        The save half of the registry's **public save/restore seam**: a test
-        fixture (or a plugin) that mutates the process-wide :data:`REGISTRY`
-        around a body — registering or clearing entries — captures the baseline
-        with this and hands it back to :meth:`restore` afterward, so the
-        built-in expanders registered at import survive an isolating fixture
-        that would otherwise :meth:`clear` them permanently.
+        The save half of a save/restore seam used primarily for test baseline
+        isolation (and which may serve a plugin that mutates the process-wide
+        :data:`REGISTRY` around a body): capture the baseline with this and hand
+        it back to :meth:`restore` afterward, so the built-in expanders
+        registered at import survive an isolating fixture that would otherwise
+        :meth:`clear` them permanently. It is not a committed plugin API.
 
         The returned dict is a fresh mapping (mutating it does not affect the
         registry), keyed by the same ``(target, operator)`` tuples.
@@ -271,12 +309,14 @@ class ExpanderRegistry:
     def restore(self, snapshot: dict[tuple[Target, type], ExpanderFn]) -> None:
         """Replace all registrations with those captured by :meth:`snapshot`.
 
-        The restore half of the save/restore seam. Drops every current entry and
-        re-installs exactly the *snapshot* contents, so a fixture can return the
-        registry to a previously captured baseline regardless of what its body
-        registered or cleared.
+        The restore half of the save/restore seam (test baseline isolation; may
+        also serve a plugin, but is not a committed plugin API). Drops every
+        current entry and re-installs exactly the *snapshot* contents, so a
+        fixture can return the registry to a previously captured baseline
+        regardless of what its body registered or cleared.
         """
-        self._expanders = dict(snapshot)
+        self._expanders.clear()
+        self._expanders.update(snapshot)
 
     def __contains__(self, key: tuple[Target, type]) -> bool:
         """Whether an *exact* ``(target, operator)`` entry is registered.
@@ -305,8 +345,9 @@ class ExpanderRegistry:
 
 
 #: The process-wide registry the :func:`register` decorator writes to and the
-#: :class:`ExpandOperators` pass reads from. Empty as of this issue, so the pass
-#: is a strict no-op.
+#: :class:`ExpandOperators` pass reads from. The built-in expanders register into
+#: it at import time via :mod:`giql.expanders`; the pass rewrites a node only when
+#: an expander resolves here (and the operator is flagged ``GIQL_EXPAND``).
 REGISTRY = ExpanderRegistry()
 
 
@@ -405,9 +446,10 @@ def expand_operators(
     ``(target, operator type)`` through its fallback chain; otherwise the node is
     left untouched and the legacy ``*_sql`` emitter handles it.
 
-    The pass mutates and returns *expression* in place. **With no operator
-    flagged and an empty registry it is a strict no-op** and the emitted SQL is
-    byte-identical, so the existing suite is the migration oracle.
+    The pass mutates and returns *expression* in place. It touches only nodes
+    whose operator is flagged ``GIQL_EXPAND`` and resolves an expander; for every
+    other operator it is a no-op, leaving the emitted SQL byte-identical, so the
+    existing suite is the migration oracle.
 
     Parameters
     ----------
@@ -424,9 +466,9 @@ def expand_operators(
     Returns
     -------
     exp.Expression
-        The same *expression*, with opted-in operator nodes replaced by their
-        target-specific expansions (none, while every flag is off / the registry
-        is empty).
+        The same *expression*, with each opted-in operator node that resolves an
+        expander replaced by its target-specific expansion; nodes that are
+        unflagged or resolve no expander are left untouched.
     """
     reg = registry if registry is not None else REGISTRY
     operators = _giql_operators()

@@ -507,6 +507,17 @@ class BaseGIQLGenerator(Generator):
     ) -> str:
         """Generate SQL CASE expression for distance calculation.
 
+        .. note::
+
+           KEEP IN SYNC: this method and the AST builder in
+           ``giql.expanders.distance`` (``expand_distance``) produce the *same*
+           distance CASE by two routes. DISTANCE itself migrated to the expander
+           (epic #137, issue #140); this method survives only because NEAREST
+           still calls it for its ORDER BY / filter math. Once NEAREST migrates,
+           delete this method and retire the duplication. Until then, any change
+           to the distance math here must be mirrored in the expander (and vice
+           versa); the parity test in tests/test_distance_udf.py guards drift.
+
         Distances follow bedtools ``closest -d`` semantics: overlapping
         intervals report ``0``, book-ended (adjacent) intervals where
         ``A.end == B.start`` in half-open coordinates report ``1``, and a raw

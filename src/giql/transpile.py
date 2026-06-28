@@ -196,18 +196,19 @@ def transpile(
     with _reraise_as_value_error("Resolution error"):
         ast = resolve_operator_refs(ast, tables_container)
 
-    # Pass 2 of the normalization pipeline (epic #114): synthesize canonical
-    # __giql_canon_* wrapper CTEs for non-canonical interval operands of
-    # opted-in operators (GIQL_CANONICALIZE). No operator opts in yet, so this
-    # is a strict no-op until the per-operator port issues (#122, #123) land.
+    # Pass 2 of the normalization pipeline (epic #114): for each operator that
+    # opts into GIQL_CANONICALIZE, rewrite its non-canonical interval operands —
+    # synthesizing canonical __giql_canon_* wrapper CTEs — so downstream passes
+    # and emitters see canonical 0-based half-open coordinates.
     with _reraise_as_value_error("Canonicalization error"):
         ast = canonicalize_coordinates(ast)
 
     # Pass 3 of the normalization pipeline (epic #137): replace each opted-in
     # GIQL operator node with the AST its registered expander produces for the
-    # active target. No operator sets GIQL_EXPAND and the registry is empty, so
-    # this is a strict no-op until the per-operator migration issues land; the
-    # legacy *_sql emitters on the generator remain the fallback.
+    # active target. Each operator that opts in (GIQL_EXPAND) with a registered
+    # expander is rewritten here; any operator that is unflagged or has no
+    # registered expander falls through to its legacy *_sql emitter on the
+    # generator.
     expand_operators = ExpandOperators(target, tables_container)
     with _reraise_as_value_error("Expansion error"):
         ast = expand_operators.transform(ast)

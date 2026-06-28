@@ -6,6 +6,10 @@ SQL output and executed results.
 
 import duckdb
 import pytest
+from hypothesis import given
+from hypothesis import settings
+from hypothesis import strategies as st
+from sqlglot import exp
 from sqlglot import parse_one
 
 import giql  # noqa: F401  (ensures the built-in expanders are registered)
@@ -16,6 +20,10 @@ from giql.generators import BaseGIQLGenerator
 from giql.resolver import resolve_operator_refs
 from giql.table import Tables
 from giql.targets import GenericTarget
+
+#: This module executes generated SQL against a real in-memory DuckDB, so every
+#: test here is an integration test (the marker is registered in pyproject).
+pytestmark = pytest.mark.integration
 
 
 def _generate(sql: str) -> str:
@@ -703,3 +711,184 @@ class TestStrandedSignedDistance:
 
         # Assert
         assert result is None, f"Expected NULL for '.' strand, got {result}"
+
+
+# --- Drift guard: expand_distance vs the legacy _generate_distance_case -------
+#
+# DISTANCE moved onto the AST-expansion pass (expand_distance), but
+# BaseGIQLGenerator._generate_distance_case is retained because NEAREST still
+# calls it. The two compute the same distance by different routes; these tests
+# pin that they stay semantically equivalent until NEAREST migrates and the
+# legacy method can be deleted.
+
+#: Column expressions both routes are evaluated over. ``a``/``b`` are the two
+#: operand relations supplied by the parity harness's VALUES row.
+_CHROM_A, _START_A, _END_A, _STRAND_A = 'a."chrom"', 'a."start"', 'a."end"', 'a."strand"'
+_CHROM_B, _START_B, _END_B, _STRAND_B = 'b."chrom"', 'b."start"', 'b."end"', 'b."strand"'
+
+#: The four DISTANCE shapes: (id, stranded, signed).
+_SHAPES = [
+    ("unsigned_nonstranded", False, False),
+    ("signed_nonstranded", False, True),
+    ("unsigned_stranded", True, False),
+    ("signed_stranded", True, True),
+]
+
+#: Rows exercised by the parity test: ordinary downstream/upstream gaps,
+#: book-ended pairs, overlaps, a chrom mismatch, and strand-invalid ('.'/'?'/
+#: NULL) rows so every WHEN branch of both routes is covered.
+_PARITY_ROWS = [
+    ("chr1", 100, 200, "+", "chr1", 300, 400, "+"),  # downstream gap
+    ("chr1", 300, 400, "+", "chr1", 100, 200, "+"),  # upstream gap
+    ("chr1", 100, 200, "+", "chr1", 200, 300, "+"),  # book-ended downstream
+    ("chr1", 200, 300, "+", "chr1", 100, 200, "+"),  # book-ended upstream
+    ("chr1", 100, 200, "+", "chr1", 150, 250, "+"),  # overlap
+    ("chr1", 100, 200, "-", "chr1", 300, 400, "+"),  # '-' strand A, downstream
+    ("chr1", 300, 400, "-", "chr1", 100, 200, "+"),  # '-' strand A, upstream
+    ("chr1", 100, 200, "+", "chr2", 300, 400, "+"),  # chrom mismatch -> NULL
+    ("chr1", 100, 200, ".", "chr1", 300, 400, "+"),  # strand A '.' -> NULL
+    ("chr1", 100, 200, "?", "chr1", 300, 400, "+"),  # strand A '?' -> NULL
+    ("chr1", 100, 200, "+", "chr1", 300, 400, "."),  # strand B '.' -> NULL
+    ("chr1", 100, 200, None, "chr1", 300, 400, "+"),  # strand A NULL -> NULL
+]
+
+
+def _row_values_cte(row) -> str:
+    """Render one parity row as ``a``/``b`` relations via SELECT subqueries.
+
+    *row* is ``(chrom_a, start_a, end_a, strand_a, chrom_b, ...)``; strands may
+    be ``None`` (rendered as SQL ``NULL``).
+    """
+    ca, sa, ea, ta, cb, sb, eb, tb = row
+
+    def _strand(value):
+        return "NULL" if value is None else f"'{value}'"
+
+    a = (
+        f"(SELECT '{ca}' AS chrom, {sa} AS start, {ea} AS \"end\", "
+        f"{_strand(ta)} AS strand) a"
+    )
+    b = (
+        f"(SELECT '{cb}' AS chrom, {sb} AS start, {eb} AS \"end\", "
+        f"{_strand(tb)} AS strand) b"
+    )
+    return f"{a} CROSS JOIN {b}"
+
+
+def _expander_distance_case(stranded: bool, signed: bool) -> str:
+    """Return the DISTANCE CASE the expander builds, isolated from its SELECT.
+
+    Runs the real transpile passes over a DISTANCE query whose operands resolve
+    to ``a``/``b`` default columns, then lifts the generated CASE expression so
+    it can be re-embedded over arbitrary VALUES rows.
+    """
+    args = ["a.interval", "b.interval"]
+    if stranded:
+        args.append("stranded := true")
+    if signed:
+        args.append("signed := true")
+    sql = (
+        f"SELECT DISTANCE({', '.join(args)}) AS d "
+        "FROM (SELECT 'x' AS chrom, 0 AS start, 0 AS \"end\", '+' AS strand) a "
+        "CROSS JOIN (SELECT 'x' AS chrom, 0 AS start, 0 AS \"end\", '+' AS strand) b"
+    )
+    tables = Tables()
+    ast = parse_one(sql, dialect=GIQLDialect)
+    ast = resolve_operator_refs(ast, tables)
+    ast = canonicalize_coordinates(ast)
+    ast = ExpandOperators(GenericTarget(), tables).transform(ast)
+    # The single projected expression is the expander's CASE.
+    return ast.find(exp.Select).expressions[0].this.sql()
+
+
+def _legacy_distance_case(stranded: bool, signed: bool) -> str:
+    """Return the CASE the legacy _generate_distance_case builds for ``a``/``b``."""
+    return BaseGIQLGenerator()._generate_distance_case(
+        _CHROM_A,
+        _START_A,
+        _END_A,
+        _STRAND_A if stranded else None,
+        _CHROM_B,
+        _START_B,
+        _END_B,
+        _STRAND_B if stranded else None,
+        stranded=stranded,
+        signed=signed,
+    )
+
+
+def _eval_case(case_sql: str, row) -> object:
+    """Execute one distance CASE over one parity row, returning the scalar."""
+    conn = duckdb.connect(":memory:")
+    try:
+        query = f"SELECT {case_sql} AS d FROM {_row_values_cte(row)}"
+        return conn.execute(query).fetchone()[0]
+    finally:
+        conn.close()
+
+
+class TestDistanceExpanderLegacyParity:
+    """expand_distance and the retained _generate_distance_case agree row-for-row."""
+
+    @pytest.mark.parametrize(
+        "shape_id, stranded, signed", _SHAPES, ids=[s[0] for s in _SHAPES]
+    )
+    def test_expander_matches_legacy_distance_case(self, shape_id, stranded, signed):
+        """
+        GIVEN the four DISTANCE shapes (unsigned/signed x non-stranded/stranded)
+            plus overlap, chrom-mismatch, and strand-invalid input rows
+        WHEN the same inputs run through expand_distance and the retained
+            _generate_distance_case
+        THEN both routes return the identical scalar for every row, pinning the
+            two distance implementations against drift until NEAREST migrates.
+        """
+        # Arrange
+        expander_case = _expander_distance_case(stranded, signed)
+        legacy_case = _legacy_distance_case(stranded, signed)
+
+        # Act & assert
+        for row in _PARITY_ROWS:
+            expander_result = _eval_case(expander_case, row)
+            legacy_result = _eval_case(legacy_case, row)
+            assert expander_result == legacy_result, (
+                f"{shape_id}: expander {expander_result!r} != "
+                f"legacy {legacy_result!r} for row {row}"
+            )
+
+
+class TestDistanceExpanderProperties:
+    """Property-based invariants of the expander's distance CASE."""
+
+    @settings(max_examples=200, deadline=None)
+    @given(
+        start_a=st.integers(min_value=0, max_value=10_000),
+        len_a=st.integers(min_value=1, max_value=5_000),
+        start_b=st.integers(min_value=0, max_value=10_000),
+        len_b=st.integers(min_value=1, max_value=5_000),
+    )
+    def test_distance_invariants_hold(self, start_a, len_a, start_b, len_b):
+        """
+        GIVEN random A and B intervals (start + positive length)
+        WHEN DISTANCE is evaluated unsigned, signed, and cross-chromosome
+        THEN unsigned == abs(signed), overlapping intervals report 0, and a
+            cross-chromosome pair reports NULL.
+        """
+        # Arrange
+        end_a = start_a + len_a
+        end_b = start_b + len_b
+        same_chrom = ("chr1", start_a, end_a, "+", "chr1", start_b, end_b, "+")
+        cross_chrom = ("chr1", start_a, end_a, "+", "chr2", start_b, end_b, "+")
+        unsigned_case = _expander_distance_case(stranded=False, signed=False)
+        signed_case = _expander_distance_case(stranded=False, signed=True)
+
+        # Act
+        unsigned = _eval_case(unsigned_case, same_chrom)
+        signed = _eval_case(signed_case, same_chrom)
+        cross = _eval_case(unsigned_case, cross_chrom)
+
+        # Assert
+        assert unsigned == abs(signed)
+        overlaps = start_a < end_b and end_a > start_b
+        if overlaps:
+            assert unsigned == 0
+        assert cross is None

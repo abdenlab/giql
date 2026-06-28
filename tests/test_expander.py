@@ -54,10 +54,12 @@ def _record(label: str):
 
 
 #: The registry contents at import — the built-in expanders registered by
-#: ``giql.expanders`` for already-migrated operators (DISJOIN as of #143). The
-#: leak guards and ``clean_registry`` treat this as the baseline rather than an
-#: empty registry, so the real built-in registrations survive isolating fixtures
-#: and a leaking test is still caught against the true baseline.
+#: ``giql.expanders`` for the already-migrated operators. The leak guards and
+#: ``clean_registry`` treat this as the baseline rather than an empty registry,
+#: so the real built-in registrations survive isolating fixtures and a leaking
+#: test is still caught against the true baseline.
+import giql.expanders  # noqa: F401, E402
+
 _REGISTRY_BASELINE = REGISTRY.snapshot()
 
 
@@ -483,7 +485,7 @@ class TestExpanderRegistryFallbackGaps:
         assert REGISTRY.resolve(DuckDBTarget(), GIQLDisjoin) is None
         assert (DuckDBTarget(), GIQLDisjoin) not in REGISTRY
 
-    def test_snapshot_is_independent_of_later_registrations(self):
+    def test_snapshot_should_not_observe_later_registrations(self):
         """Test that a snapshot does not observe registrations made after it.
 
         Given:
@@ -506,7 +508,7 @@ class TestExpanderRegistryFallbackGaps:
         assert (DuckDBTarget(), GIQLDisjoin) in saved
         assert (GenericTarget(), Intersects) not in saved
 
-    def test_restore_replaces_entries_with_snapshot_contents(self):
+    def test_restore_should_replace_entries_with_snapshot_contents(self):
         """Test that restore returns the registry to a captured snapshot.
 
         Given:
@@ -1019,13 +1021,13 @@ class TestExpandOperatorsPass:
         """Test that an unflagged operator is left untouched even when registered.
 
         Given:
-            An expander registered for (GenericTarget, GIQLDisjoin) but the
-            operator's GIQL_EXPAND flag held off (DISJOIN ships it on, so the
+            An expander registered for a migrated operator but the operator's
+            GIQL_EXPAND flag held off (a migrated operator ships it on, so the
             control opts it out to isolate the per-type gate).
         When:
             Running the pass.
         Then:
-            The DISJOIN node should remain in the tree (gate requires both).
+            The operator node should remain in the tree (gate requires both).
         """
         # Arrange
         clean_registry.register(GenericTarget(), GIQLDisjoin, _record("expanded"))
@@ -1034,7 +1036,7 @@ class TestExpandOperatorsPass:
         pass_ = ExpandOperators(GenericTarget(), tables, clean_registry)
 
         # Act
-        with _opted_out(GIQLDisjoin):
+        with _opted_out(_A_MIGRATED_OPERATOR):
             result = pass_.transform(ast)
 
         # Assert
@@ -1118,8 +1120,9 @@ class TestNoOpWhenInert:
 
 
 # The nine GIQL operator expression classes the ExpandOperators pass inspects.
-# Every one must ship opted out (GIQL_EXPAND=False) at this step so the pass is a
-# strict no-op until a later migration flips one alongside its expander.
+# Each migrated operator ships opted in (GIQL_EXPAND=True) alongside its
+# registered expander; the rest ship opted out (False) and fall through to the
+# legacy emitter.
 from giql.expressions import Contains  # noqa: E402
 from giql.expressions import GIQLCluster  # noqa: E402
 from giql.expressions import GIQLDistance  # noqa: E402
@@ -1140,9 +1143,9 @@ _OPERATOR_CLASSES = (
 )
 
 #: Each operator's shipped GIQL_EXPAND default, captured from its own class dict
-#: at import. A migrated operator (DISJOIN, #143) ships ``True``; the rest ship
-#: ``False`` until their migrations land. The flag leak guard restores to these
-#: shipped values rather than a blanket ``False``.
+#: at import. A migrated operator ships ``True``; the rest ship ``False`` until
+#: their migrations land. The flag leak guard restores to these shipped values
+#: rather than a blanket ``False``.
 _SHIPPED_EXPAND_FLAGS = {op: op.__dict__.get("GIQL_EXPAND") for op in _OPERATOR_CLASSES}
 
 
@@ -1150,6 +1153,9 @@ _SHIPPED_EXPAND_FLAGS = {op: op.__dict__.get("GIQL_EXPAND") for op in _OPERATOR_
 _MIGRATED_OPERATORS = tuple(
     op for op in _OPERATOR_CLASSES if op.__dict__.get("GIQL_EXPAND") is True
 )
+assert _MIGRATED_OPERATORS, "expected at least one migrated operator"
+#: An arbitrary migrated operator the operator-agnostic control tests target.
+_A_MIGRATED_OPERATOR = _MIGRATED_OPERATORS[0]
 #: Operators not yet migrated — they ship GIQL_EXPAND=False.
 _UNMIGRATED_OPERATORS = tuple(
     op for op in _OPERATOR_CLASSES if op not in _MIGRATED_OPERATORS
@@ -1759,13 +1765,13 @@ class TestExpandOperatorsWalk:
         """Test that only the flagged operator type is replaced when both registered.
 
         Given:
-            A DISJOIN and an INTERSECTS, both with registered expanders, but only
-            INTERSECTS flagged GIQL_EXPAND.
+            A migrated operator and an INTERSECTS, both with registered
+            expanders, but only INTERSECTS flagged GIQL_EXPAND.
         When:
             Running the pass.
         Then:
-            The INTERSECTS is replaced while the DISJOIN node remains (the gate is
-            per-type).
+            The INTERSECTS is replaced while the other operator node remains (the
+            gate is per-type).
         """
         # Arrange
         clean_registry.register(
@@ -1782,8 +1788,8 @@ class TestExpandOperatorsWalk:
         )
         pass_ = ExpandOperators(GenericTarget(), tables, clean_registry)
 
-        # Act (DISJOIN ships flagged, so opt it out to hold it as the control)
-        with _opted_in(Intersects), _opted_out(GIQLDisjoin):
+        # Act (a migrated operator ships flagged, so opt it out to hold the control)
+        with _opted_in(Intersects), _opted_out(_A_MIGRATED_OPERATOR):
             result = pass_.transform(ast)
 
         # Assert
@@ -2004,7 +2010,7 @@ class _opted_out:
     """Context manager opting an operator class out of GIQL_EXPAND for a test.
 
     The complement of :class:`_opted_in`: used by a control test that needs a
-    *migrated* operator (DISJOIN ships GIQL_EXPAND=True) to behave as if
+    *migrated* operator (one shipping GIQL_EXPAND=True) to behave as if
     unflagged, so the test can prove the pass gates per-type without the
     operator's shipped opt-in interfering. Restores the prior flag on exit.
     """
