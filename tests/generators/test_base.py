@@ -11,7 +11,7 @@ from hypothesis import strategies as st
 from sqlglot import exp
 from sqlglot import parse_one
 
-import giql  # noqa: F401  (ensures the built-in expanders are registered)
+import giql.expanders  # noqa: F401  (registers built-in expanders)
 from giql import Table
 from giql import transpile
 from giql.canonicalizer import canonicalize_coordinates
@@ -28,17 +28,16 @@ def _generate_through_passes(sql: str, tables: Tables) -> str:
     """Parse, run normalization passes 1-3, then generate SQL.
 
     Coordinate canonicalization for operator operands moved out of the emitter and
-    into the CanonicalizeCoordinates pass (issue #123), and DISTANCE generation
-    itself moved onto the registry's AST-expansion pass (epic #137, issue #140).
-    Emitter-level tests that pin canonicalized / expanded output must therefore
-    run all three passes before generating, exactly as
-    :func:`giql.transpile.transpile` does, rather than calling ``generate`` on a
-    bare parsed AST. The expansion pass only touches operators that opt in
-    (``GIQL_EXPAND``); operators still on the legacy emitter (NEAREST, the
-    spatial predicates) pass through untouched. This helper is used where the
-    full ``transpile`` pipeline would otherwise rewrite the node away (a
-    column-to-column ``INTERSECTS`` is turned into a binned equi-join before the
-    predicate emitter runs).
+    into the CanonicalizeCoordinates pass (issue #123), and DISTANCE (issue #140)
+    and the spatial / set predicates (issue #141) moved onto the registry's
+    ExpandOperators pass (epic #137). Emitter-level tests that pin canonicalized /
+    expanded output must therefore run all three passes before generating, exactly
+    as :func:`giql.transpile.transpile` does, rather than calling ``generate`` on a
+    bare parsed AST. Operators still on the legacy emitter (NEAREST, DISJOIN) pass
+    through the expansion pass untouched. This helper is used where the full
+    ``transpile`` pipeline would otherwise rewrite the node away (a column-to-column
+    ``INTERSECTS`` is turned into a binned equi-join before the predicate expander
+    runs).
     """
     ast = parse_one(sql, dialect=GIQLDialect)
     ast = resolve_operator_refs(ast, tables)
@@ -822,38 +821,33 @@ class TestBaseGIQLGenerator:
         )
         assert output == expected
 
-    def test_error_handling_invalid_range(self):
+    def test_expand_intersects_should_raise_when_invalid_range(self):
         """
         GIVEN invalid genomic range string in Intersects
-        WHEN intersects_sql is called
+        WHEN the INTERSECTS predicate is expanded
         THEN ValueError with descriptive message is raised.
         """
         sql = "SELECT * FROM variants WHERE interval INTERSECTS 'invalid'"
-        ast = parse_one(sql, dialect=GIQLDialect)
-
-        generator = BaseGIQLGenerator()
 
         with pytest.raises(ValueError, match="Could not parse genomic range"):
-            generator.generate(ast)
+            _generate_through_passes(sql, Tables())
 
-    def test_error_handling_unknown_operation(self):
+    def test_expand_intersects_should_raise_when_nonnumeric_range_bounds(self):
         """
-        GIVEN unknown operation type in spatial operations
-        WHEN a spatial operation with unknown op_type is attempted
-        THEN ValueError is raised.
+        GIVEN an INTERSECTS range whose start/end bounds are non-numeric
+        WHEN the INTERSECTS predicate is expanded
+        THEN ValueError is raised from the range parse failure.
 
-        Note: This test verifies internal error handling by directly calling
-        a method with invalid input, which would only occur through code errors.
+        Note: 'chr:a-b' parses as a range shape but its bounds are not integers,
+        so the underlying RangeParser raises and the expander wraps it. (The
+        former "unknown operation" guard this exercised is now unreachable —
+        dispatch is closed over the three known op types — so this pins the
+        remaining reachable failure: a parse error on the literal range.)
         """
-        # This is an indirect test - we verify the generator raises ValueError
-        # when given malformed range strings as that's how errors surface
         sql = "SELECT * FROM variants WHERE interval INTERSECTS 'chr:a-b'"
-        ast = parse_one(sql, dialect=GIQLDialect)
-
-        generator = BaseGIQLGenerator()
 
         with pytest.raises(ValueError):
-            generator.generate(ast)
+            _generate_through_passes(sql, Tables())
 
     def test_select_sql_join_without_alias(self, tables_with_two_tables):
         """

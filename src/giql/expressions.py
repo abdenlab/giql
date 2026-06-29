@@ -114,8 +114,9 @@ _CANONICALIZE = True
 #: per-operator ``GIQL_EXPAND`` flag mirrors ``GIQL_CANONICALIZE``: an operator
 #: takes the new AST-expansion path only when it sets ``GIQL_EXPAND = True`` *and*
 #: an expander is registered for it; otherwise the legacy ``*_sql`` emitter runs.
-#: Every operator defaults to ``False`` here, so the pass is a strict no-op until a
-#: later migration step (#140+) flips one operator's flag alongside its expander.
+#: This is the opt-out default: an operator inherits it and stays on the legacy
+#: emitter until its migration step flips the flag to ``True`` alongside its
+#: registered expander. Operators already migrated override it on their own class.
 _EXPAND = False
 
 
@@ -126,7 +127,12 @@ class Intersects(SpatialPredicate):
     """
 
     GIQL_CANONICALIZE = _CANONICALIZE
-    GIQL_EXPAND = _EXPAND
+    #: Migrated to the ExpandOperators registry (#141). A literal-range or
+    #: residual column-to-column INTERSECTS *predicate* expands through
+    #: ``giql.expanders.intersects``; a column-to-column INTERSECTS *join* is
+    #: consumed by the capability-gated binned / IEJoin pre-pass transformers
+    #: before this pass runs, so the predicate expander never sees it.
+    GIQL_EXPAND = True
 
     GIQL_SLOTS = (
         SlotSpec("this", frozenset({"column"}), required=True),
@@ -141,7 +147,9 @@ class Contains(SpatialPredicate):
     """
 
     GIQL_CANONICALIZE = _CANONICALIZE
-    GIQL_EXPAND = _EXPAND
+    #: Migrated to the ExpandOperators registry (#141); expands through
+    #: ``giql.expanders.intersects``.
+    GIQL_EXPAND = True
 
     GIQL_SLOTS = (
         SlotSpec("this", frozenset({"column"}), required=True),
@@ -156,7 +164,9 @@ class Within(SpatialPredicate):
     """
 
     GIQL_CANONICALIZE = _CANONICALIZE
-    GIQL_EXPAND = _EXPAND
+    #: Migrated to the ExpandOperators registry (#141); expands through
+    #: ``giql.expanders.intersects``.
+    GIQL_EXPAND = True
 
     GIQL_SLOTS = (
         SlotSpec("this", frozenset({"column"}), required=True),
@@ -180,7 +190,9 @@ class SpatialSetPredicate(exp.Expression):
     }
 
     GIQL_CANONICALIZE = _CANONICALIZE
-    GIQL_EXPAND = _EXPAND
+    #: Migrated to the ExpandOperators registry (#141); expands through
+    #: ``giql.expanders.intersects``.
+    GIQL_EXPAND = True
 
     GIQL_SLOTS = (
         SlotSpec("this", frozenset({"column"}), required=True),

@@ -1412,27 +1412,28 @@ class TestOptedInRestoresFlag:
         assert GIQLMerge.GIQL_EXPAND is False
 
 
-class TestIEJoinEarlyReturnSkipsExpansion:
-    """Pin Finding 2: the duckdb IEJoin early return skips the ExpandOperators pass."""
+class TestIEJoinRegistryDeferral:
+    """The duckdb IEJoin path defers to a target-specific Intersects expander (#141).
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="#141: the duckdb IEJoin early return in transpile() emits before "
-        "ExpandOperators runs, so a flagged operator on an IEJoin-eligible query "
-        "is not expanded. Flips to pass when #141 runs expansion before the "
-        "early return (or defers the IEJoin transformer to the registry).",
-    )
-    def test_iejoin_query_expands_flagged_operator(self, clean_registry):
-        """Test that an IEJoin-eligible duckdb query expands a flagged operator.
+    Resolves Finding 2: the IEJoin early return used to emit before the
+    ExpandOperators pass, so a flagged operator on an IEJoin-eligible query was
+    never expanded. Now a *target-specific* ``(DuckDBTarget, Intersects)``
+    registry entry overrides the built-in join strategy entirely (the public
+    extension hook), while the default duckdb path — with no such override —
+    still emits the built-in IEJoin SQL.
+    """
+
+    def test_iejoin_query_expands_target_override_expander(self, clean_registry):
+        """Test that a target-specific Intersects override fires on an IEJoin query.
 
         Given:
             A column-to-column INTERSECTS join eligible for the duckdb IEJoin
-            path, with Intersects flagged GIQL_EXPAND and an expander registered.
+            path, with a (DuckDBTarget, Intersects) expander registered.
         When:
             Transpiling with dialect='duckdb'.
         Then:
-            The expander's sentinel should appear (currently it does NOT — the
-            IEJoin early return skips the pass; this xfail flips when #141 lands).
+            The override expander's sentinel should appear — the IEJoin path
+            defers to the registry rather than short-circuiting expansion.
         """
         # Arrange
         clean_registry.register(
@@ -1444,41 +1445,35 @@ class TestIEJoinEarlyReturnSkipsExpansion:
         )
 
         # Act
-        with _opted_in(Intersects):
-            sql = transpile(query, tables=["peaks", "genes"], dialect="duckdb")
+        sql = transpile(query, tables=["peaks", "genes"], dialect="duckdb")
 
         # Assert
         assert "__giql_iejoin_sentinel" in sql
+        assert "SET VARIABLE __giql_iejoin_" not in sql
 
-    def test_iejoin_query_emits_legacy_sql_unchanged(self, clean_registry):
-        """Test that the legacy IEJoin SQL is emitted regardless of a flagged op.
+    def test_iejoin_query_emits_builtin_iejoin_without_override(self):
+        """Test that the default duckdb path emits the built-in IEJoin SQL.
 
         Given:
-            The same IEJoin-eligible duckdb query with Intersects flagged and an
-            expander registered.
+            The same IEJoin-eligible duckdb query and no target-specific
+            Intersects override registered (only the built-in generic expander).
         When:
             Transpiling with dialect='duckdb'.
         Then:
-            The legacy IEJoin SET VARIABLE SQL is emitted and the expander's
-            sentinel is absent (characterizing the current skip; the companion
-            xfail surfaces when #141 fixes it).
+            The built-in IEJoin SET VARIABLE SQL is emitted (the generic
+            predicate expander does not disable the join strategy).
         """
         # Arrange
-        clean_registry.register(
-            DuckDBTarget(), Intersects, lambda n, c: exp.column("__giql_iejoin_sentinel")
-        )
         query = (
             "SELECT a.start FROM peaks a "
             "JOIN genes b ON a.interval INTERSECTS b.interval"
         )
 
         # Act
-        with _opted_in(Intersects):
-            sql = transpile(query, tables=["peaks", "genes"], dialect="duckdb")
+        sql = transpile(query, tables=["peaks", "genes"], dialect="duckdb")
 
         # Assert
         assert "SET VARIABLE __giql_iejoin_" in sql
-        assert "__giql_iejoin_sentinel" not in sql
 
 
 class TestTranspileExpanderDispatch:

@@ -14,7 +14,9 @@ from sqlglot import parse_one
 import giql.expanders  # noqa: F401
 from giql.canonicalizer import canonicalize_coordinates
 from giql.dialect import GIQLDialect
+from giql.expander import REGISTRY
 from giql.expander import ExpandOperators
+from giql.expressions import Intersects
 from giql.generators import BaseGIQLGenerator
 from giql.resolver import resolve_operator_refs
 from giql.table import Table
@@ -151,41 +153,78 @@ def transpile(
             "of the binned equi-join. Pass one or the other, not both."
         )
 
+    # The INTERSECTS join-rewrite override (governs the three uses below).
+    #
+    # A *target-specific* ``(target, Intersects)`` registry entry — the public
+    # extension hook, matched by ``ExpanderRegistry.has_override`` — takes over the
+    # INTERSECTS join rewrite entirely. ``has_override`` deliberately matches only
+    # an *exact non-generic* entry: the built-in ``(GenericTarget(), Intersects)``
+    # predicate expander is NOT a join-strategy override (it only renders the
+    # residual / literal-range predicates the join transformers leave behind), so
+    # it must not disable the join rewrite. When an override is present, all three
+    # built-in join paths below are bypassed for that target so the INTERSECTS node
+    # flows untouched into ExpandOperators, which dispatches it to that expander:
+    #   1. ``intersects_bin_size`` is rejected — it only configures the built-in
+    #      binned transformer the override supersedes (rejected here, parallel to
+    #      the iejoin rejection above, rather than silently dropped);
+    #   2. the DuckDB IEJoin short-circuit is skipped (the registry-deferral the
+    #      IEJoin early-return used to preclude, #141);
+    #   3. the binned-join transformer is skipped.
+    target_overrides_intersects = REGISTRY.has_override(target, Intersects)
+    if target_overrides_intersects and intersects_bin_size is not None:
+        raise ValueError(
+            "intersects_bin_size has no effect when a target-specific "
+            f"(target={target.name!r}, Intersects) expander is registered; that "
+            "expander supersedes the built-in binned join transformer the bin "
+            "size configures. Pass one or the other, not both."
+        )
+
     tables_container = _build_tables(tables)
 
     with _reraise_as_value_error("Parse error", query=giql):
         ast = parse_one(giql, dialect=GIQLDialect)
 
+    # The column-to-column INTERSECTS *join* rewrites are capability-gated
+    # pre-pass transformers (epic #137, #141): the target's
+    # ``range_join_strategy`` selects the DuckDB IEJoin plan or the generic
+    # binned equi-join. They run on the raw parsed AST (before resolution, which
+    # rewrites the genomic column name) and consume a column-to-column INTERSECTS
+    # *join* so it never reaches the predicate expander; a literal-range or
+    # residual column-to-column INTERSECTS *predicate* survives to pass 3.
+    # ``target_overrides_intersects`` (computed above) gates whether these
+    # built-in join paths run — see its definition for the override rationale.
+
     # Falls back to the binned plan for unsupported shapes — see
     # IntersectsDuckDBIEJoinTransformer.transform_to_sql for the complete
-    # fallback set.
-    if uses_iejoin:
+    # fallback set. The IEJoin transformer emits a whole-query string, so when it
+    # produces output it must short-circuit the AST pipeline. This never skips an
+    # INTERSECTS that pass 3 would expand: ``_classify_extras`` forces the binned
+    # fallback (returning None here) for any query carrying a residual INTERSECTS
+    # alongside the join, so a query the IEJoin transformer accepts has no residual
+    # INTERSECTS left for the expander. (A residual CONTAINS/WITHIN/ANY beside an
+    # IEJoin is a pre-existing IEJoin limitation that errors identically on main.)
+    if uses_iejoin and not target_overrides_intersects:
         duckdb_transformer = IntersectsDuckDBIEJoinTransformer(tables_container)
         with _reraise_as_value_error("Transformation error"):
             duckdb_sql = duckdb_transformer.transform_to_sql(ast)
         if duckdb_sql is not None:
-            # WARNING: this early return emits the legacy IEJoin SQL directly and
-            # SKIPS the normalization pipeline below — pass 1 (resolution), pass 2
-            # (canonicalization), and pass 3 (ExpandOperators, constructed ~40
-            # lines down). The ExpandOperators registry is therefore NOT consulted
-            # on this path: a flagged operator on an IEJoin-eligible duckdb query
-            # is left un-expanded. This is benign today (the registry is empty and
-            # no operator opts in), but any DuckDB-pathed operator migration (#141)
-            # must either run expansion BEFORE this early return or have the IEJoin
-            # transformer defer to the registry. See the strict-xfail
-            # characterization test pinning this gap in tests/test_expander.py.
             return duckdb_sql
 
-    intersects_transformer = IntersectsBinnedJoinTransformer(
-        tables_container,
-        bin_size=intersects_bin_size,
-    )
     merge_transformer = MergeTransformer(tables_container)
     cluster_transformer = ClusterTransformer(tables_container)
     generator = BaseGIQLGenerator(tables=tables_container)
 
     with _reraise_as_value_error("Transformation error"):
-        ast = intersects_transformer.transform(ast)
+        # Reaching here with an iejoin target means the IEJoin transformer
+        # declined the query (returned None) and fell back to the binned plan,
+        # exactly as before. ``intersects_bin_size`` is rejected up front for
+        # iejoin targets, so the binned transformer always sees its default there.
+        if not target_overrides_intersects:
+            intersects_transformer = IntersectsBinnedJoinTransformer(
+                tables_container,
+                bin_size=intersects_bin_size,
+            )
+            ast = intersects_transformer.transform(ast)
         ast = merge_transformer.transform(ast)
         ast = cluster_transformer.transform(ast)
 
@@ -196,22 +235,21 @@ def transpile(
     with _reraise_as_value_error("Resolution error"):
         ast = resolve_operator_refs(ast, tables_container)
 
-    # Pass 2 of the normalization pipeline (epic #114): for each operator that
-    # opts into GIQL_CANONICALIZE, rewrite its non-canonical interval operands —
-    # synthesizing canonical __giql_canon_* wrapper CTEs — so downstream passes
-    # and emitters see canonical 0-based half-open coordinates.
+    # Pass 2 of the normalization pipeline (epic #114): synthesize canonical
+    # __giql_canon_* wrapper CTEs for non-canonical interval operands of operators
+    # that opt in via GIQL_CANONICALIZE; those operators are rewritten here, and
+    # operators that do not opt in are left untouched.
     with _reraise_as_value_error("Canonicalization error"):
         ast = canonicalize_coordinates(ast)
 
-    # Pass 3 of the normalization pipeline (epic #137): replace each opted-in
-    # GIQL operator node with the AST its registered expander produces for the
-    # active target. Each operator that opts in (GIQL_EXPAND) with a registered
-    # expander is rewritten here; any operator that is unflagged or has no
-    # registered expander falls through to its legacy *_sql emitter on the
-    # generator.
-    expand_operators = ExpandOperators(target, tables_container)
+    # Pass 3 of the normalization pipeline (epic #137): replace each GIQL operator
+    # node that opts in (GIQL_EXPAND) and resolves a registered expander with the
+    # AST that expander produces for the active target. Operators that are
+    # unflagged or resolve no expander are left untouched and the generator renders
+    # them via their legacy ``*_sql`` emitter as before.
+    expand_pass = ExpandOperators(target, tables_container)
     with _reraise_as_value_error("Expansion error"):
-        ast = expand_operators.transform(ast)
+        ast = expand_pass.transform(ast)
 
     with _reraise_as_value_error("Transpilation error"):
         sql = generator.generate(ast)

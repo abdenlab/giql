@@ -3,9 +3,9 @@
 These exercise the reusable oracle (``tests/integration/conftest.py``) over the
 operators that already emit identical generic SQL across Generic and DataFusion
 and run correctly on DuckDB: INTERSECTS (literal + column-to-column join),
-CONTAINS, WITHIN, and standalone NEAREST. No operator has been migrated to the
-expander registry yet (epic #137), so this lane locks in the verification path
-every later migration (#140-#144) will consume.
+CONTAINS, WITHIN, and standalone NEAREST. The spatial predicates have since been
+migrated to the expander registry (#141, epic #137); this lane locks in the
+verification path that migration and every later one (#142-#144) consume.
 
 For the non-join operators (DISTANCE, CONTAINS, WITHIN, ANY/ALL, CLUSTER,
 MERGE) the generic and datafusion targets emit byte-identical SQL and both run

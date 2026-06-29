@@ -3,13 +3,8 @@ from sqlglot.generator import Generator
 
 from giql.canonical import decanonical_end
 from giql.canonical import decanonical_start
-from giql.expressions import Contains
 from giql.expressions import GIQLDisjoin
 from giql.expressions import GIQLNearest
-from giql.expressions import Intersects
-from giql.expressions import SpatialSetPredicate
-from giql.expressions import Within
-from giql.range_parser import ParsedRange
 from giql.range_parser import RangeParser
 from giql.resolver import META_KEY
 from giql.resolver import OperatorResolution
@@ -41,45 +36,12 @@ class BaseGIQLGenerator(Generator):
         super().__init__(**kwargs)
         self.tables = tables or Tables()
 
-    def intersects_sql(self, expression: Intersects) -> str:
-        """Generate standard SQL for INTERSECTS.
-
-        :param expression:
-            INTERSECTS expression node
-        :return:
-            SQL predicate string
-        """
-        return self._generate_spatial_op(expression, "intersects")
-
-    def contains_sql(self, expression: Contains) -> str:
-        """Generate standard SQL for CONTAINS.
-
-        :param expression:
-            CONTAINS expression node
-        :return:
-            SQL predicate string
-        """
-        return self._generate_spatial_op(expression, "contains")
-
-    def within_sql(self, expression: Within) -> str:
-        """Generate standard SQL for WITHIN.
-
-        :param expression:
-            WITHIN expression node
-        :return:
-            SQL predicate string
-        """
-        return self._generate_spatial_op(expression, "within")
-
-    def spatialsetpredicate_sql(self, expression: SpatialSetPredicate) -> str:
-        """Generate SQL for spatial set predicates (ANY/ALL).
-
-        :param expression:
-            SpatialSetPredicate expression node
-        :return:
-            SQL predicate string
-        """
-        return self._generate_spatial_set(expression)
+    # INTERSECTS / CONTAINS / WITHIN and the ANY/ALL set predicates are migrated
+    # to the ExpandOperators registry (#141): they expand to standard boolean AST
+    # in ``giql.expanders.intersects`` before generation, so the generator no
+    # longer carries ``intersects_sql`` / ``contains_sql`` / ``within_sql`` /
+    # ``spatialsetpredicate_sql`` emitters or their ``_generate_spatial_*`` /
+    # ``_predicate_operand`` helpers.
 
     def giqlnearest_sql(self, expression: GIQLNearest) -> str:
         """Generate SQL for NEAREST function.
@@ -600,217 +562,6 @@ class BaseGIQLGenerator(Generator):
             f"CASE WHEN {strand_a} = '-' THEN -({start_a} - {end_b} + 1) "
             f"ELSE ({start_a} - {end_b} + 1) END END"
         )
-
-    def _predicate_operand(self, expression: exp.Expression, arg: str) -> ResolvedColumn:
-        """Return the :class:`ResolvedColumn` for a spatial predicate operand.
-
-        Reads the column resolution attached to *expression* by the
-        ``ResolveOperatorRefs`` pass (pass 1). The emitter consumes only the
-        resolved metadata; all name/column resolution lives in the pass.
-
-        :param expression:
-            The spatial predicate node carrying the resolution metadata.
-        :param arg:
-            The operand slot key (``"this"`` or ``"expression"``).
-        :return:
-            The resolved column metadata.
-        """
-        resolution = expression.meta.get(META_KEY)
-        if isinstance(resolution, OperatorResolution):
-            resolved = resolution.column(arg)
-            if resolved is not None:
-                return resolved
-
-        raise ValueError(
-            f"Spatial predicate operand {arg!r} was not resolved; run the "
-            "ResolveOperatorRefs pass (transpile pipeline) before generation."
-        )
-
-    def _generate_spatial_op(self, expression: exp.Binary, op_type: str) -> str:
-        """Generate SQL for a spatial operation.
-
-        :param expression:
-            AST node (Intersects, Contains, or Within)
-        :param op_type:
-            'intersects', 'contains', or 'within'
-        :return:
-            SQL predicate string
-        """
-        right_raw = self.sql(expression, "expression")
-
-        # Check if right side is a column reference or a literal range string
-        if "." in right_raw and not right_raw.startswith("'"):
-            # Column-to-column join (e.g., a.interval INTERSECTS b.interval)
-            left = self._predicate_operand(expression, "this")
-            right = self._predicate_operand(expression, "expression")
-            return self._generate_column_join(left, right, op_type)
-        else:
-            # Literal range string (e.g., interval INTERSECTS 'chr1:1000-2000')
-            try:
-                range_str = right_raw.strip("'\"")
-                parsed_range = RangeParser.parse(range_str).to_zero_based_half_open()
-                left = self._predicate_operand(expression, "this")
-                return self._generate_range_predicate(left, parsed_range, op_type)
-            except Exception as e:
-                raise ValueError(
-                    f"Could not parse genomic range: {right_raw}. Error: {e}"
-                )
-
-    def _generate_range_predicate(
-        self,
-        column: ResolvedColumn,
-        parsed_range: ParsedRange,
-        op_type: str,
-    ) -> str:
-        """Generate SQL predicate for a range operation.
-
-        :param column:
-            Resolved column operand (physical chrom/start/end fragments plus the
-            backing :class:`~giql.table.Table` config for canonicalization).
-        :param parsed_range:
-            Parsed genomic range
-        :param op_type:
-            'intersects', 'contains', or 'within'
-        :return:
-            SQL predicate string
-        """
-        # The alias-qualified column fragments come pre-resolved on the
-        # ResolvedColumn, already canonicalized to 0-based half-open by
-        # CanonicalizeCoordinates (pass 2, issue #123). The predicate returns a
-        # boolean, which is encoding-invariant, so no output de-canonicalization
-        # is needed.
-        chrom_col = column.chrom
-        start_col = column.start
-        end_col = column.end
-
-        chrom = parsed_range.chromosome
-        start = parsed_range.start
-        end = parsed_range.end
-
-        if op_type == "intersects":
-            # Ranges overlap if: start1 < end2 AND end1 > start2
-            return (
-                f"({chrom_col} = '{chrom}' "
-                f"AND {start_col} < {end} "
-                f"AND {end_col} > {start})"
-            )
-
-        elif op_type == "contains":
-            # Point query: start1 <= point < end1
-            if end == start + 1:
-                return (
-                    f"({chrom_col} = '{chrom}' "
-                    f"AND {start_col} <= {start} "
-                    f"AND {end_col} > {start})"
-                )
-            # Range query: start1 <= start2 AND end1 >= end2
-            else:
-                return (
-                    f"({chrom_col} = '{chrom}' "
-                    f"AND {start_col} <= {start} "
-                    f"AND {end_col} >= {end})"
-                )
-
-        elif op_type == "within":
-            # Left within right: start1 >= start2 AND end1 <= end2
-            return (
-                f"({chrom_col} = '{chrom}' "
-                f"AND {start_col} >= {start} "
-                f"AND {end_col} <= {end})"
-            )
-
-        raise ValueError(f"Unknown operation: {op_type}")
-
-    def _generate_column_join(
-        self, left: ResolvedColumn, right: ResolvedColumn, op_type: str
-    ) -> str:
-        """Generate SQL for column-to-column spatial joins.
-
-        :param left:
-            Resolved left column operand (e.g., for 'a.interval').
-        :param right:
-            Resolved right column operand (e.g., for 'b.interval').
-        :param op_type:
-            'intersects', 'contains', or 'within'
-        :return:
-            SQL predicate string
-        """
-        # The alias-qualified chrom/start/end fragments come pre-resolved on the
-        # ResolvedColumns, already canonicalized to 0-based half-open by
-        # CanonicalizeCoordinates (pass 2, issue #123). The predicate returns a
-        # boolean (encoding-invariant), so no output de-canonicalization is needed.
-        l_chrom = left.chrom
-        r_chrom = right.chrom
-        l_start = left.start
-        l_end = left.end
-        r_start = right.start
-        r_end = right.end
-
-        if op_type == "intersects":
-            # Ranges overlap if: chrom1 = chrom2 AND start1 < end2 AND end1 > start2
-            return (
-                f"({l_chrom} = {r_chrom} "
-                f"AND {l_start} < {r_end} "
-                f"AND {l_end} > {r_start})"
-            )
-
-        elif op_type == "contains":
-            # Left contains right: chrom1 = chrom2 AND start1 <= start2 AND end1 >= end2
-            return (
-                f"({l_chrom} = {r_chrom} "
-                f"AND {l_start} <= {r_start} "
-                f"AND {l_end} >= {r_end})"
-            )
-
-        elif op_type == "within":
-            # Left within right: chrom1 = chrom2 AND start1 >= start2 AND end1 <= end2
-            return (
-                f"({l_chrom} = {r_chrom} "
-                f"AND {l_start} >= {r_start} "
-                f"AND {l_end} <= {r_end})"
-            )
-
-        raise ValueError(f"Unknown operation: {op_type}")
-
-    def _generate_spatial_set(self, expression: SpatialSetPredicate) -> str:
-        """Generate SQL for spatial set predicates (ANY/ALL).
-
-        Examples:
-            column INTERSECTS ANY(...) -> (condition1 OR condition2 OR ...)
-            column INTERSECTS ALL(...) -> (condition1 AND condition2 AND ...)
-
-        :param expression:
-            SpatialSetPredicate expression node
-        :return:
-            SQL predicate string
-        """
-        operator = expression.args["operator"]
-        quantifier = expression.args["quantifier"]
-        ranges = expression.args["ranges"]
-
-        # Resolve the (single) left column operand once; every range condition
-        # compares against the same column. The set predicate's ranges are
-        # always literals, so only this operand needs resolution.
-        column = self._predicate_operand(expression, "this")
-
-        # Parse all ranges
-        parsed_ranges = []
-        for range_expr in ranges:
-            range_str = self.sql(range_expr).strip("'\"")
-            parsed_range = RangeParser.parse(range_str).to_zero_based_half_open()
-            parsed_ranges.append(parsed_range)
-
-        op_type = operator.lower()
-
-        # Generate conditions for each range
-        conditions = []
-        for parsed_range in parsed_ranges:
-            condition = self._generate_range_predicate(column, parsed_range, op_type)
-            conditions.append(condition)
-
-        # Combine with AND (for ALL) or OR (for ANY)
-        combinator = " OR " if quantifier.upper() == "ANY" else " AND "
-        return "(" + combinator.join(conditions) + ")"
 
     def _detect_nearest_mode(
         self, expression: GIQLNearest, parent_expression: exp.Expression | None = None
