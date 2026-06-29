@@ -321,7 +321,10 @@ class GIQLDistance(exp.Func):
     }
 
     GIQL_CANONICALIZE = _CANONICALIZE
-    GIQL_EXPAND = _EXPAND
+    # Migrated to the registry's AST-expansion path (epic #137, issue #140): the
+    # generic expander in giql.expanders.distance builds the CASE; the legacy
+    # giqldistance_sql emitter is gone.
+    GIQL_EXPAND = True
 
     GIQL_SLOTS = (
         SlotSpec("this", frozenset({"column"}), required=True),

@@ -11,31 +11,39 @@ from hypothesis import strategies as st
 from sqlglot import exp
 from sqlglot import parse_one
 
+import giql  # noqa: F401  (ensures the built-in expanders are registered)
 from giql import Table
 from giql import transpile
 from giql.canonicalizer import canonicalize_coordinates
 from giql.dialect import GIQLDialect
+from giql.expander import ExpandOperators
 from giql.expressions import GIQLNearest
 from giql.generators import BaseGIQLGenerator
 from giql.resolver import resolve_operator_refs
 from giql.table import Tables
+from giql.targets import GenericTarget
 
 
 def _generate_through_passes(sql: str, tables: Tables) -> str:
-    """Parse, run normalization passes 1 and 2, then generate SQL.
+    """Parse, run normalization passes 1-3, then generate SQL.
 
     Coordinate canonicalization for operator operands moved out of the emitter and
-    into the CanonicalizeCoordinates pass (issue #123). Emitter-level tests that
-    pin canonicalized output must therefore run both passes before generating,
-    exactly as :func:`giql.transpile.transpile` does, rather than calling
-    ``generate`` on a bare parsed AST (which would skip canonicalization). This
-    helper is used where the full ``transpile`` pipeline would otherwise rewrite
-    the node away (a column-to-column ``INTERSECTS`` is turned into a binned
-    equi-join before the predicate emitter runs).
+    into the CanonicalizeCoordinates pass (issue #123), and DISTANCE generation
+    itself moved onto the registry's AST-expansion pass (epic #137, issue #140).
+    Emitter-level tests that pin canonicalized / expanded output must therefore
+    run all three passes before generating, exactly as
+    :func:`giql.transpile.transpile` does, rather than calling ``generate`` on a
+    bare parsed AST. The expansion pass only touches operators that opt in
+    (``GIQL_EXPAND``); operators still on the legacy emitter (NEAREST, the
+    spatial predicates) pass through untouched. This helper is used where the
+    full ``transpile`` pipeline would otherwise rewrite the node away (a
+    column-to-column ``INTERSECTS`` is turned into a binned equi-join before the
+    predicate emitter runs).
     """
     ast = parse_one(sql, dialect=GIQLDialect)
     ast = resolve_operator_refs(ast, tables)
     ast = canonicalize_coordinates(ast)
+    ast = ExpandOperators(GenericTarget(), tables).transform(ast)
     return BaseGIQLGenerator(tables=tables).generate(ast)
 
 
@@ -669,7 +677,7 @@ class TestBaseGIQLGenerator:
     def test_giqldistance_sql_basic(self, tables_with_two_tables):
         """
         GIVEN a GIQLDistance with two column references
-        WHEN giqldistance_sql is called
+        WHEN the DISTANCE node is expanded
         THEN CASE expression for distance calculation is generated.
         """
         sql = (
@@ -680,7 +688,7 @@ class TestBaseGIQLGenerator:
         output = _generate_through_passes(sql, tables_with_two_tables)
 
         expected = (
-            'SELECT CASE WHEN a."chrom" != b."chrom" THEN NULL '
+            'SELECT CASE WHEN a."chrom" <> b."chrom" THEN NULL '
             'WHEN a."start" < b."end" AND a."end" > b."start" '
             'THEN 0 WHEN a."end" <= b."start" '
             'THEN (b."start" - a."end" + 1) '
@@ -692,7 +700,7 @@ class TestBaseGIQLGenerator:
     def test_giqldistance_sql_stranded(self, tables_with_two_tables):
         """
         GIVEN a GIQLDistance with stranded := true
-        WHEN giqldistance_sql is called
+        WHEN the DISTANCE node is expanded
         THEN Strand-aware distance CASE expression is generated.
         """
         sql = (
@@ -703,7 +711,7 @@ class TestBaseGIQLGenerator:
         output = _generate_through_passes(sql, tables_with_two_tables)
 
         expected = (
-            'SELECT CASE WHEN a."chrom" != b."chrom" THEN NULL '
+            'SELECT CASE WHEN a."chrom" <> b."chrom" THEN NULL '
             'WHEN a."strand" IS NULL OR b."strand" IS NULL THEN NULL '
             "WHEN a.\"strand\" = '.' OR a.\"strand\" = '?' THEN NULL "
             "WHEN b.\"strand\" = '.' OR b.\"strand\" = '?' THEN NULL "
@@ -723,7 +731,7 @@ class TestBaseGIQLGenerator:
     def test_giqldistance_sql_signed(self, tables_with_two_tables):
         """
         GIVEN a GIQLDistance with signed := true
-        WHEN giqldistance_sql is called
+        WHEN the DISTANCE node is expanded
         THEN Signed distance CASE expression is generated.
         """
         sql = (
@@ -734,7 +742,7 @@ class TestBaseGIQLGenerator:
         output = _generate_through_passes(sql, tables_with_two_tables)
 
         expected = (
-            'SELECT CASE WHEN a."chrom" != b."chrom" THEN NULL '
+            'SELECT CASE WHEN a."chrom" <> b."chrom" THEN NULL '
             'WHEN a."start" < b."end" AND a."end" > b."start" '
             'THEN 0 WHEN a."end" <= b."start" '
             'THEN (b."start" - a."end" + 1) '
@@ -746,7 +754,7 @@ class TestBaseGIQLGenerator:
     def test_giqldistance_sql_stranded_and_signed(self, tables_with_two_tables):
         """
         GIVEN a GIQLDistance with both stranded and signed := true
-        WHEN giqldistance_sql is called
+        WHEN the DISTANCE node is expanded
         THEN Combined stranded+signed distance expression is generated.
         """
         sql = (
@@ -758,7 +766,7 @@ class TestBaseGIQLGenerator:
         output = _generate_through_passes(sql, tables_with_two_tables)
 
         expected = (
-            'SELECT CASE WHEN a."chrom" != b."chrom" THEN NULL '
+            'SELECT CASE WHEN a."chrom" <> b."chrom" THEN NULL '
             'WHEN a."strand" IS NULL OR b."strand" IS NULL THEN NULL '
             "WHEN a.\"strand\" = '.' OR a.\"strand\" = '?' THEN NULL "
             "WHEN b.\"strand\" = '.' OR b.\"strand\" = '?' THEN NULL "
@@ -783,7 +791,7 @@ class TestBaseGIQLGenerator:
         Given:
             Two 0-based closed-interval tables and DISTANCE.
         When:
-            giqldistance_sql is called.
+            the DISTANCE node is expanded.
         Then:
             It should canonicalize each table-side end as (end + 1) for the
             closed->half-open conversion, distinct from the bedtools-parity
@@ -804,7 +812,7 @@ class TestBaseGIQLGenerator:
 
         # Assert
         expected = (
-            'SELECT CASE WHEN a."chrom" != b."chrom" THEN NULL '
+            'SELECT CASE WHEN a."chrom" <> b."chrom" THEN NULL '
             'WHEN a."start" < (b."end" + 1) '
             'AND (a."end" + 1) > b."start" THEN 0 '
             'WHEN (a."end" + 1) <= b."start" '
@@ -958,7 +966,7 @@ class TestBaseGIQLGenerator:
     def test_giqldistance_sql_literal_first_arg_error(self, tables_with_two_tables):
         """
         GIVEN a GIQLDistance with literal range as first argument
-        WHEN giqldistance_sql is called
+        WHEN the DISTANCE node is expanded
         THEN ValueError is raised indicating literals not supported.
         """
         sql = "SELECT DISTANCE('chr1:1000-2000', b.interval) as dist FROM features_b b"
@@ -966,15 +974,15 @@ class TestBaseGIQLGenerator:
         ast = resolve_operator_refs(ast, tables_with_two_tables)
         ast = canonicalize_coordinates(ast)
 
-        generator = BaseGIQLGenerator(tables=tables_with_two_tables)
+        expander = ExpandOperators(GenericTarget(), tables_with_two_tables)
 
         with pytest.raises(ValueError, match="Literal range as first argument"):
-            generator.generate(ast)
+            expander.transform(ast)
 
     def test_giqldistance_sql_literal_second_arg_error(self, tables_with_two_tables):
         """
         GIVEN a GIQLDistance with literal range as second argument
-        WHEN giqldistance_sql is called
+        WHEN the DISTANCE node is expanded
         THEN ValueError is raised indicating literals not supported.
         """
         sql = "SELECT DISTANCE(a.interval, 'chr1:1000-2000') as dist FROM features_a a"
@@ -982,10 +990,10 @@ class TestBaseGIQLGenerator:
         ast = resolve_operator_refs(ast, tables_with_two_tables)
         ast = canonicalize_coordinates(ast)
 
-        generator = BaseGIQLGenerator(tables=tables_with_two_tables)
+        expander = ExpandOperators(GenericTarget(), tables_with_two_tables)
 
         with pytest.raises(ValueError, match="Literal range as second argument"):
-            generator.generate(ast)
+            expander.transform(ast)
 
     def test_giqlnearest_sql_missing_outer_table_error(
         self, tables_with_peaks_and_genes
@@ -1144,7 +1152,7 @@ class TestBaseGIQLGenerator:
     ):
         """
         GIVEN a GIQLDistance with stranded parameter in various truthy representations
-        WHEN giqldistance_sql is called
+        WHEN the DISTANCE node is expanded
         THEN The parameter is parsed as True and strand-aware distance is calculated.
         """
         sql = (
@@ -1167,7 +1175,7 @@ class TestBaseGIQLGenerator:
     ):
         """
         GIVEN a GIQLDistance with stranded parameter in various falsy representations
-        WHEN giqldistance_sql is called
+        WHEN the DISTANCE node is expanded
         THEN The parameter is parsed as False and basic distance is calculated.
         """
         sql = (
@@ -1189,7 +1197,7 @@ class TestBaseGIQLGenerator:
     ):
         """
         GIVEN a GIQLDistance with signed parameter in various truthy representations
-        WHEN giqldistance_sql is called
+        WHEN the DISTANCE node is expanded
         THEN The parameter is parsed as True and signed distance is calculated.
         """
         sql = (
@@ -1211,7 +1219,7 @@ class TestBaseGIQLGenerator:
     ):
         """
         GIVEN a GIQLDistance with signed parameter in various falsy representations
-        WHEN giqldistance_sql is called
+        WHEN the DISTANCE node is expanded
         THEN The parameter is parsed as False and unsigned distance is calculated.
         """
         sql = (
@@ -1630,7 +1638,7 @@ class TestBaseGIQLGenerator:
 
         # Assert
         expected = (
-            'SELECT CASE WHEN a."chrom" != b."chrom" THEN NULL '
+            'SELECT CASE WHEN a."chrom" <> b."chrom" THEN NULL '
             f"WHEN {start_a} < {end_b} AND {end_a} > {start_b} THEN 0 "
             f"WHEN {end_a} <= {start_b} THEN ({start_b} - {end_a} + 1) "
             f"ELSE ({start_a} - {end_b} + 1) END AS dist "
@@ -1664,7 +1672,7 @@ class TestBaseGIQLGenerator:
 
         # Assert
         expected = (
-            'SELECT CASE WHEN a."chrom" != b."chrom" THEN NULL '
+            'SELECT CASE WHEN a."chrom" <> b."chrom" THEN NULL '
             'WHEN a."start" < b."end" AND a."end" > (b."start" - 1) THEN 0 '
             'WHEN a."end" <= (b."start" - 1) '
             'THEN ((b."start" - 1) - a."end" + 1) '
