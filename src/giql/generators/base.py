@@ -3,13 +3,13 @@ from sqlglot.generator import Generator
 
 from giql.canonical import decanonical_end
 from giql.canonical import decanonical_start
+from giql.dialect import GIQLDialect
 from giql.expressions import GIQLDisjoin
 from giql.expressions import GIQLNearest
 from giql.range_parser import RangeParser
 from giql.resolver import META_KEY
 from giql.resolver import OperatorResolution
 from giql.resolver import ResolvedColumn
-from giql.resolver import ResolvedInterval
 from giql.resolver import ResolvedRef
 from giql.table import Table
 from giql.table import Tables
@@ -28,10 +28,6 @@ class BaseGIQLGenerator(Generator):
     compatibility with virtually all SQL databases.
     """
 
-    # Most databases support LATERAL joins (PostgreSQL 9.3+, DuckDB 0.7.0+)
-    # SQLite does not support LATERAL, so it overrides this to False
-    SUPPORTS_LATERAL = True
-
     def __init__(self, tables: Tables | None = None, **kwargs):
         super().__init__(**kwargs)
         self.tables = tables or Tables()
@@ -43,172 +39,9 @@ class BaseGIQLGenerator(Generator):
     # ``spatialsetpredicate_sql`` emitters or their ``_generate_spatial_*`` /
     # ``_predicate_operand`` helpers.
 
-    def giqlnearest_sql(self, expression: GIQLNearest) -> str:
-        """Generate SQL for NEAREST function.
-
-        Detects mode (standalone vs correlated) and generates appropriate SQL:
-        - Standalone: Direct query with ORDER BY + LIMIT
-        - Correlated (LATERAL): Subquery for k-nearest neighbors
-
-        :param expression:
-            GIQLNearest expression node
-        :return:
-            SQL string for NEAREST operation
-        """
-        # Detect mode
-        mode = self._detect_nearest_mode(expression)
-
-        # Unpack the resolution metadata attached by ResolveOperatorRefs (pass 1).
-        resolution = self._nearest_resolution(expression)
-
-        # Target (already a registered-table ResolvedRef from the pass). An
-        # unresolved target means it is not a registered table; raise the
-        # historical diagnostic.
-        target_ref = resolution.slot("this") if resolution is not None else None
-        if not isinstance(target_ref, ResolvedRef):
-            target = expression.this
-            if isinstance(target, exp.Table):
-                target_name = target.name
-            elif isinstance(target, exp.Column):
-                target_name = target.table if target.table else str(target.this)
-            else:
-                target_name = str(target)
-            raise ValueError(
-                f"Target table '{target_name}' not found in tables. "
-                "Register the table before transpiling."
-            )
-        table_name = target_ref.name
-        target_chrom, target_start, target_end = target_ref.cols
-
-        # The target's *declared* encoding, which the passed-through target row
-        # (SELECT {table_name}.*) must round-trip back into. CanonicalizeCoordinates
-        # (pass 2) preserves it on the resolution when it wraps a non-canonical
-        # target in a __giql_canon_* CTE (the slot's own Table is then None); a
-        # canonical target is left unwrapped and its slot Table carries the
-        # (identity) encoding. The synthesized `distance` column is encoding-
-        # invariant (a count of bases) and needs no round-trip.
-        output_table = self._nearest_output_encoding(expression, target_ref)
-        passthrough = self._nearest_passthrough(
-            table_name, target_start, target_end, output_table
-        )
-
-        # Reference interval (a ResolvedInterval from the pass). An unresolved
-        # reference re-raises the generator's historical diagnostic. Input
-        # canonicalization is owned by CanonicalizeCoordinates (pass 2, issue
-        # #123): a literal range is already canonical, and a column / implicit-
-        # outer reference's endpoints are canonicalized in place by the pass, so
-        # the emitter consumes the fragments verbatim with no canonicalization.
-        ref = resolution.slot("reference")
-        if not isinstance(ref, ResolvedInterval):
-            self._raise_nearest_reference_error(expression, mode, resolution)
-        ref_chrom, ref_start, ref_end = ref.chrom, ref.start, ref.end
-
-        # Extract parameters
-        k = expression.args.get("k")
-        k_value = int(str(k)) if k else 1  # Default k=1
-
-        max_distance = expression.args.get("max_distance")
-        max_dist_value = int(str(max_distance)) if max_distance else None
-
-        is_stranded = self._extract_bool_param(expression.args.get("stranded"))
-        is_signed = self._extract_bool_param(expression.args.get("signed"))
-
-        # Resolve strand columns if stranded mode. The reference strand is
-        # carried on the resolved interval (a literal's strand, an explicit
-        # column's strand, or the outer table's strand for an implicit
-        # reference — already gated to preserve the historical divergence).
-        ref_strand = None
-        target_strand = None
-        if is_stranded:
-            ref_strand = ref.strand
-            # When pass 2 wraps a non-canonical target its slot Table is blanked,
-            # so the strand column name comes from the *declared* encoding the
-            # pass preserved (output_table). The canon CTE's SELECT * REPLACE
-            # passes the strand column through unchanged under its physical name,
-            # so the qualifier stays the relation NEAREST selects from.
-            if output_table and output_table.strand_col:
-                target_strand = f'{table_name}."{output_table.strand_col}"'
-
-        # Distance math below assumes 0-based half-open. Input canonicalization
-        # is owned by CanonicalizeCoordinates (pass 2, issue #123): a
-        # non-canonical target is rewritten to a canonical __giql_canon_* CTE
-        # before generation (table_name then names the CTE), so the target
-        # endpoints are consumed verbatim with no in-emitter canonicalization. The
-        # output round-trip of the passed-through target row stays here (see the
-        # SELECT projection below).
-        target_start_expr = f'{table_name}."{target_start}"'
-        target_end_expr = f'{table_name}."{target_end}"'
-
-        # Build distance calculation using CASE expression
-        # For NEAREST: ORDER BY absolute distance, but RETURN signed distance
-        distance_expr = self._generate_distance_case(
-            ref_chrom,
-            ref_start,
-            ref_end,
-            ref_strand,
-            f'{table_name}."{target_chrom}"',
-            target_start_expr,
-            target_end_expr,
-            target_strand,
-            stranded=is_stranded,
-            signed=is_signed,
-        )
-
-        # Use absolute distance for ordering and filtering
-        abs_distance_expr = f"ABS({distance_expr})"
-
-        # Build WHERE clauses
-        where_clauses = [
-            f'{ref_chrom} = {table_name}."{target_chrom}"'  # Chromosome pre-filter
-        ]
-
-        # Add strand matching for stranded mode
-        if is_stranded and ref_strand and target_strand:
-            where_clauses.append(f"{ref_strand} = {target_strand}")
-
-        if max_dist_value is not None:
-            where_clauses.append(f"({abs_distance_expr}) <= {max_dist_value}")
-
-        where_sql = " AND ".join(where_clauses)
-
-        # Generate SQL based on mode
-        if mode == "standalone":
-            # Standalone mode: direct ORDER BY + LIMIT
-            # Return signed distance, but order by absolute distance
-            sql = f"""(
-                SELECT {passthrough}, {distance_expr} AS distance
-                FROM {table_name}
-                WHERE {where_sql}
-                ORDER BY {abs_distance_expr}
-                LIMIT {k_value}
-            )"""
-        else:
-            # Correlated mode: requires LATERAL join support
-            if not self.SUPPORTS_LATERAL:
-                raise ValueError(
-                    "NEAREST in correlated mode (CROSS JOIN LATERAL) is not supported "
-                    "in SQLite. SQLite does not support LATERAL joins. "
-                    "\n\nAlternatives:"
-                    "\n1. Use standalone mode: SELECT * FROM NEAREST(table, "
-                    "reference='chr1:100-200', k=3)"
-                    "\n2. Use DuckDB for queries requiring LATERAL joins"
-                    "\n3. Manually write equivalent window function query"
-                )
-
-            # LATERAL mode: subquery for k-nearest neighbors
-            # Return signed distance, but order by absolute distance
-            sql = f"""(
-                SELECT {passthrough}, {distance_expr} AS distance
-                FROM {table_name}
-                WHERE {where_sql}
-                ORDER BY {abs_distance_expr}
-                LIMIT {k_value}
-            )"""
-
-        return sql.strip()
-
+    @staticmethod
     def _nearest_output_encoding(
-        self, expression: GIQLNearest, target_ref: ResolvedRef
+        expression: GIQLNearest, target_ref: ResolvedRef
     ) -> Table | None:
         """Return the target's declared encoding for NEAREST's row passthrough.
 
@@ -233,8 +66,8 @@ class BaseGIQLGenerator(Generator):
                 return preserved
         return target_ref.table
 
+    @staticmethod
     def _nearest_passthrough(
-        self,
         table_name: str,
         target_start: str,
         target_end: str,
@@ -454,8 +287,8 @@ class BaseGIQLGenerator(Generator):
             f't.* REPLACE ({pt_start} AS "{target_start}", {pt_end} AS "{target_end}")'
         )
 
+    @staticmethod
     def _generate_distance_case(
-        self,
         chrom_a: str,
         start_a: str,
         end_a: str,
@@ -563,8 +396,9 @@ class BaseGIQLGenerator(Generator):
             f"ELSE ({start_a} - {end_b} + 1) END END"
         )
 
+    @staticmethod
     def _detect_nearest_mode(
-        self, expression: GIQLNearest, parent_expression: exp.Expression | None = None
+        expression: GIQLNearest, parent_expression: exp.Expression | None = None
     ) -> str:
         """Detect whether NEAREST is in standalone or correlated mode.
 
@@ -588,25 +422,8 @@ class BaseGIQLGenerator(Generator):
         # (validation will catch missing reference errors later)
         return "correlated"
 
-    def _nearest_resolution(self, expression: GIQLNearest) -> OperatorResolution | None:
-        """Return the NEAREST resolution attached by ResolveOperatorRefs (pass 1).
-
-        The transpile pipeline attaches an
-        :class:`~giql.resolver.OperatorResolution` before generation, and it
-        survives the generator's defensive tree copy. The emitter reads only the
-        attached metadata; resolution lives entirely in the pass.
-
-        :param expression:
-            GIQLNearest expression node
-        :return:
-            The attached :class:`~giql.resolver.OperatorResolution`, or ``None``
-            if resolution did not produce one.
-        """
-        resolution = expression.meta.get(META_KEY)
-        return resolution if isinstance(resolution, OperatorResolution) else None
-
+    @staticmethod
     def _raise_nearest_reference_error(
-        self,
         expression: GIQLNearest,
         mode: str,
         resolution: OperatorResolution | None,
@@ -654,7 +471,7 @@ class BaseGIQLGenerator(Generator):
         # An explicit reference that deferred is a literal range that failed to
         # parse (column references always resolve). Re-parse to surface the
         # original parse error in the historical message.
-        reference_sql = self.sql(reference)
+        reference_sql = reference.sql(dialect=GIQLDialect)
         range_str = reference_sql.strip("'\"")
         try:
             RangeParser.parse(range_str).to_zero_based_half_open()

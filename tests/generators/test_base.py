@@ -8,7 +8,6 @@ from hypothesis import HealthCheck
 from hypothesis import given
 from hypothesis import settings
 from hypothesis import strategies as st
-from sqlglot import exp
 from sqlglot import parse_one
 
 import giql.expanders  # noqa: F401  (registers built-in expanders)
@@ -17,7 +16,6 @@ from giql import transpile
 from giql.canonicalizer import canonicalize_coordinates
 from giql.dialect import GIQLDialect
 from giql.expander import ExpandOperators
-from giql.expressions import GIQLNearest
 from giql.generators import BaseGIQLGenerator
 from giql.resolver import resolve_operator_refs
 from giql.table import Tables
@@ -28,14 +26,14 @@ def _generate_through_passes(sql: str, tables: Tables) -> str:
     """Parse, run normalization passes 1-3, then generate SQL.
 
     Coordinate canonicalization for operator operands moved out of the emitter and
-    into the CanonicalizeCoordinates pass (issue #123), and DISTANCE (issue #140)
-    and the spatial / set predicates (issue #141) moved onto the registry's
+    into the CanonicalizeCoordinates pass (issue #123), and DISTANCE (#140), the
+    spatial / set predicates (#141), and NEAREST (#142) moved onto the registry's
     ExpandOperators pass (epic #137). Emitter-level tests that pin canonicalized /
     expanded output must therefore run all three passes before generating, exactly
     as :func:`giql.transpile.transpile` does, rather than calling ``generate`` on a
-    bare parsed AST. Operators still on the legacy emitter (NEAREST, DISJOIN) pass
-    through the expansion pass untouched. This helper is used where the full
-    ``transpile`` pipeline would otherwise rewrite the node away (a column-to-column
+    bare parsed AST. Operators still on the legacy emitter (DISJOIN) pass through
+    the expansion pass untouched. This helper is used where the full ``transpile``
+    pipeline would otherwise rewrite the node away (a column-to-column
     ``INTERSECTS`` is turned into a binned equi-join before the predicate expander
     runs).
     """
@@ -110,13 +108,12 @@ class TestBaseGIQLGenerator:
         """
         GIVEN no tables provided
         WHEN Generator is instantiated with defaults
-        THEN Generator has empty Tables and SUPPORTS_LATERAL is True.
+        THEN Generator has empty Tables.
         """
         generator = BaseGIQLGenerator()
 
         assert generator.tables is not None
         assert "variants" not in generator.tables
-        assert generator.SUPPORTS_LATERAL is True
 
     def test_instantiation_with_tables(self, tables_info):
         """
@@ -402,41 +399,43 @@ class TestBaseGIQLGenerator:
         )
         assert output == expected
 
-    def test_giqlnearest_sql_standalone(self, tables_with_peaks_and_genes):
+    def test_expand_nearest_should_emit_ordered_limit_subquery_when_standalone(
+        self, tables_with_peaks_and_genes
+    ):
         """
         GIVEN a GIQLNearest in standalone mode with literal reference
-        WHEN giqlnearest_sql is called
+        WHEN the NEAREST expander runs
         THEN Subquery with ORDER BY distance LIMIT k is generated.
         """
         sql = "SELECT * FROM NEAREST(genes, reference := 'chr1:1000-2000', k := 3)"
 
         output = _generate_through_passes(sql, tables_with_peaks_and_genes)
 
+        # NEAREST now expands via its registered expander (#142): a two-level
+        # subquery — an inner SELECT that materializes ``distance`` and an outer
+        # wrapper that orders on the materialized ``__giql_x_0."distance"`` plus a
+        # deterministic ``(start, end)`` tiebreaker (#142 A5). Splitting the
+        # distance computation from the ordering keeps DuckDB's correlated-LATERAL
+        # binder and DataFusion's planner both happy while staying result-
+        # equivalent to the legacy single-level emitter.
         expected = (
-            "SELECT * FROM (\n"
-            "                SELECT genes.*, "
-            "CASE WHEN 'chr1' != genes.\"chrom\" THEN NULL "
+            "SELECT * FROM (SELECT * FROM (SELECT genes.*, "
+            "CASE WHEN 'chr1' <> genes.\"chrom\" THEN NULL "
             'WHEN 1000 < genes."end" AND 2000 > genes."start" THEN 0 '
-            'WHEN 2000 <= genes."start" '
-            'THEN (genes."start" - 2000 + 1) '
-            'ELSE (1000 - genes."end" + 1) END AS distance\n'
-            "                FROM genes\n"
-            "                WHERE 'chr1' = genes.\"chrom\"\n"
-            "                ORDER BY ABS("
-            "CASE WHEN 'chr1' != genes.\"chrom\" THEN NULL "
-            'WHEN 1000 < genes."end" AND 2000 > genes."start" THEN 0 '
-            'WHEN 2000 <= genes."start" '
-            'THEN (genes."start" - 2000 + 1) '
-            'ELSE (1000 - genes."end" + 1) END)\n'
-            "                LIMIT 3\n"
-            "            )"
+            'WHEN 2000 <= genes."start" THEN (genes."start" - 2000 + 1) '
+            'ELSE (1000 - genes."end" + 1) END AS distance '
+            "FROM genes WHERE 'chr1' = genes.\"chrom\") AS __giql_x_0 "
+            'ORDER BY ABS(__giql_x_0."distance"), '
+            '__giql_x_0."start", __giql_x_0."end" LIMIT 3)'
         )
         assert output == expected
 
-    def test_giqlnearest_sql_correlated(self, tables_with_peaks_and_genes):
+    def test_expand_nearest_should_emit_lateral_subquery_when_correlated(
+        self, tables_with_peaks_and_genes
+    ):
         """
         GIVEN a GIQLNearest in correlated mode (LATERAL join context)
-        WHEN giqlnearest_sql is called
+        WHEN the NEAREST expander runs on a lateral-capable target
         THEN LATERAL-compatible subquery is generated.
         """
         sql = (
@@ -446,33 +445,30 @@ class TestBaseGIQLGenerator:
 
         output = _generate_through_passes(sql, tables_with_peaks_and_genes)
 
+        # Reserialized by the #142 expander as a two-level subquery: the inner
+        # SELECT materializes ``distance`` (CASE and WHERE semantically unchanged)
+        # and the outer wrapper orders on the materialized
+        # ``__giql_x_0."distance"`` plus a deterministic ``(start, end)``
+        # tiebreaker (#142 A5).
         expected = (
-            "SELECT * FROM peaks CROSS JOIN LATERAL (\n"
-            "                SELECT genes.*, "
-            'CASE WHEN peaks."chrom" != genes."chrom" THEN NULL '
-            'WHEN peaks."start" < genes."end" '
-            'AND peaks."end" > genes."start" THEN 0 '
-            'WHEN peaks."end" <= genes."start" '
+            "SELECT * FROM peaks CROSS JOIN LATERAL (SELECT * FROM (SELECT genes.*, "
+            'CASE WHEN peaks."chrom" <> genes."chrom" THEN NULL '
+            'WHEN peaks."start" < genes."end" AND peaks."end" > genes."start" '
+            'THEN 0 WHEN peaks."end" <= genes."start" '
             'THEN (genes."start" - peaks."end" + 1) '
-            'ELSE (peaks."start" - genes."end" + 1) END AS distance\n'
-            "                FROM genes\n"
-            '                WHERE peaks."chrom" = genes."chrom"\n'
-            "                ORDER BY ABS("
-            'CASE WHEN peaks."chrom" != genes."chrom" THEN NULL '
-            'WHEN peaks."start" < genes."end" '
-            'AND peaks."end" > genes."start" THEN 0 '
-            'WHEN peaks."end" <= genes."start" '
-            'THEN (genes."start" - peaks."end" + 1) '
-            'ELSE (peaks."start" - genes."end" + 1) END)\n'
-            "                LIMIT 3\n"
-            "            )"
+            'ELSE (peaks."start" - genes."end" + 1) END AS distance '
+            'FROM genes WHERE peaks."chrom" = genes."chrom") AS __giql_x_0 '
+            'ORDER BY ABS(__giql_x_0."distance"), '
+            '__giql_x_0."start", __giql_x_0."end" LIMIT 3)'
         )
         assert output == expected
 
-    def test_giqlnearest_sql_with_max_distance(self, tables_with_peaks_and_genes):
+    def test_expand_nearest_should_filter_on_max_distance(
+        self, tables_with_peaks_and_genes
+    ):
         """
         GIVEN a GIQLNearest with max_distance parameter
-        WHEN giqlnearest_sql is called
+        WHEN the NEAREST expander runs
         THEN WHERE clause includes distance filter.
         """
         sql = (
@@ -483,40 +479,35 @@ class TestBaseGIQLGenerator:
 
         output = _generate_through_passes(sql, tables_with_peaks_and_genes)
 
+        # Reserialized by the #142 expander as a two-level subquery; the
+        # max_distance filter on ABS of the distance CASE stays in the inner
+        # SELECT's WHERE and the outer wrapper orders on the materialized
+        # ``__giql_x_0."distance"`` plus the deterministic ``(start, end)``
+        # tiebreaker (#142 A5).
         expected = (
-            "SELECT * FROM peaks CROSS JOIN LATERAL (\n"
-            "                SELECT genes.*, "
-            'CASE WHEN peaks."chrom" != genes."chrom" THEN NULL '
-            'WHEN peaks."start" < genes."end" '
-            'AND peaks."end" > genes."start" THEN 0 '
-            'WHEN peaks."end" <= genes."start" '
+            "SELECT * FROM peaks CROSS JOIN LATERAL (SELECT * FROM (SELECT genes.*, "
+            'CASE WHEN peaks."chrom" <> genes."chrom" THEN NULL '
+            'WHEN peaks."start" < genes."end" AND peaks."end" > genes."start" '
+            'THEN 0 WHEN peaks."end" <= genes."start" '
             'THEN (genes."start" - peaks."end" + 1) '
-            'ELSE (peaks."start" - genes."end" + 1) END AS distance\n'
-            "                FROM genes\n"
-            '                WHERE peaks."chrom" = genes."chrom" '
-            "AND (ABS("
-            'CASE WHEN peaks."chrom" != genes."chrom" THEN NULL '
-            'WHEN peaks."start" < genes."end" '
-            'AND peaks."end" > genes."start" THEN 0 '
-            'WHEN peaks."end" <= genes."start" '
+            'ELSE (peaks."start" - genes."end" + 1) END AS distance '
+            'FROM genes WHERE peaks."chrom" = genes."chrom" '
+            'AND (ABS(CASE WHEN peaks."chrom" <> genes."chrom" THEN NULL '
+            'WHEN peaks."start" < genes."end" AND peaks."end" > genes."start" '
+            'THEN 0 WHEN peaks."end" <= genes."start" '
             'THEN (genes."start" - peaks."end" + 1) '
-            'ELSE (peaks."start" - genes."end" + 1) END)) <= 100000\n'
-            "                ORDER BY ABS("
-            'CASE WHEN peaks."chrom" != genes."chrom" THEN NULL '
-            'WHEN peaks."start" < genes."end" '
-            'AND peaks."end" > genes."start" THEN 0 '
-            'WHEN peaks."end" <= genes."start" '
-            'THEN (genes."start" - peaks."end" + 1) '
-            'ELSE (peaks."start" - genes."end" + 1) END)\n'
-            "                LIMIT 5\n"
-            "            )"
+            'ELSE (peaks."start" - genes."end" + 1) END)) <= 100000) '
+            'AS __giql_x_0 ORDER BY ABS(__giql_x_0."distance"), '
+            '__giql_x_0."start", __giql_x_0."end" LIMIT 5)'
         )
         assert output == expected
 
-    def test_giqlnearest_sql_stranded(self, tables_with_peaks_and_genes):
+    def test_expand_nearest_should_match_strand_when_stranded(
+        self, tables_with_peaks_and_genes
+    ):
         """
         GIVEN a GIQLNearest with stranded := true
-        WHEN giqlnearest_sql is called
+        WHEN the NEAREST expander runs
         THEN Strand matching is included in WHERE clause.
         """
         sql = (
@@ -527,45 +518,33 @@ class TestBaseGIQLGenerator:
 
         output = _generate_through_passes(sql, tables_with_peaks_and_genes)
 
+        # Reserialized by the #142 expander as a two-level subquery; the stranded
+        # distance CASE and the ``peaks.strand = genes.strand`` match in the inner
+        # WHERE are semantically unchanged, with the outer wrapper ordering on the
+        # materialized ``__giql_x_0."distance"`` plus the ``(start, end)``
+        # tiebreaker (#142 A5).
         expected = (
-            "SELECT * FROM peaks CROSS JOIN LATERAL (\n"
-            "                SELECT genes.*, "
-            'CASE WHEN peaks."chrom" != genes."chrom" THEN NULL '
+            "SELECT * FROM peaks CROSS JOIN LATERAL (SELECT * FROM (SELECT genes.*, "
+            'CASE WHEN peaks."chrom" <> genes."chrom" THEN NULL '
             'WHEN peaks."strand" IS NULL OR genes."strand" IS NULL THEN NULL '
             "WHEN peaks.\"strand\" = '.' OR peaks.\"strand\" = '?' THEN NULL "
             "WHEN genes.\"strand\" = '.' OR genes.\"strand\" = '?' THEN NULL "
-            'WHEN peaks."start" < genes."end" '
-            'AND peaks."end" > genes."start" THEN 0 '
-            'WHEN peaks."end" <= genes."start" '
+            'WHEN peaks."start" < genes."end" AND peaks."end" > genes."start" '
+            'THEN 0 WHEN peaks."end" <= genes."start" '
             "THEN CASE WHEN peaks.\"strand\" = '-' "
             'THEN -(genes."start" - peaks."end" + 1) '
             'ELSE (genes."start" - peaks."end" + 1) END '
             "ELSE CASE WHEN peaks.\"strand\" = '-' "
             'THEN -(peaks."start" - genes."end" + 1) '
-            'ELSE (peaks."start" - genes."end" + 1) END END AS distance\n'
-            "                FROM genes\n"
-            '                WHERE peaks."chrom" = genes."chrom" '
-            'AND peaks."strand" = genes."strand"\n'
-            "                ORDER BY ABS("
-            'CASE WHEN peaks."chrom" != genes."chrom" THEN NULL '
-            'WHEN peaks."strand" IS NULL OR genes."strand" IS NULL THEN NULL '
-            "WHEN peaks.\"strand\" = '.' OR peaks.\"strand\" = '?' THEN NULL "
-            "WHEN genes.\"strand\" = '.' OR genes.\"strand\" = '?' THEN NULL "
-            'WHEN peaks."start" < genes."end" '
-            'AND peaks."end" > genes."start" THEN 0 '
-            'WHEN peaks."end" <= genes."start" '
-            "THEN CASE WHEN peaks.\"strand\" = '-' "
-            'THEN -(genes."start" - peaks."end" + 1) '
-            'ELSE (genes."start" - peaks."end" + 1) END '
-            "ELSE CASE WHEN peaks.\"strand\" = '-' "
-            'THEN -(peaks."start" - genes."end" + 1) '
-            'ELSE (peaks."start" - genes."end" + 1) END END)\n'
-            "                LIMIT 3\n"
-            "            )"
+            'ELSE (peaks."start" - genes."end" + 1) END END AS distance '
+            'FROM genes WHERE peaks."chrom" = genes."chrom" '
+            'AND peaks."strand" = genes."strand") AS __giql_x_0 '
+            'ORDER BY ABS(__giql_x_0."distance"), '
+            '__giql_x_0."start", __giql_x_0."end" LIMIT 3)'
         )
         assert output == expected
 
-    def test_giqlnearest_sql_implicit_outer_without_strand_column(self):
+    def test_expand_nearest_should_skip_strand_when_outer_has_no_strand_column(self):
         """
         GIVEN a stranded NEAREST whose implicit-outer table declares no strand
             column
@@ -589,10 +568,12 @@ class TestBaseGIQLGenerator:
         assert "strand" not in output
         assert 'nostr."chrom" = genes."chrom"' in output
 
-    def test_giqlnearest_sql_signed(self, tables_with_peaks_and_genes):
+    def test_expand_nearest_should_emit_signed_distance_when_signed(
+        self, tables_with_peaks_and_genes
+    ):
         """
         GIVEN a GIQLNearest with signed := true
-        WHEN giqlnearest_sql is called
+        WHEN the NEAREST expander runs
         THEN Distance expression includes signed calculation.
         """
         sql = (
@@ -603,57 +584,37 @@ class TestBaseGIQLGenerator:
 
         output = _generate_through_passes(sql, tables_with_peaks_and_genes)
 
+        # Reserialized by the #142 expander as a two-level subquery; the signed
+        # distance CASE (negated ELSE branch for upstream) is semantically
+        # unchanged in the inner SELECT, with the outer wrapper ordering on the
+        # materialized ``__giql_x_0."distance"`` plus the ``(start, end)``
+        # tiebreaker (#142 A5).
         expected = (
-            "SELECT * FROM peaks CROSS JOIN LATERAL (\n"
-            "                SELECT genes.*, "
-            'CASE WHEN peaks."chrom" != genes."chrom" THEN NULL '
-            'WHEN peaks."start" < genes."end" '
-            'AND peaks."end" > genes."start" THEN 0 '
-            'WHEN peaks."end" <= genes."start" '
+            "SELECT * FROM peaks CROSS JOIN LATERAL (SELECT * FROM (SELECT genes.*, "
+            'CASE WHEN peaks."chrom" <> genes."chrom" THEN NULL '
+            'WHEN peaks."start" < genes."end" AND peaks."end" > genes."start" '
+            'THEN 0 WHEN peaks."end" <= genes."start" '
             'THEN (genes."start" - peaks."end" + 1) '
-            'ELSE -(peaks."start" - genes."end" + 1) END AS distance\n'
-            "                FROM genes\n"
-            '                WHERE peaks."chrom" = genes."chrom"\n'
-            "                ORDER BY ABS("
-            'CASE WHEN peaks."chrom" != genes."chrom" THEN NULL '
-            'WHEN peaks."start" < genes."end" '
-            'AND peaks."end" > genes."start" THEN 0 '
-            'WHEN peaks."end" <= genes."start" '
-            'THEN (genes."start" - peaks."end" + 1) '
-            'ELSE -(peaks."start" - genes."end" + 1) END)\n'
-            "                LIMIT 3\n"
-            "            )"
+            'ELSE -(peaks."start" - genes."end" + 1) END AS distance '
+            'FROM genes WHERE peaks."chrom" = genes."chrom") AS __giql_x_0 '
+            'ORDER BY ABS(__giql_x_0."distance"), '
+            '__giql_x_0."start", __giql_x_0."end" LIMIT 3)'
         )
         assert output == expected
 
-    def test_giqlnearest_sql_no_lateral_support(self, tables_with_peaks_and_genes):
-        """
-        GIVEN a GIQLNearest on a generator with SUPPORTS_LATERAL=False
-        WHEN giqlnearest_sql is called in correlated mode
-        THEN ValueError is raised with helpful message.
-        """
-
-        # Create a generator subclass without LATERAL support
-        class NoLateralGenerator(BaseGIQLGenerator):
-            SUPPORTS_LATERAL = False
-
-        # Use query without explicit reference to trigger correlated mode
-        sql = "SELECT * FROM peaks CROSS JOIN LATERAL NEAREST(genes, k := 3)"
-        ast = parse_one(sql, dialect=GIQLDialect)
-        ast = resolve_operator_refs(ast, tables_with_peaks_and_genes)
-        ast = canonicalize_coordinates(ast)
-
-        generator = NoLateralGenerator(tables=tables_with_peaks_and_genes)
-
-        with pytest.raises(ValueError, match="LATERAL"):
-            generator.generate(ast)
+    # The legacy ``SUPPORTS_LATERAL=False`` generator-level error path was removed
+    # with ``giqlnearest_sql`` (#142): lateral support is now a target capability,
+    # and a target without it (DataFusion) gets the decorrelated window-function
+    # fallback rather than a hard error. That fallback's result-identity with the
+    # LATERAL form is verified by the cross-target oracle
+    # (tests/integration/datafusion/test_cross_target_oracle.py).
 
     @settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
     @given(
         k=st.integers(min_value=1, max_value=100),
         max_distance=st.integers(min_value=1, max_value=10_000_000),
     )
-    def test_giqlnearest_sql_parameter_handling_property(
+    def test_expand_nearest_should_carry_k_and_max_distance_property(
         self, tables_with_peaks_and_genes, k, max_distance
     ):
         """
@@ -866,12 +827,12 @@ class TestBaseGIQLGenerator:
         )
         assert output == expected
 
-    def test_giqlnearest_sql_stranded_literal_with_strand(
+    def test_expand_nearest_should_use_literal_strand_when_stranded(
         self, tables_with_peaks_and_genes
     ):
         """
         GIVEN a GIQLNearest with stranded := true and literal reference containing strand
-        WHEN giqlnearest_sql is called
+        WHEN the NEAREST expander runs
         THEN Strand from literal range is parsed and used in filtering.
         """
         sql = (
@@ -885,12 +846,12 @@ class TestBaseGIQLGenerator:
         assert "'+'" in output
         assert 'genes."strand"' in output
 
-    def test_giqlnearest_sql_stranded_implicit_reference(
+    def test_expand_nearest_should_resolve_outer_strand_when_implicit_reference(
         self, tables_with_peaks_and_genes
     ):
         """
         GIVEN a GIQLNearest in correlated mode with implicit reference and stranded := true
-        WHEN giqlnearest_sql is called
+        WHEN the NEAREST expander runs
         THEN Strand column is resolved from outer table and used.
         """
         sql = "SELECT * FROM peaks CROSS JOIN LATERAL NEAREST(genes, k := 3, stranded := true)"
@@ -989,29 +950,22 @@ class TestBaseGIQLGenerator:
         with pytest.raises(ValueError, match="Literal range as second argument"):
             expander.transform(ast)
 
-    def test_giqlnearest_sql_missing_outer_table_error(
+    def test_expand_nearest_should_raise_when_outer_table_unresolvable(
         self, tables_with_peaks_and_genes
     ):
         """
-        GIVEN a GIQLNearest in correlated mode without reference where outer table
-            cannot be found
-        WHEN giqlnearest_sql is called
-        THEN ValueError is raised with helpful message about specifying reference.
+        GIVEN a GIQLNearest without a reference and no resolvable outer table
+        WHEN the NEAREST expander runs
+        THEN ValueError is raised with a helpful message about specifying reference.
         """
+        # Arrange — no reference and no LATERAL outer relation to infer one from.
+        sql = "SELECT * FROM NEAREST(genes, k := 3)"
 
-        nearest = GIQLNearest(
-            this=exp.Table(this=exp.Identifier(this="genes")),
-            k=exp.Literal.number(3),
-        )
-        resolve_operator_refs(nearest, tables_with_peaks_and_genes)
-        canonicalize_coordinates(nearest)
-
-        generator = BaseGIQLGenerator(tables=tables_with_peaks_and_genes)
-
+        # Act & assert
         with pytest.raises(ValueError, match="Could not find outer table"):
-            generator.giqlnearest_sql(nearest)
+            _generate_through_passes(sql, tables_with_peaks_and_genes)
 
-    def test_giqlnearest_sql_outer_table_not_in_tables(self):
+    def test_expand_nearest_should_raise_when_outer_table_unregistered(self):
         """
         GIVEN a NEAREST whose implicit-outer relation is found but not registered
         WHEN the query is generated
@@ -1027,10 +981,12 @@ class TestBaseGIQLGenerator:
         with pytest.raises(ValueError, match="not found in tables"):
             _generate_through_passes(sql, tables)
 
-    def test_giqlnearest_sql_invalid_reference_range(self, tables_with_peaks_and_genes):
+    def test_expand_nearest_should_raise_when_reference_range_unparseable(
+        self, tables_with_peaks_and_genes
+    ):
         """
         GIVEN a GIQLNearest with invalid/unparseable reference range string
-        WHEN giqlnearest_sql is called
+        WHEN the NEAREST expander runs
         THEN ValueError is raised with parse error details.
         """
         sql = "SELECT * FROM NEAREST(genes, reference := 'invalid_range', k := 3)"
@@ -1038,36 +994,35 @@ class TestBaseGIQLGenerator:
         with pytest.raises(ValueError, match="Could not parse reference genomic range"):
             _generate_through_passes(sql, tables_with_peaks_and_genes)
 
-    def test_giqlnearest_sql_no_tables_error(self):
+    def test_expand_nearest_should_raise_when_no_tables_registered(self):
         """
-        GIVEN a GIQLNearest without tables registered
-        WHEN giqlnearest_sql is called
-        THEN ValueError is raised because target table cannot be resolved.
+        GIVEN a GIQLNearest with no tables registered
+        WHEN the NEAREST expander runs
+        THEN ValueError is raised because the target table cannot be resolved.
         """
+        # Arrange
         sql = "SELECT * FROM NEAREST(genes, reference := 'chr1:1000-2000', k := 3)"
-        ast = parse_one(sql, dialect=GIQLDialect)
 
-        # Generator with empty tables - table won't be found
-        generator = BaseGIQLGenerator()
-
+        # Act & assert
         with pytest.raises(ValueError, match="not found in tables"):
-            generator.generate(ast)
+            _generate_through_passes(sql, Tables())
 
-    def test_giqlnearest_sql_target_not_in_tables(self, tables_with_peaks_and_genes):
+    def test_expand_nearest_should_raise_when_target_unregistered(
+        self, tables_with_peaks_and_genes
+    ):
         """
-        GIVEN a GIQLNearest with target table not registered
-        WHEN giqlnearest_sql is called
-        THEN ValueError is raised listing available tables.
+        GIVEN a GIQLNearest whose target table is not registered
+        WHEN the NEAREST expander runs
+        THEN ValueError is raised listing the unresolved table.
         """
+        # Arrange
         sql = (
             "SELECT * FROM NEAREST(unknown_table, reference := 'chr1:1000-2000', k := 3)"
         )
-        ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(tables=tables_with_peaks_and_genes)
-
+        # Act & assert
         with pytest.raises(ValueError, match="not found in tables"):
-            generator.generate(ast)
+            _generate_through_passes(sql, tables_with_peaks_and_genes)
 
     def test_intersects_sql_unqualified_column(self):
         """
@@ -1085,57 +1040,47 @@ class TestBaseGIQLGenerator:
         )
         assert output == expected
 
-    def test_giqlnearest_sql_stranded_unqualified_reference(
+    def test_expand_nearest_should_resolve_strand_when_reference_unqualified(
         self, tables_with_peaks_and_genes
     ):
         """
-        GIVEN a GIQLNearest with stranded := true and unqualified column reference
-        WHEN giqlnearest_sql is called
+        GIVEN a GIQLNearest with stranded := true and an unqualified column reference
+        WHEN the NEAREST expander runs
         THEN Strand column is resolved without table prefix.
         """
-
-        # Create NEAREST with stranded=True and an unqualified column reference
-        # The reference is an unqualified column (no table prefix)
-        nearest = GIQLNearest(
-            this=exp.Table(this=exp.Identifier(this="genes")),
-            reference=exp.Column(this=exp.Identifier(this="interval")),
-            k=exp.Literal.number(3),
-            stranded=exp.Boolean(this=True),
+        # Arrange — the reference is an unqualified column (no table prefix).
+        sql = (
+            "SELECT * FROM peaks CROSS JOIN LATERAL "
+            "NEAREST(genes, reference := interval, k := 3, stranded := true)"
         )
-        resolve_operator_refs(nearest, tables_with_peaks_and_genes)
-        canonicalize_coordinates(nearest)
 
-        generator = BaseGIQLGenerator(tables=tables_with_peaks_and_genes)
-        output = generator.giqlnearest_sql(nearest)
+        # Act
+        output = _generate_through_passes(sql, tables_with_peaks_and_genes)
 
-        # Should produce valid output with unqualified strand column
+        # Assert
         assert "LIMIT 3" in output
-        # The strand column should be unqualified (no table prefix)
         assert '"strand"' in output
 
-    def test_giqlnearest_sql_identifier_target(self, tables_with_peaks_and_genes):
+    def test_expand_nearest_should_emit_ordered_subquery_for_literal_reference(
+        self, tables_with_peaks_and_genes
+    ):
         """
-        GIVEN a GIQLNearest where target is an Identifier (not Table or Column)
-        WHEN giqlnearest_sql is called
-        THEN Target is converted to string and lookup proceeds.
+        GIVEN a GIQLNearest with a standalone literal reference
+        WHEN the NEAREST expander runs
+        THEN it produces a standalone ordered, limited subquery over the target
+            table with no correlated LATERAL.
         """
+        # Arrange
+        sql = "SELECT * FROM NEAREST(genes, reference := 'chr1:1000-2000', k := 3)"
 
-        # Use exp.Identifier directly - not Table or Column
-        # This triggers the else branch at line 830 where str(target) is called
-        nearest = GIQLNearest(
-            this=exp.Identifier(this="genes"),
-            reference=exp.Literal.string("chr1:1000-2000"),
-            k=exp.Literal.number(3),
-        )
-        resolve_operator_refs(nearest, tables_with_peaks_and_genes)
-        canonicalize_coordinates(nearest)
+        # Act
+        output = _generate_through_passes(sql, tables_with_peaks_and_genes)
 
-        generator = BaseGIQLGenerator(tables=tables_with_peaks_and_genes)
-        output = generator.giqlnearest_sql(nearest)
-
-        # Should succeed and produce valid SQL
+        # Assert
         assert "genes" in output
+        assert "ORDER BY" in output
         assert "LIMIT 3" in output
+        assert "LATERAL" not in output
 
     @given(
         bool_repr=st.sampled_from(["true", "TRUE", "True", "1", "yes", "YES"]),
@@ -1808,7 +1753,7 @@ class TestBaseGIQLGenerator:
             A 0-based half-open target table (bed_a) and an explicit
             reference column from a 1-based closed table (vcf_b).
         When:
-            giqlnearest_sql is called.
+            the NEAREST expander runs.
         Then:
             It should wrap the reference-side start as (start - 1), leave
             its end raw, and leave the target side raw.
@@ -1841,7 +1786,7 @@ class TestBaseGIQLGenerator:
             target table (bed_a) joined via CROSS JOIN LATERAL with no
             ``reference`` argument on NEAREST.
         When:
-            giqlnearest_sql is called.
+            the NEAREST expander runs.
         Then:
             It should canonicalize the outer table's columns based on
             vcf_b's convention — wrapping start as (vcf_b."start" - 1) and

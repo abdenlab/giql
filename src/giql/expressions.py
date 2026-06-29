@@ -384,7 +384,11 @@ class GIQLNearest(exp.Func):
     #: half-open) operands are left untouched and the emitted SQL stays
     #: byte-identical.
     GIQL_CANONICALIZE = _CANONICALIZE
-    GIQL_EXPAND = _EXPAND
+    #: Migrated to the ExpandOperators pass (epic #137, issue #142): NEAREST is
+    #: expanded by ``giql.expanders.nearest`` — the portable correlated LATERAL
+    #: subquery where ``supports_lateral`` holds, a decorrelated window-function
+    #: form otherwise. The legacy ``giqlnearest_sql`` emitter has been removed.
+    GIQL_EXPAND = True
 
     GIQL_SLOTS = (
         SlotSpec("this", frozenset({"registered_table"}), required=True),

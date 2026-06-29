@@ -309,6 +309,15 @@ Find nearby same-strand features within distance constraints:
    WHERE nearest.distance BETWEEN -10000 AND 10000
    ORDER BY peaks.name, ABS(nearest.distance)
 
+Target support
+~~~~~~~~~~~~~~
+
+A correlated ``NEAREST`` (its reference is an outer-row column) runs on lateral-capable engines — DuckDB and the generic target — via a correlated ``LATERAL`` subquery, and on Apache DataFusion, which has no correlated-``LATERAL`` physical plan, via a decorrelated window-function rewrite. For an **explicitly-projected** query (one that selects named columns, e.g. ``SELECT a.start, b.start, b.distance``) the two forms return identical results: the ``(start, end)`` tiebreaker orders rows tied at the k-th distance the same way on every engine, deterministically whenever ``(start, end)`` distinguishes the tied candidates. A standalone ``NEAREST`` with a literal reference is uncorrelated and uses the same ordered, limited subquery on every target.
+
+.. note::
+
+   **Known limitation —** ``SELECT *`` **/** ``SELECT b.*`` **over a correlated NEAREST on DataFusion.** The decorrelated window-function rewrite needs its reference-key and rank columns (``__giql_x_rk_*``, ``__giql_x_rn``) visible on the rewritten join, so a ``SELECT *`` or ``SELECT b.*`` over a correlated NEAREST exposes those reserved internal columns on DataFusion — a different output schema than the LATERAL form emits on DuckDB. The cross-target identity claim above therefore holds for **explicitly-projected** queries only. Projecting named columns avoids the leak entirely. A query-level wrapper that projects the reserved columns away on the DataFusion path is tracked by `#160 <https://github.com/abdenlab/giql/issues/160>`_ (it depends on the query-level expander seam from #146).
+
 Notes
 ~~~~~
 
