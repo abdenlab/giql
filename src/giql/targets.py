@@ -85,6 +85,15 @@ class GenericTarget(Target):
     This is the default target (``dialect=None``). Its capabilities are the
     conservative, maximally portable baseline that matches today's
     :class:`giql.generators.base.BaseGIQLGenerator` output.
+
+    "SQL-92-ish", not strict SQL-92: because ``supports_star_replace=False``, the
+    DISJOIN passthrough over a **non-canonical** target falls back to a
+    ``SELECT * EXCEPT (...)`` projection (re-appending the de-canonicalized
+    interval columns). ``* EXCEPT`` is **not** SQL-92 and is **not
+    DuckDB-runnable** — it is a DataFusion-family extension — so the generic
+    target's non-canonical DISJOIN output runs only on an ``* EXCEPT``-capable
+    engine. A canonical (0-based half-open) target passes the row through as a
+    plain, fully portable ``SELECT *``.
     """
 
     name: str = "generic"

@@ -89,9 +89,12 @@ def _execute(usage: OperatorUsage, query: str, engine: str) -> list:
 
     The descriptor's `tables` yields a `Table` config for any fixture with a
     custom physical layout, so GIQL resolves custom column names and
-    coordinate systems during transpilation.
+    coordinate systems during transpilation. The query is transpiled for the
+    engine's own target dialect so engine-specific emission (e.g. DISJOIN's
+    capability-driven non-canonical passthrough, which uses ``* REPLACE`` on
+    DuckDB) executes on the engine it is shaped for.
     """
-    sql = transpile(query, tables=list(usage.tables))
+    sql = transpile(query, tables=list(usage.tables), dialect=engine)
     rows = ENGINES[engine](usage.fixtures, sql)
     return sorted(([list(row) for row in rows]), key=repr)
 

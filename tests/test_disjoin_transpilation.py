@@ -32,6 +32,29 @@ class TestDisjoinTranspilation:
         assert "UNION" in sql
         assert "LEAD(" in sql
 
+    def test_transpile_should_alias_every_cuts_union_branch(self):
+        """Test that every __giql_dj_cuts UNION branch aliases its columns (#153).
+
+        Given:
+            A default (canonical 0-based half-open) DISJOIN, whose ``end``
+            de-canonicalizes to the bare physical ``t."end"`` column.
+        When:
+            Transpiling to SQL.
+        Then:
+            Each of the three ``__giql_dj_cuts`` UNION branches should project a
+            uniquely aliased ``ke`` (start/end/breakpoint), and the unaliased
+            ``t."end", t."end" FROM`` collision shape the #153 fix removed should
+            be absent — so DataFusion accepts the projection's unique names.
+        """
+        # Arrange & act
+        sql = transpile("SELECT * FROM DISJOIN(features)", tables=["features"])
+
+        # Assert: every cuts branch aliases the end-column projection as ``ke``.
+        assert sql.count("AS kc") == 3
+        assert sql.count("AS ke") == 3
+        # The pre-#153 unaliased duplicate-end collision must not survive.
+        assert 't."end", t."end" FROM' not in sql
+
     def test_giqldisjoin_sql_should_emit_disjoin_columns(self):
         """Test that DISJOIN appends the sub-interval columns.
 
@@ -309,7 +332,7 @@ class TestDisjoinTranspilation:
         sql = transpile("SELECT * FROM DISJOIN(features)", tables=["features"])
 
         # Assert
-        assert "EXISTS (" not in sql
+        assert "EXISTS(" not in sql
 
     def test_giqldisjoin_sql_should_skip_exists_clause_when_reference_resolves_to_target(
         self,
@@ -331,7 +354,7 @@ class TestDisjoinTranspilation:
         )
 
         # Assert
-        assert "EXISTS (" not in sql
+        assert "EXISTS(" not in sql
 
     def test_giqldisjoin_sql_should_emit_exists_clause_when_reference_is_different_table(
         self,
@@ -354,7 +377,7 @@ class TestDisjoinTranspilation:
         )
 
         # Assert
-        assert "EXISTS (" in sql
+        assert "EXISTS(" in sql
 
     def test_giqldisjoin_sql_should_emit_exists_clause_when_cte_shadows_target_name(
         self,
@@ -377,7 +400,7 @@ class TestDisjoinTranspilation:
         )
 
         # Assert
-        assert "EXISTS (" in sql
+        assert "EXISTS(" in sql
 
     def test_giqldisjoin_sql_should_emit_exists_clause_when_reference_is_subquery(self):
         """Test that a subquery reference keeps the EXISTS clause.
@@ -397,7 +420,7 @@ class TestDisjoinTranspilation:
         )
 
         # Assert
-        assert "EXISTS (" in sql
+        assert "EXISTS(" in sql
 
     def test_giqldisjoin_sql_should_skip_exists_clause_when_target_uses_one_based_closed_encoding(
         self,
@@ -425,7 +448,7 @@ class TestDisjoinTranspilation:
         )
 
         # Assert
-        assert "EXISTS (" not in sql
+        assert "EXISTS(" not in sql
         assert '("start" - 1) AS "start"' in sql
 
     def test_giqldisjoin_sql_should_skip_exists_clause_when_target_uses_custom_column_names(
@@ -450,7 +473,7 @@ class TestDisjoinTranspilation:
         )
 
         # Assert
-        assert "EXISTS (" not in sql
+        assert "EXISTS(" not in sql
         assert 'r."seqid"' not in sql
         assert 'r."lo"' not in sql
         assert 'r."hi"' not in sql
@@ -483,7 +506,7 @@ class TestDisjoinTranspilation:
         )
 
         # Assert
-        assert "EXISTS (" not in sql
+        assert "EXISTS(" not in sql
         assert '("start" - 1) AS "start"' in sql
         # Target and explicit self-reference dedupe to a single wrapper CTE: one
         # CTE definition plus the two FROM references (target + reference).
@@ -501,7 +524,7 @@ class TestDisjoinTranspilation:
         When:
             Transpiling to SQL.
         Then:
-            It should produce SQL containing exactly one ``EXISTS (``
+            It should produce SQL containing exactly one ``EXISTS(``
             occurrence — only the distinct-reference call retains the
             coverage filter.
         """
@@ -514,7 +537,7 @@ class TestDisjoinTranspilation:
         )
 
         # Assert
-        assert sql.count("EXISTS (") == 1
+        assert sql.count("EXISTS(") == 1
 
     @pytest.mark.parametrize(
         ("query", "tables", "skips_exists"),
@@ -571,7 +594,7 @@ class TestDisjoinTranspilation:
         sql = transpile(query, tables=tables)
 
         # Assert
-        assert ("EXISTS (" not in sql) is skips_exists
+        assert ("EXISTS(" not in sql) is skips_exists
 
     def test_giqldisjoin_sql_should_emit_exists_clause_when_enclosing_cte_shadows_target_from_outer_scope(
         self,
@@ -599,7 +622,7 @@ class TestDisjoinTranspilation:
         )
 
         # Assert
-        assert sql.count("EXISTS (") == 1
+        assert sql.count("EXISTS(") == 1
 
     def test_giqldisjoin_sql_should_resolve_recursive_cte_reference(self):
         """Test that a WITH RECURSIVE CTE reference resolves to the CTE.
@@ -627,7 +650,7 @@ class TestDisjoinTranspilation:
 
         # Assert
         assert "__giql_dj_ref AS (SELECT * FROM refs)" in sql
-        assert "EXISTS (" in sql
+        assert "EXISTS(" in sql
         assert '("start" - 1)' not in sql
 
     def test_giqldisjoin_sql_should_resolve_set_operation_attached_cte_reference(self):
@@ -656,7 +679,7 @@ class TestDisjoinTranspilation:
 
         # Assert
         assert "__giql_dj_ref AS (SELECT * FROM refs)" in sql
-        assert sql.count("EXISTS (") == 1
+        assert sql.count("EXISTS(") == 1
 
     def test_giqldisjoin_sql_should_resolve_redeclared_inner_cte_reference(self):
         """Test that an inner WITH redeclaring an outer CTE name still resolves.
@@ -683,7 +706,7 @@ class TestDisjoinTranspilation:
 
         # Assert
         assert "__giql_dj_ref AS (SELECT * FROM refs)" in sql
-        assert sql.count("EXISTS (") == 1
+        assert sql.count("EXISTS(") == 1
 
     def test_giqldisjoin_sql_should_not_see_cte_declared_in_sibling_derived_table(
         self,
@@ -810,17 +833,21 @@ class TestDisjoinCanonicalization:
         assert sql.count("AS (SELECT * REPLACE") == 1
         assert sql.count("__giql_canon_") == 3
 
-    def test_giqldisjoin_sql_should_emit_passthrough_interval_in_target_encoding(self):
-        """Test that the passed-through interval is de-canonicalized to the target.
+    def test_transpile_should_emit_portable_passthrough_interval_on_generic_target(
+        self,
+    ):
+        """Test that the passthrough uses a portable EXCEPT projection by default.
 
         Given:
             A self-mode DISJOIN over a 1-based closed target whose row passes
-            through canonical inside the wrapper CTE.
+            through canonical inside the wrapper CTE, transpiled for the generic
+            target (which does not support ``SELECT * REPLACE``).
         When:
             Transpiling to SQL.
         Then:
             It should de-canonicalize the passed-through start/end back into the
-            target's encoding via a star REPLACE on the final projection.
+            target's encoding via a portable ``* EXCEPT`` projection that drops
+            the interval columns and re-projects them recomputed.
         """
         # Arrange & act
         sql = transpile(
@@ -828,6 +855,36 @@ class TestDisjoinCanonicalization:
             tables=[
                 Table("features", coordinate_system="1based", interval_type="closed")
             ],
+        )
+
+        # Assert
+        assert (
+            't.* EXCEPT ("start", "end"), (t."start" + 1) AS "start", '
+            't."end" AS "end"' in sql
+        )
+
+    def test_transpile_should_emit_star_replace_passthrough_on_duckdb_target(
+        self,
+    ):
+        """Test that the passthrough uses ``* REPLACE`` on a REPLACE-capable target.
+
+        Given:
+            A self-mode DISJOIN over a 1-based closed target whose row passes
+            through canonical inside the wrapper CTE, transpiled for the DuckDB
+            target (which supports ``SELECT * REPLACE``).
+        When:
+            Transpiling to SQL.
+        Then:
+            It should de-canonicalize the passed-through start/end back into the
+            target's encoding via a star ``REPLACE`` on the final projection.
+        """
+        # Arrange & act
+        sql = transpile(
+            "SELECT * FROM DISJOIN(features)",
+            tables=[
+                Table("features", coordinate_system="1based", interval_type="closed")
+            ],
+            dialect="duckdb",
         )
 
         # Assert
