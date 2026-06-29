@@ -29,11 +29,13 @@ class Capabilities:
     Parameters
     ----------
     supports_lateral : bool
-        Whether the engine supports ``LATERAL`` / correlated joins. Will
-        drive the NEAREST LATERAL-vs-window-function strategy (#142). Until
-        then, :attr:`giql.generators.base.BaseGIQLGenerator.SUPPORTS_LATERAL`
-        remains the live source of truth at generation time; #142 reconciles
-        the two.
+        Whether the engine supports ``LATERAL`` / correlated joins. Drives the
+        NEAREST LATERAL-vs-window-function strategy (#142): a correlated NEAREST
+        expands to a portable correlated ``LATERAL`` subquery where this holds
+        and to a decorrelated window-function form where it does not. This
+        capability is the single source of truth — the former
+        ``BaseGIQLGenerator.SUPPORTS_LATERAL`` generator attribute has been
+        removed.
     supports_star_replace : bool
         Whether the engine supports ``SELECT * REPLACE (...)``. Drives the
         coordinate-canonicalization output: ``* REPLACE`` where supported,

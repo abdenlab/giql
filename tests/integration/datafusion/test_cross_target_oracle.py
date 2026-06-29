@@ -14,13 +14,20 @@ DataFusion-vs-DuckDB. Only the column-to-column INTERSECTS join produces
 genuinely divergent SQL across targets (the DuckDB IEJoin vs. the binned
 equi-join).
 
-NEAREST's expansion uses a correlated ``LATERAL`` subquery, which DataFusion has
-no physical plan for today; its generic-vs-duckdb equivalence case runs both on
-DuckDB, and the full three-target oracle is pinned by a
-``pytest.raises(match="OuterReferenceColumn")`` test (#142) that fails loudly on
-an unrelated error and trips "DID NOT RAISE" — forcing conversion to a real
-identity test — when DataFusion gains correlated LATERAL. DISJOIN has an
-analogous pending-#153 gap (duplicate ``end`` output names).
+NEAREST's correlated expansion is capability-driven (#142): lateral-capable
+targets (generic, duckdb) emit the portable ``LATERAL`` subquery, while
+DataFusion — which has no correlated-LATERAL physical plan — gets a decorrelated
+window-function fallback. For **explicitly-projected** queries (those selecting
+named columns) the two forms return identical rows, so the full three-target
+identity oracle now runs on every target for that projection shape (the former
+``_unsupported_pending_142`` ``pytest.raises`` pin has been promoted to a real
+identity test). The identity claim is narrowed to explicit projections because a
+``SELECT *`` / ``SELECT b.*`` over a correlated NEAREST on DataFusion additionally
+exposes the fallback's reserved ``__giql_x_*`` rank/key columns, a divergent
+output schema from the LATERAL form's — a known limitation pinned by the
+``xfail`` ``test_correlated_nearest_star_projection_diverges_on_datafusion`` case
+below and tracked for a query-level fix by #160 (dependent on #146). DISJOIN has
+an analogous pending-#153 gap (duplicate ``end`` output names).
 """
 
 import pytest
@@ -204,32 +211,384 @@ class TestCrossTargetOracleNearest:
             engines={"generic": "duckdb"},
         )
 
-    def test_nearest_on_datafusion_unsupported_pending_142(self, cross_target_oracle):
-        """Test the full NEAREST oracle raises DataFusion's missing-LATERAL error.
+    def test_correlated_nearest_k1_agrees_across_all_targets(self, cross_target_oracle):
+        """Test correlated NEAREST k=1 returns identical rows on every target.
 
         Given:
-            The single-row NEAREST query and a candidate gene on chr1.
+            A single-row peaks table and three candidate genes at varying
+            distances on chr1.
         When:
-            The oracle runs all three targets — the datafusion target executes
-            the correlated LATERAL on DataFusion, which has no physical plan.
+            A correlated ``CROSS JOIN LATERAL NEAREST(..., k := 1)`` query runs
+            for every target — the generic and duckdb targets emit the portable
+            LATERAL form (executed on DuckDB, the lateral-capable engine), and
+            the datafusion target emits the decorrelated window-function fallback
+            the #142 expander produces (executed on DataFusion).
         Then:
-            DataFusion should raise its ``OuterReferenceColumn`` "not
-            implemented" error. This pins the known #142 gap: the ``match``
-            narrows to the LATERAL signature so an unrelated/reworded DataFusion
-            error fails loudly, and a closed gap (no exception) trips pytest's
-            "DID NOT RAISE", forcing this to be converted into a real
-            cross-target identity test when DataFusion gains correlated LATERAL.
+            Every target should return the single nearest gene and agree.
+
+        Promoted from the ``_unsupported_pending_142`` expected-failure pin:
+        DataFusion now plans correlated NEAREST through the capability-driven
+        window-function fallback, so the full three-target oracle is a real
+        identity test rather than a ``pytest.raises`` placeholder. The generic
+        target is routed to DuckDB because its portable SQL is the LATERAL form,
+        which only the datafusion-specific fallback decorrelates for DataFusion.
         """
         # Arrange / Act / Assert
-        with pytest.raises(Exception, match="OuterReferenceColumn"):
-            cross_target_oracle(
-                "SELECT a.chrom, a.start AS a_start, b.start AS b_start "
-                "FROM peaks a "
-                "CROSS JOIN LATERAL NEAREST(genes, reference := a.interval, k := 1) b",
-                peaks=[("chr1", 200, 300)],
-                genes=[("chr1", 280, 290)],
-                expected=[("chr1", 200, 280)],
-            )
+        cross_target_oracle(
+            "SELECT a.chrom, a.start AS a_start, b.start AS b_start "
+            "FROM peaks a "
+            "CROSS JOIN LATERAL NEAREST(genes, reference := a.interval, k := 1) b",
+            peaks=[("chr1", 200, 300)],
+            genes=[
+                ("chr1", 1000, 1100),
+                ("chr1", 50, 60),
+                ("chr1", 280, 290),
+            ],
+            expected=[("chr1", 200, 280)],
+            engines={"generic": "duckdb"},
+        )
+
+    def test_correlated_nearest_k2_returns_two_nearest_across_targets(
+        self, cross_target_oracle
+    ):
+        """Test correlated NEAREST k=2 picks the two nearest on every target.
+
+        Given:
+            One peak and four candidate genes, more than k of them on the peak's
+            chromosome at distinct distances.
+        When:
+            A correlated ``NEAREST(..., k := 2)`` runs on every target — DuckDB
+            via the LATERAL form, DataFusion via the decorrelated window fallback.
+        Then:
+            Every target should return the two nearest genes and agree, pinning
+            the top-k fan-out of the fallback against the LATERAL form.
+        """
+        # Arrange / Act / Assert
+        cross_target_oracle(
+            "SELECT a.start AS a_start, b.start AS b_start "
+            "FROM peaks a "
+            "CROSS JOIN LATERAL NEAREST(genes, reference := a.interval, k := 2) b",
+            peaks=[("chr1", 200, 300)],
+            genes=[
+                ("chr1", 1000, 1100),
+                ("chr1", 50, 60),
+                ("chr1", 280, 290),
+                ("chr1", 310, 320),
+            ],
+            expected=[(200, 280), (200, 310)],
+            engines={"generic": "duckdb"},
+        )
+
+    def test_correlated_nearest_duplicate_reference_rows_fan_out(
+        self, cross_target_oracle
+    ):
+        """Test correlated NEAREST fans the top-k out to duplicate reference rows.
+
+        Given:
+            Two identical peak rows and two candidate genes.
+        When:
+            A correlated ``NEAREST(..., k := 1)`` runs on every target.
+        Then:
+            Every target should return the nearest gene once per duplicate peak
+            (two rows), pinning the fallback's DISTINCT-then-rejoin fan-out so a
+            duplicate outer row is not collapsed.
+        """
+        # Arrange / Act / Assert
+        cross_target_oracle(
+            "SELECT a.start AS a_start, b.start AS b_start "
+            "FROM peaks a "
+            "CROSS JOIN LATERAL NEAREST(genes, reference := a.interval, k := 1) b",
+            peaks=[("chr1", 200, 300), ("chr1", 200, 300)],
+            genes=[("chr1", 280, 290), ("chr1", 50, 60)],
+            expected=[(200, 280), (200, 280)],
+            engines={"generic": "duckdb"},
+        )
+
+    def test_correlated_nearest_partitions_by_chromosome(self, cross_target_oracle):
+        """Test correlated NEAREST keys the nearest per outer chromosome.
+
+        Given:
+            Peaks on chr1 and chr2 and candidate genes on both chromosomes.
+        When:
+            A correlated ``NEAREST(..., k := 1)`` runs on every target.
+        Then:
+            Each peak should pair with the nearest gene on its own chromosome and
+            all targets agree, pinning the fallback's PARTITION BY reference key
+            across distinct outer keys.
+        """
+        # Arrange / Act / Assert
+        cross_target_oracle(
+            "SELECT a.chrom AS chrom, a.start AS a_start, b.start AS b_start "
+            "FROM peaks a "
+            "CROSS JOIN LATERAL NEAREST(genes, reference := a.interval, k := 1) b",
+            peaks=[("chr1", 200, 300), ("chr2", 200, 300)],
+            genes=[("chr1", 280, 290), ("chr2", 500, 510), ("chr2", 205, 215)],
+            expected=[("chr1", 200, 280), ("chr2", 200, 205)],
+            engines={"generic": "duckdb"},
+        )
+
+    def test_correlated_nearest_max_distance_boundary(self, cross_target_oracle):
+        """Test correlated NEAREST drops candidates beyond max_distance everywhere.
+
+        Given:
+            A peak and two genes, one just inside and one far beyond a
+            ``max_distance`` threshold.
+        When:
+            A correlated ``NEAREST(..., k := 5, max_distance := 100)`` runs on
+            every target.
+        Then:
+            Every target should return only the in-threshold gene, pinning the
+            ``max_distance`` filter through both the LATERAL and fallback forms.
+        """
+        # Arrange / Act / Assert
+        cross_target_oracle(
+            "SELECT a.start AS a_start, b.start AS b_start "
+            "FROM peaks a "
+            "CROSS JOIN LATERAL NEAREST("
+            "genes, reference := a.interval, k := 5, max_distance := 100) b",
+            peaks=[("chr1", 200, 300)],
+            genes=[("chr1", 360, 400), ("chr1", 5000, 5100)],
+            expected=[(200, 360)],
+            engines={"generic": "duckdb"},
+        )
+
+    def test_correlated_nearest_stranded_matches_strand(self, cross_target_oracle):
+        """Test stranded correlated NEAREST matches strand on every target.
+
+        Given:
+            A ``+`` peak and two genes — a slightly farther ``+`` gene and a
+            nearer ``-`` gene.
+        When:
+            A correlated ``NEAREST(..., k := 1, stranded := true)`` runs on every
+            target.
+        Then:
+            Every target should return the same-strand (``+``) gene even though
+            the opposite-strand gene is nearer, in agreement.
+        """
+        # Arrange / Act / Assert
+        cross_target_oracle(
+            "SELECT a.start AS a_start, b.start AS b_start "
+            "FROM peaks a "
+            "CROSS JOIN LATERAL NEAREST("
+            "genes, reference := a.interval, k := 1, stranded := true) b",
+            tables=[Table("peaks"), Table("genes")],
+            columns=_STRANDED_COLUMNS,
+            peaks=[("chr1", 200, 300, "+")],
+            genes=[("chr1", 280, 290, "+"), ("chr1", 250, 260, "-")],
+            expected=[(200, 280)],
+            engines={"generic": "duckdb"},
+        )
+
+    def test_correlated_nearest_signed_distance_agrees(self, cross_target_oracle):
+        """Test signed correlated NEAREST reports signed distances everywhere.
+
+        Given:
+            A peak with one upstream and one downstream candidate gene.
+        When:
+            A correlated ``NEAREST(..., k := 2, signed := true)`` projects the
+            ``distance`` column on every target.
+        Then:
+            Every target should report a negative distance for the upstream gene
+            and a positive one for the downstream gene, in agreement.
+        """
+        # Arrange / Act / Assert
+        cross_target_oracle(
+            "SELECT a.start AS a_start, b.start AS b_start, b.distance AS d "
+            "FROM peaks a "
+            "CROSS JOIN LATERAL NEAREST("
+            "genes, reference := a.interval, k := 2, signed := true) b",
+            peaks=[("chr1", 200, 300)],
+            genes=[("chr1", 50, 60), ("chr1", 360, 400)],
+            expected=[(200, 50, -141), (200, 360, 61)],
+            engines={"generic": "duckdb"},
+        )
+
+    def test_correlated_nearest_k_th_distance_tie_breaks_on_coordinates(
+        self, cross_target_oracle
+    ):
+        """Test the (start, end) tiebreaker picks the same k-th candidate everywhere.
+
+        Given:
+            One peak and three genes where two candidates are tied at the k-th
+            (k=1) distance — both 100 bp away, one upstream and one downstream of
+            the peak — so only the ``(start, end)`` tiebreaker can choose between
+            them (the lower ``(start, end)`` wins).
+        When:
+            A correlated ``NEAREST(..., k := 1)`` runs on every target — DuckDB via
+            the LATERAL form's ``ORDER BY ABS(distance), start, end LIMIT 1`` and
+            DataFusion via the fallback's matching ``ROW_NUMBER()`` ordering.
+        Then:
+            Every target should return the lower-coordinate tied candidate (the
+            upstream gene), so the LATERAL and window forms agree on the tie rather
+            than ordering it by engine-dependent chance.
+        """
+        # Arrange / Act / Assert
+        cross_target_oracle(
+            "SELECT a.start AS a_start, b.start AS b_start "
+            "FROM peaks a "
+            "CROSS JOIN LATERAL NEAREST(genes, reference := a.interval, k := 1) b",
+            peaks=[("chr1", 200, 300)],
+            # Upstream gene ends at 100 (gap 100); downstream gene starts at 400
+            # (gap 100). Both tie at distance 100; (start, end) breaks the tie in
+            # favor of the upstream gene (start 50 < start 400).
+            genes=[("chr1", 50, 100), ("chr1", 400, 450)],
+            expected=[(200, 50)],
+            engines={"generic": "duckdb"},
+        )
+
+    def test_correlated_nearest_stranded_opposite_strands_same_position(
+        self, cross_target_oracle
+    ):
+        """Test stranded NEAREST keys per-strand for co-located opposite-strand rows.
+
+        Given:
+            Two peaks at the *same* position but on opposite strands (``+`` and
+            ``-``), and one same-position ``+`` gene plus one ``-`` gene, so the
+            strand-augmented reference key must keep each outer row's nearest
+            strand-matched independently.
+        When:
+            A correlated ``NEAREST(..., k := 1, stranded := true)`` runs on every
+            target — DuckDB via the LATERAL form, DataFusion via the fallback whose
+            reference key includes strand.
+        Then:
+            The ``+`` peak should pair with the ``+`` gene and the ``-`` peak with
+            the ``-`` gene, in agreement, proving the fan-out keys by strand so two
+            co-located opposite-strand outer rows are not collapsed.
+        """
+        # Arrange / Act / Assert
+        cross_target_oracle(
+            "SELECT a.strand AS a_strand, b.start AS b_start "
+            "FROM peaks a "
+            "CROSS JOIN LATERAL NEAREST("
+            "genes, reference := a.interval, k := 1, stranded := true) b",
+            tables=[Table("peaks"), Table("genes")],
+            columns=_STRANDED_COLUMNS,
+            peaks=[("chr1", 200, 300, "+"), ("chr1", 200, 300, "-")],
+            genes=[("chr1", 280, 290, "+"), ("chr1", 250, 260, "-")],
+            expected=[("+", 280), ("-", 250)],
+            engines={"generic": "duckdb"},
+        )
+
+    def test_correlated_nearest_max_distance_keeps_k_survivors(
+        self, cross_target_oracle
+    ):
+        """Test max_distance with k>1 keeps every in-threshold survivor everywhere.
+
+        Given:
+            One peak and four genes where three sit within a ``max_distance``
+            threshold at distinct distances and one sits beyond it, with k larger
+            than the survivor count.
+        When:
+            A correlated ``NEAREST(..., k := 3, max_distance := 200)`` runs on
+            every target — DuckDB via the LATERAL form, DataFusion via the window
+            fallback.
+        Then:
+            Every target should return exactly the three in-threshold genes (the
+            beyond-threshold gene dropped), proving ``max_distance`` and the top-k
+            survivor set interact identically across both forms.
+        """
+        # Arrange / Act / Assert
+        cross_target_oracle(
+            "SELECT a.start AS a_start, b.start AS b_start "
+            "FROM peaks a "
+            "CROSS JOIN LATERAL NEAREST("
+            "genes, reference := a.interval, k := 3, max_distance := 200) b",
+            peaks=[("chr1", 200, 300)],
+            genes=[
+                ("chr1", 350, 360),
+                ("chr1", 420, 430),
+                ("chr1", 480, 490),
+                ("chr1", 5000, 5100),
+            ],
+            expected=[(200, 350), (200, 420), (200, 480)],
+            engines={"generic": "duckdb"},
+        )
+
+    def test_correlated_nearest_unaliased_lateral_agrees_across_targets(
+        self, cross_target_oracle
+    ):
+        """Test an unaliased correlated NEAREST agrees across targets (B3 on-engine).
+
+        Given:
+            A correlated ``CROSS JOIN LATERAL NEAREST(...)`` written *without* a
+            table alias — legitimate GIQL that, before B3, raised on DataFusion
+            while running on DuckDB.
+        When:
+            The query runs on every target — DuckDB via the LATERAL form and
+            DataFusion via the decorrelated fallback, which now synthesizes the
+            missing alias instead of asserting one.
+        Then:
+            Every target should return the single nearest gene and agree, proving
+            the synthesized-alias fallback both transpiles and executes on the real
+            DataFusion engine.
+        """
+        # Arrange / Act / Assert
+        cross_target_oracle(
+            "SELECT a.start AS a_start "
+            "FROM peaks a "
+            "CROSS JOIN LATERAL NEAREST(genes, reference := a.interval, k := 1)",
+            peaks=[("chr1", 200, 300)],
+            genes=[
+                ("chr1", 1000, 1100),
+                ("chr1", 50, 60),
+                ("chr1", 280, 290),
+            ],
+            expected=[(200,)],
+            engines={"generic": "duckdb"},
+        )
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason="#160: SELECT b.* over a correlated NEAREST on DataFusion exposes "
+        "the decorrelated fallback's reserved __giql_x_rk_*/__giql_x_rn columns, "
+        "so the output schema diverges from the LATERAL form's on DuckDB. The "
+        "cross-target identity claim is narrowed to explicitly-projected queries "
+        "until #160 (dependent on #146) adds a query-level wrapper that projects "
+        "the reserved columns away on the DataFusion path; this flips to a real "
+        "identity test then.",
+    )
+    def test_correlated_nearest_star_projection_diverges_on_datafusion(
+        self, cross_target_oracle
+    ):
+        """Test SELECT b.* over a correlated NEAREST diverges per target (pins #160).
+
+        Given:
+            A single-row peak and three candidate genes on chr1.
+        When:
+            A correlated ``NEAREST(..., k := 1)`` query projects ``b.*`` on every
+            target — DuckDB emits the LATERAL form (``genes.* + distance``) while
+            DataFusion's fallback additionally surfaces the reserved
+            ``__giql_x_rk_*`` / ``__giql_x_rn`` columns on ``b``.
+        Then:
+            The cross-target row sets should NOT agree (DataFusion's rows carry the
+            extra reserved columns), so the oracle's identity assertion fails. This
+            xfail pins the known divergence so it is not silently forgotten; it
+            flips to a passing identity test when #160 hides the reserved columns.
+        """
+        # Arrange / Act & Assert (xfail: identity assertion is expected to fail)
+        cross_target_oracle(
+            "SELECT b.* "
+            "FROM peaks a "
+            "CROSS JOIN LATERAL NEAREST(genes, reference := a.interval, k := 1) b",
+            peaks=[("chr1", 200, 300)],
+            genes=[
+                ("chr1", 1000, 1100),
+                ("chr1", 50, 60),
+                ("chr1", 280, 290),
+            ],
+            expected=[("chr1", 280, 290, 0)],
+            engines={"generic": "duckdb"},
+        )
+
+
+#: A chrom/start/end/strand schema for the stranded NEAREST oracle cases (the
+#: default oracle schema carries no strand column).
+_STRANDED_COLUMNS = (
+    ("chrom", "utf8"),
+    ("start", "int64"),
+    ("end", "int64"),
+    ("strand", "utf8"),
+)
 
 
 class TestCrossTargetOracleIntersectsAnyAll:
