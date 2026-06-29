@@ -21,6 +21,7 @@ from sqlglot import parse_one
 from giql.canonicalizer import CANON_PREFIX
 from giql.canonicalizer import canonicalize_coordinates
 from giql.dialect import GIQLDialect
+from giql.expander import ExpandOperators
 from giql.expressions import GIQLDisjoin
 from giql.expressions import GIQLDistance
 from giql.expressions import GIQLNearest
@@ -30,6 +31,7 @@ from giql.resolver import META_KEY
 from giql.resolver import resolve_operator_refs
 from giql.table import Table
 from giql.table import Tables
+from giql.targets import GenericTarget
 from giql.transpile import transpile
 
 hypothesis = pytest.importorskip("hypothesis")
@@ -102,6 +104,10 @@ class TestNoOpWhenFlagsOff:
         query = "SELECT * FROM DISJOIN(variants)"
         tables = _tables(("0based", "half_open"))
         ast = resolve_operator_refs(parse_one(query, dialect=GIQLDialect), tables)
+        # Bypass pass 2 (canonicalization) but keep pass 3 (expansion): DISJOIN
+        # now goes through its registered expander, so the pass-bypassed reference
+        # must too, isolating pass 2's contribution to nothing.
+        ast = ExpandOperators(GenericTarget(), tables).transform(ast)
         expected = BaseGIQLGenerator(tables=tables).generate(ast)
 
         # Act
@@ -130,6 +136,10 @@ class TestNoOpWhenFlagsOff:
         tables = Tables()
         tables.register("variants", variants)
         ast = resolve_operator_refs(parse_one(query, dialect=GIQLDialect), tables)
+        # Bypass pass 2 (canonicalization) but keep pass 3 (expansion): DISJOIN
+        # now expands through its registry entry, so the pass-bypassed reference
+        # must run pass 3 too for the byte-identical comparison to isolate pass 2.
+        ast = ExpandOperators(GenericTarget(), tables).transform(ast)
         expected = BaseGIQLGenerator(tables=tables).generate(ast)
 
         # Act

@@ -3,9 +3,9 @@
 These exercise the reusable oracle (``tests/integration/conftest.py``) over the
 operators that already emit identical generic SQL across Generic and DataFusion
 and run correctly on DuckDB: INTERSECTS (literal + column-to-column join),
-CONTAINS, WITHIN, and standalone NEAREST. The spatial predicates have since been
-migrated to the expander registry (#141, epic #137); this lane locks in the
-verification path that migration and every later one (#142-#144) consume.
+CONTAINS, WITHIN, and standalone NEAREST. DISTANCE, the spatial predicates,
+NEAREST, and DISJOIN have since been migrated to the expander registry (epic
+#137); this lane locks in the verification path each migration consumes.
 
 For the non-join operators (DISTANCE, CONTAINS, WITHIN, ANY/ALL, CLUSTER,
 MERGE) the generic and datafusion targets emit byte-identical SQL and both run
@@ -26,8 +26,10 @@ identity test). The identity claim is narrowed to explicit projections because a
 exposes the fallback's reserved ``__giql_x_*`` rank/key columns, a divergent
 output schema from the LATERAL form's — a known limitation pinned by the
 ``xfail`` ``test_correlated_nearest_star_projection_diverges_on_datafusion`` case
-below and tracked for a query-level fix by #160 (dependent on #146). DISJOIN has
-an analogous pending-#153 gap (duplicate ``end`` output names).
+below and tracked for a query-level fix by #160 (dependent on #146). DISJOIN is
+migrated onto the expander registry (#143) and its previously pending-#153 gap
+(duplicate ``end`` output names) is closed, so its full three-target oracle now
+runs as a real cross-target identity test.
 """
 
 import pytest
@@ -861,11 +863,12 @@ class TestCrossTargetOracleMerge:
 
 
 class TestCrossTargetOracleDisjoin:
-    """DISJOIN: a DuckDB-only case plus the DataFusion duplicate-``end`` gap (#153).
+    """DISJOIN cross-target identity across Generic, DataFusion, and DuckDB (#143).
 
-    The DataFusion gap is the unaliased duplicate ``t."end"`` columns in the
-    ``__giql_dj_cuts`` CTE UNION branches, which DataFusion rejects as non-unique
-    projection names (DuckDB tolerates them).
+    DISJOIN is migrated onto the expander registry (#143), and the duplicate
+    unaliased ``t."end"`` columns in the ``__giql_dj_cuts`` CTE UNION branches are
+    aliased in every branch (#153), so DataFusion no longer rejects the projection
+    for non-unique names. The full three-target oracle therefore runs and agrees.
     """
 
     def test_disjoin_splits_overlaps_on_duckdb(self, cross_target_oracle):
@@ -893,40 +896,79 @@ class TestCrossTargetOracleDisjoin:
             targets=("duckdb",),
         )
 
-    def test_disjoin_on_datafusion_unsupported_pending_153(self, cross_target_oracle):
-        """Test the full DISJOIN oracle raises DataFusion's duplicate-name error.
+    def test_disjoin_agrees_across_all_targets(self, cross_target_oracle):
+        """Test the full DISJOIN oracle returns identical rows on every target.
 
         Given:
-            The same two overlapping intervals.
+            Two overlapping intervals on chr1.
         When:
-            The oracle runs all three targets — the datafusion target executes
-            DISJOIN's ``__giql_dj_cuts`` CTE, whose UNION branches project the
-            unaliased ``t."end"`` column twice.
+            The oracle runs all three targets — generic and datafusion execute the
+            registry-expanded DISJOIN (with every ``__giql_dj_cuts`` UNION branch
+            aliased, #153) on DataFusion, and duckdb runs on DuckDB.
         Then:
-            DataFusion should reject the projection for non-unique expression
-            names (DuckDB tolerates it). This pins the known #153 gap: the
-            ``match`` narrows to the duplicate-output-name signature so an
-            unrelated/reworded DataFusion error fails loudly, and a closed gap
-            (no exception) trips pytest's "DID NOT RAISE", forcing this to be
-            converted into a real cross-target identity test when the duplicate
-            ``end`` columns in the ``__giql_dj_cuts`` UNION branches are aliased.
+            Every target should return the same sub-segments, proving DISJOIN now
+            executes on DataFusion (the #153 duplicate-name gap is closed) and
+            agrees with DuckDB.
         """
         # Arrange / Act / Assert
-        with pytest.raises(
-            Exception, match="Projections require unique expression names"
-        ):
-            cross_target_oracle(
-                'SELECT chrom, start, "end", disjoin_start, disjoin_end '
-                "FROM DISJOIN(peaks)",
-                tables=[Table("peaks")],
-                peaks=[("chr1", 0, 100), ("chr1", 50, 150)],
-                expected=[
-                    ("chr1", 0, 100, 0, 50),
-                    ("chr1", 0, 100, 50, 100),
-                    ("chr1", 50, 150, 50, 100),
-                    ("chr1", 50, 150, 100, 150),
-                ],
-            )
+        cross_target_oracle(
+            'SELECT chrom, start, "end", disjoin_start, disjoin_end FROM DISJOIN(peaks)',
+            tables=[Table("peaks")],
+            peaks=[("chr1", 0, 100), ("chr1", 50, 150)],
+            expected=[
+                ("chr1", 0, 100, 0, 50),
+                ("chr1", 0, 100, 50, 100),
+                ("chr1", 50, 150, 50, 100),
+                ("chr1", 50, 150, 100, 150),
+            ],
+        )
+
+    def test_disjoin_non_canonical_passthrough_agrees_across_targets(
+        self, cross_target_oracle
+    ):
+        """Test the non-canonical EXCEPT passthrough agrees with DuckDB REPLACE.
+
+        Given:
+            Two overlapping intervals on chr1 in a table declared **1-based
+            closed** (non-canonical), each carrying an extra ``name`` passthrough
+            column.
+        When:
+            The oracle runs all three targets — generic and datafusion exercise
+            the portable ``SELECT * EXCEPT (start, end), ...`` passthrough on
+            DataFusion (the #143 headline path, which runs on no engine without
+            this case), and duckdb runs the in-place ``* REPLACE`` form on DuckDB.
+        Then:
+            Every target should return the same rows: the de-canonicalized
+            (1-based closed) interval columns, the passthrough ``name``, and the
+            disjoin sub-segments. The projection lists **explicit** columns so the
+            row comparison is order-agnostic across the EXCEPT-re-append vs.
+            REPLACE-in-place column orders the two forms produce.
+        """
+        # Arrange / Act / Assert
+        cross_target_oracle(
+            'SELECT name, start, "end", disjoin_start, disjoin_end '
+            "FROM DISJOIN(feats)",
+            tables=[
+                Table(
+                    "feats",
+                    coordinate_system="1based",
+                    interval_type="closed",
+                )
+            ],
+            columns=(
+                ("chrom", "utf8"),
+                ("start", "int64"),
+                ("end", "int64"),
+                ("name", "utf8"),
+            ),
+            feats=[("chr1", 1, 100, "a"), ("chr1", 50, 150, "b")],
+            expected=[
+                ("a", 1, 100, 1, 49),
+                ("a", 1, 100, 50, 100),
+                ("b", 50, 150, 50, 100),
+                ("b", 50, 150, 101, 150),
+            ],
+        )
 
 
 class TestCrossTargetOracleDataShapes:

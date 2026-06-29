@@ -438,7 +438,11 @@ class GIQLDisjoin(exp.Func):
     #: (0-based half-open) operands are left unwrapped and the emitted SQL stays
     #: byte-identical.
     GIQL_CANONICALIZE = True
-    GIQL_EXPAND = _EXPAND
+    #: Opt DISJOIN into the ExpandOperators pass (epic #137, issue #143). DISJOIN
+    #: is migrated to a registered expander (``giql.expanders.disjoin``), so the
+    #: pass replaces the node with the expander's AST and the legacy
+    #: ``giqldisjoin_sql`` emitter is removed.
+    GIQL_EXPAND = True
 
     GIQL_SLOTS = (
         SlotSpec("this", frozenset({"registered_table"}), required=True),

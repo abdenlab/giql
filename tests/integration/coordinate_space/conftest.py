@@ -40,7 +40,10 @@ def giql_query(duckdb_connection):
     def _run(query: str, *, tables: list[Table], **table_data):
         for name, rows in table_data.items():
             load_intervals(duckdb_connection, name, rows)
-        sql = transpile(query, tables=tables)
+        # Transpile for the DuckDB target since the SQL executes on DuckDB: a
+        # non-canonical DISJOIN passthrough emits DuckDB's ``* REPLACE`` here
+        # rather than the portable ``* EXCEPT`` form generic targets use.
+        sql = transpile(query, tables=tables, dialect="duckdb")
         return duckdb_connection.execute(sql).fetchall()
 
     return _run

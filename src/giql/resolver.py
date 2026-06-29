@@ -24,8 +24,8 @@ asserts every operator slot carries well-formed resolution metadata, mirroring
 
 Scope note (epic #114, steps 1-3)
 ---------------------------------
-The pass is behavior-preserving. DISJOIN's emitter
-(``BaseGIQLGenerator.giqldisjoin_sql``, step 2) and NEAREST's emitter
+The pass is behavior-preserving. DISJOIN's expander
+(``giql.expanders.disjoin``, step 2) and NEAREST's emitter
 (``BaseGIQLGenerator.giqlnearest_sql``, step 3) consume the attached metadata;
 DISTANCE and the spatial predicates still use the generator's legacy resolver
 paths and ignore everything attached here until their port issues land. The
@@ -73,6 +73,7 @@ from giql.constants import DEFAULT_CHROM_COL
 from giql.constants import DEFAULT_END_COL
 from giql.constants import DEFAULT_START_COL
 from giql.constants import DEFAULT_STRAND_COL
+from giql.constants import DJ_PREFIX
 from giql.expressions import Contains
 from giql.expressions import GIQLDisjoin
 from giql.expressions import GIQLDistance
@@ -758,7 +759,7 @@ def _resolve_disjoin_reference(
     ref_name = reference.name
 
     # The __giql_dj_ prefix names the operator's internal CTEs.
-    if ref_name.startswith("__giql_dj_"):
+    if ref_name.startswith(DJ_PREFIX):
         return None
 
     # A CTE from an enclosing WITH shadows a registered table of the same name
