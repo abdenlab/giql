@@ -227,13 +227,14 @@ class ExpanderRegistry:
 
         Notes
         -----
-        Registering a *non-generic* ``(target, operator)`` expander where the
-        operator has a built-in whole-query join rewrite (notably
-        :class:`~giql.expressions.Intersects`, whose binned equi-join / DuckDB
-        IEJoin transformers run before expansion) signals that this expander
-        assumes responsibility for that rewrite: the built-in join transformers
-        are bypassed for that target so the operator node flows untouched into
-        :class:`ExpandOperators`. See :meth:`has_override`.
+        A *non-generic* ``(target, operator)`` entry is intended to also act as a
+        join-rewrite override for operators with a built-in whole-query join
+        rewrite (notably :class:`~giql.expressions.Intersects`, whose binned
+        equi-join / DuckDB IEJoin transformers run before expansion), letting a
+        per-target expander assume responsibility for that rewrite. That bypass
+        is intended for a future INTERSECTS consumer and is **not wired by any
+        caller yet** — no transformer consults :meth:`has_override` here (see
+        #141).
         """
         self._expanders[(target, operator)] = _as_callable(expander)
 
@@ -243,11 +244,13 @@ class ExpanderRegistry:
         Tries the exact ``(target, op)`` entry, then the
         ``(GenericTarget(), op)`` fallback, then ``None`` (legacy emitter).
 
-        A non-generic exact ``(target, op)`` entry is also a *join-rewrite
-        override* for operators with a built-in whole-query join rewrite (notably
-        :class:`~giql.expressions.Intersects`): registering one bypasses the
-        built-in binned / IEJoin transformers for that target (see
-        :meth:`register` and :meth:`has_override`).
+        A non-generic exact ``(target, op)`` entry is also intended to act as a
+        *join-rewrite override* for operators with a built-in whole-query join
+        rewrite (notably :class:`~giql.expressions.Intersects`). That override is
+        intended for a future INTERSECTS consumer and is **not wired by any
+        caller yet** — resolution does not itself bypass the built-in
+        binned / IEJoin transformers (see :meth:`register`, :meth:`has_override`,
+        and #141).
         """
         fn = self._expanders.get((target, operator))
         if fn is not None:
@@ -259,15 +262,19 @@ class ExpanderRegistry:
         return None
 
     def has_override(self, target: Target, operator: type) -> bool:
-        """Whether an exact non-generic override supersedes built-in handling.
+        """Whether an exact non-generic ``(target, operator)`` entry is registered.
 
         Returns ``True`` only when *target* is not :class:`~giql.targets.GenericTarget`
-        and an exact ``(target, operator)`` entry is registered. Such an entry is a
-        target-specific override that supersedes built-in handling for that target
-        (e.g. it takes responsibility for the whole-query join rewrite that the
-        built-in transformers would otherwise perform); the portable
+        and an exact ``(target, operator)`` entry is registered; the portable
         ``(GenericTarget(), operator)`` fallback is *not* an override and does not
         count here.
+
+        Such an entry is intended to mark a target-specific override that
+        supersedes built-in handling (e.g. taking responsibility for the
+        whole-query join rewrite the built-in transformers would otherwise
+        perform). That mechanism is intended for a future INTERSECTS consumer and
+        is **not wired by any caller yet** — no transformer consults this method
+        in the current pipeline (see #141).
         """
         return target != GenericTarget() and (target, operator) in self._expanders
 
@@ -294,12 +301,11 @@ class ExpanderRegistry:
     def snapshot(self) -> dict[tuple[Target, type], ExpanderFn]:
         """Return a shallow copy of the current registrations.
 
-        The save half of a save/restore seam used primarily for test baseline
-        isolation (and which may serve a plugin that mutates the process-wide
-        :data:`REGISTRY` around a body): capture the baseline with this and hand
-        it back to :meth:`restore` afterward, so the built-in expanders
-        registered at import survive an isolating fixture that would otherwise
-        :meth:`clear` them permanently. It is not a committed plugin API.
+        The save half of a save/restore seam that supports test
+        baseline-isolation: capture the baseline with this and hand it back to
+        :meth:`restore` afterward, so the built-in expanders registered at import
+        survive an isolating fixture that would otherwise :meth:`clear` them
+        permanently.
 
         The returned dict is a fresh mapping (mutating it does not affect the
         registry), keyed by the same ``(target, operator)`` tuples.
@@ -309,11 +315,10 @@ class ExpanderRegistry:
     def restore(self, snapshot: dict[tuple[Target, type], ExpanderFn]) -> None:
         """Replace all registrations with those captured by :meth:`snapshot`.
 
-        The restore half of the save/restore seam (test baseline isolation; may
-        also serve a plugin, but is not a committed plugin API). Drops every
-        current entry and re-installs exactly the *snapshot* contents, so a
-        fixture can return the registry to a previously captured baseline
-        regardless of what its body registered or cleared.
+        The restore half of the save/restore seam that supports test
+        baseline-isolation. Drops every current entry and re-installs exactly the
+        *snapshot* contents, so a fixture can return the registry to a previously
+        captured baseline regardless of what its body registered or cleared.
         """
         self._expanders.clear()
         self._expanders.update(snapshot)

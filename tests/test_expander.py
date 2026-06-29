@@ -104,7 +104,7 @@ def _expand_flag_leak_guard():
     """Assert every operator's GIQL_EXPAND is restored at each test boundary.
 
     The symmetric partner of the registry leak guard: each operator class ships
-    a shipped GIQL_EXPAND default (``True`` for a migrated operator like DISJOIN,
+    a shipped GIQL_EXPAND default (``True`` for a migrated operator,
     ``False`` otherwise), and a test that flips one via ``_opted_in`` must restore
     it. A leaked flip would silently change the pass for a later test, so this
     catches anything that bypasses the exception-safe ``_opted_in`` manager by
@@ -352,6 +352,55 @@ class TestExpanderRegistry:
         with pytest.raises(TypeError):
             registry.register(GenericTarget(), GIQLDisjoin, _BadExpander())
 
+    def test_snapshot_should_not_observe_later_registrations(self):
+        """Test that a snapshot does not observe registrations made after it.
+
+        Given:
+            A registry with one entry, captured by snapshot.
+        When:
+            A second entry is registered after the snapshot is taken.
+        Then:
+            The snapshot should still hold only the first entry (it is a copy,
+            not a live view).
+        """
+        # Arrange
+        registry = ExpanderRegistry()
+        registry.register(DuckDBTarget(), GIQLDisjoin, _record("first"))
+
+        # Act
+        saved = registry.snapshot()
+        registry.register(GenericTarget(), Intersects, _record("second"))
+
+        # Assert
+        assert (DuckDBTarget(), GIQLDisjoin) in saved
+        assert (GenericTarget(), Intersects) not in saved
+
+    def test_restore_should_replace_entries_with_snapshot_contents(self):
+        """Test that restore returns the registry to a captured snapshot.
+
+        Given:
+            A snapshot of a registry with one entry, after which the registry is
+            cleared and a different entry registered.
+        When:
+            Restoring the snapshot.
+        Then:
+            The original entry should resolve again and the post-snapshot entry
+            should be gone.
+        """
+        # Arrange
+        registry = ExpanderRegistry()
+        registry.register(DuckDBTarget(), GIQLDisjoin, _record("original"))
+        saved = registry.snapshot()
+        registry.clear()
+        registry.register(GenericTarget(), Intersects, _record("transient"))
+
+        # Act
+        registry.restore(saved)
+
+        # Assert
+        assert (DuckDBTarget(), GIQLDisjoin) in registry
+        assert (GenericTarget(), Intersects) not in registry
+
 
 class TestExpanderRegistryFallbackGaps:
     """Edge cases of the registry fallback and op-scoped keying."""
@@ -485,54 +534,60 @@ class TestExpanderRegistryFallbackGaps:
         assert REGISTRY.resolve(DuckDBTarget(), GIQLDisjoin) is None
         assert (DuckDBTarget(), GIQLDisjoin) not in REGISTRY
 
-    def test_snapshot_should_not_observe_later_registrations(self):
-        """Test that a snapshot does not observe registrations made after it.
+    def test_has_override_should_return_true_when_exact_nongeneric_entry_registered(
+        self,
+    ):
+        """Test that has_override is True for an exact non-generic entry.
 
         Given:
-            A registry with one entry, captured by snapshot.
+            A registry with an exact (DuckDBTarget, op) entry registered.
         When:
-            A second entry is registered after the snapshot is taken.
+            Querying has_override for that exact key.
         Then:
-            The snapshot should still hold only the first entry (it is a copy,
-            not a live view).
+            It should return True (a non-generic exact entry is an override).
         """
         # Arrange
         registry = ExpanderRegistry()
-        registry.register(DuckDBTarget(), GIQLDisjoin, _record("first"))
+        registry.register(DuckDBTarget(), GIQLDisjoin, _record("duckdb"))
 
-        # Act
-        saved = registry.snapshot()
-        registry.register(GenericTarget(), Intersects, _record("second"))
+        # Act & assert
+        assert registry.has_override(DuckDBTarget(), GIQLDisjoin) is True
 
-        # Assert
-        assert (DuckDBTarget(), GIQLDisjoin) in saved
-        assert (GenericTarget(), Intersects) not in saved
-
-    def test_restore_should_replace_entries_with_snapshot_contents(self):
-        """Test that restore returns the registry to a captured snapshot.
+    def test_has_override_should_return_false_for_generic_fallback_entry(self):
+        """Test that has_override ignores the generic fallback entry.
 
         Given:
-            A snapshot of a registry with one entry, after which the registry is
-            cleared and a different entry registered.
+            A registry with only a (GenericTarget, op) entry registered.
         When:
-            Restoring the snapshot.
+            Querying has_override for a non-generic target's key.
         Then:
-            The original entry should resolve again and the post-snapshot entry
-            should be gone.
+            It should return False (the portable generic fallback is not an
+            override, even though resolve() would route to it).
         """
         # Arrange
         registry = ExpanderRegistry()
-        registry.register(DuckDBTarget(), GIQLDisjoin, _record("original"))
-        saved = registry.snapshot()
-        registry.clear()
-        registry.register(GenericTarget(), Intersects, _record("transient"))
+        registry.register(GenericTarget(), GIQLDisjoin, _record("generic"))
 
-        # Act
-        registry.restore(saved)
+        # Act & assert
+        assert registry.has_override(DuckDBTarget(), GIQLDisjoin) is False
+        # And a generic target queried against its own entry is not an override.
+        assert registry.has_override(GenericTarget(), GIQLDisjoin) is False
 
-        # Assert
-        assert (DuckDBTarget(), GIQLDisjoin) in registry
-        assert (GenericTarget(), Intersects) not in registry
+    def test_has_override_should_return_false_when_unregistered(self):
+        """Test that has_override is False when nothing is registered.
+
+        Given:
+            An empty registry.
+        When:
+            Querying has_override for any key.
+        Then:
+            It should return False (no entry, so no override).
+        """
+        # Arrange
+        registry = ExpanderRegistry()
+
+        # Act & assert
+        assert registry.has_override(DuckDBTarget(), GIQLDisjoin) is False
 
 
 class TestRegisterDecorator:
@@ -1018,29 +1073,57 @@ class TestExpandOperatorsPass:
         assert ctx.resolution.operator == "GIQLDisjoin"
 
     def test_transform_skips_unflagged_operator(self, clean_registry):
-        """Test that an unflagged operator is left untouched even when registered.
+        """Test that an opted-out operator is left untouched even when registered.
 
         Given:
-            An expander registered for a migrated operator but the operator's
-            GIQL_EXPAND flag held off (a migrated operator ships it on, so the
-            control opts it out to isolate the per-type gate).
+            A migrated operator with an expander registered for it, but its
+            GIQL_EXPAND flag opted out for the test — so the *same* operator is
+            registered, queried, and opted out, isolating the per-type gate.
         When:
             Running the pass.
         Then:
-            The operator node should remain in the tree (gate requires both).
+            The operator node should remain in the tree (the gate requires the
+            flag, so opting it out alone holds expansion off).
         """
         # Arrange
-        clean_registry.register(GenericTarget(), GIQLDisjoin, _record("expanded"))
-        tables = _tables()
-        ast = _prepare("SELECT * FROM DISJOIN(variants)", tables)
+        operator = _A_MIGRATED_OPERATOR
+        clean_registry.register(GenericTarget(), operator, _record("expanded"))
+        ast, tables = _prepare_operator(operator)
         pass_ = ExpandOperators(GenericTarget(), tables, clean_registry)
 
         # Act
-        with _opted_out(_A_MIGRATED_OPERATOR):
+        with _opted_out(operator):
             result = pass_.transform(ast)
 
         # Assert
-        assert list(result.find_all(GIQLDisjoin))
+        assert list(result.find_all(operator))
+
+    def test_transform_expands_flagged_operator(self, clean_registry):
+        """Test that the same operator expands once flagged (the paired positive).
+
+        Given:
+            The same migrated operator and registered expander as the opt-out
+            control, but with its GIQL_EXPAND flag opted in.
+        When:
+            Running the pass.
+        Then:
+            The operator node should be replaced by the expander's output — so the
+            contrast with the opt-out control pins the per-type gate as
+            load-bearing, not vacuous.
+        """
+        # Arrange
+        operator = _A_MIGRATED_OPERATOR
+        clean_registry.register(GenericTarget(), operator, _record("expanded"))
+        ast, tables = _prepare_operator(operator)
+        pass_ = ExpandOperators(GenericTarget(), tables, clean_registry)
+
+        # Act
+        with _opted_in(operator):
+            result = pass_.transform(ast)
+
+        # Assert
+        assert not list(result.find_all(operator))
+        assert result.find(exp.Literal).this == "expanded"
 
     def test_transform_skips_flagged_operator_with_no_expander(self, clean_registry):
         """Test that a flagged operator with no expander is left untouched.
@@ -1093,30 +1176,34 @@ class TestNoOpWhenInert:
         """Test that transpile output is byte-identical for an unmigrated operator.
 
         Given:
-            A DISJOIN query (an operator not migrated onto the pass, so its
-            GIQL_EXPAND is False and no expander resolves), with the default
-            registry.
+            A CLUSTER query (an operator not migrated onto the pass in any wave-3
+            branch, so its GIQL_EXPAND is False and no expander resolves), with
+            the default registry.
         When:
-            Transpiling with the wired-in pass versus a pass-bypassed reference
-            (its legacy emitter run directly).
+            Running the ExpandOperators pass (default REGISTRY) over the resolved
+            AST and serializing both the original and the pass-run AST.
         Then:
-            The SQL should match exactly and carry no expander alias prefix — the
-            pass is inert for any operator that has not been migrated.
+            The pass leaves the operator node in place, the serialized SQL is
+            byte-identical, and no expander alias prefix appears — the pass is
+            inert for any operator that has not been migrated.
         """
         # Arrange
-        query = "SELECT * FROM DISJOIN(variants)"
-        tables = _tables()
+        query = "SELECT *, CLUSTER(interval) AS cluster_id FROM peaks"
+        tables = _tables(("peaks",))
         ast = _prepare(query, tables)
         from giql.generators import BaseGIQLGenerator
 
-        expected = BaseGIQLGenerator(tables=tables).generate(ast)
+        before = BaseGIQLGenerator(tables=tables).generate(ast)
+        before_ops = len(list(ast.find_all(GIQLCluster)))
 
-        # Act
-        actual = transpile(query, tables=[Table("variants")])
+        # Act — the wired-in pass over the default REGISTRY must be a no-op here.
+        result = expand_operators(ast, GenericTarget(), tables)
+        after = BaseGIQLGenerator(tables=tables).generate(result)
 
         # Assert
-        assert actual == expected
-        assert EXPAND_ALIAS_PREFIX not in actual
+        assert after == before
+        assert len(list(result.find_all(GIQLCluster))) == before_ops
+        assert EXPAND_ALIAS_PREFIX not in after
 
 
 # The nine GIQL operator expression classes the ExpandOperators pass inspects.
@@ -1146,6 +1233,15 @@ _OPERATOR_CLASSES = (
 #: at import. A migrated operator ships ``True``; the rest ship ``False`` until
 #: their migrations land. The flag leak guard restores to these shipped values
 #: rather than a blanket ``False``.
+# Pin the leak guard's assumption that every operator declares GIQL_EXPAND on its
+# own class (so __dict__.get() reads the operator's shipped value rather than an
+# inherited one). A future operator that omits its own flag would make the guard
+# read ``None`` and silently lose its leak coverage; this one-time check closes
+# that hole.
+for _op in _OPERATOR_CLASSES:
+    assert "GIQL_EXPAND" in _op.__dict__, (
+        f"{_op.__name__} must declare GIQL_EXPAND on its own class"
+    )
 _SHIPPED_EXPAND_FLAGS = {op: op.__dict__.get("GIQL_EXPAND") for op in _OPERATOR_CLASSES}
 
 
@@ -1160,6 +1256,62 @@ _A_MIGRATED_OPERATOR = _MIGRATED_OPERATORS[0]
 _UNMIGRATED_OPERATORS = tuple(
     op for op in _OPERATOR_CLASSES if op not in _MIGRATED_OPERATORS
 )
+assert _UNMIGRATED_OPERATORS, "expected at least one unmigrated operator"
+
+
+#: A minimal GIQL query producing one node of each operator class, keyed by the
+#: class. Lets the control tests build a node for *any* operator — whichever the
+#: branch ships migrated/unmigrated — so they stay operator-agnostic rather than
+#: hard-wiring a particular operator. The second element is the table names the
+#: query references (registered before pass 1).
+_OPERATOR_QUERIES: dict[type, tuple[str, tuple[str, ...]]] = {
+    Intersects: (
+        "SELECT * FROM variants WHERE interval INTERSECTS 'chr1:1000-2000'",
+        ("variants",),
+    ),
+    Contains: (
+        "SELECT * FROM variants WHERE interval CONTAINS 'chr1:1500-1600'",
+        ("variants",),
+    ),
+    Within: (
+        "SELECT * FROM variants WHERE interval WITHIN 'chr1:1000-5000'",
+        ("variants",),
+    ),
+    SpatialSetPredicate: (
+        "SELECT * FROM variants "
+        "WHERE interval INTERSECTS ANY('chr1:1000-2000', 'chr1:5000-6000')",
+        ("variants",),
+    ),
+    GIQLDistance: (
+        "SELECT DISTANCE(a.interval, b.interval) AS d "
+        "FROM features_a a CROSS JOIN features_b b",
+        ("features_a", "features_b"),
+    ),
+    GIQLNearest: (
+        "SELECT * FROM peaks CROSS JOIN LATERAL NEAREST(genes, k := 3)",
+        ("peaks", "genes"),
+    ),
+    GIQLDisjoin: ("SELECT * FROM DISJOIN(variants)", ("variants",)),
+    GIQLCluster: (
+        "SELECT *, CLUSTER(interval) AS cluster_id FROM peaks",
+        ("peaks",),
+    ),
+    GIQLMerge: ("SELECT MERGE(interval) AS m FROM peaks", ("peaks",)),
+}
+
+
+def _prepare_operator(operator: type) -> tuple[exp.Expression, Tables]:
+    """Build a pass-1-resolved AST containing one node of *operator*.
+
+    Operator-agnostic: looks the query up in :data:`_OPERATOR_QUERIES` so a
+    control test can exercise whichever operator a branch ships migrated or
+    unmigrated, rather than hard-wiring one operator class. Returns the resolved
+    AST and the Tables container it was resolved against (the same container must
+    be threaded into the pass).
+    """
+    query, names = _OPERATOR_QUERIES[operator]
+    tables = _tables(names)
+    return _prepare(query, tables), tables
 
 
 class TestOperatorOptOut:
@@ -1193,7 +1345,7 @@ class TestOperatorOptOut:
 
         Given:
             A GIQL operator expression class migrated onto the ExpandOperators
-            pass (DISJOIN, #143).
+            pass.
         When:
             Reading its GIQL_EXPAND class attribute.
         Then:
@@ -1205,6 +1357,32 @@ class TestOperatorOptOut:
 
         # Assert
         assert flag is True
+
+
+class TestMigratedOperatorsRegistered:
+    """Every migrated operator resolves a built-in expander in the process REGISTRY."""
+
+    @pytest.mark.parametrize(
+        "operator", _MIGRATED_OPERATORS, ids=lambda c: c.__name__
+    )
+    def test_migrated_operator_resolves_in_process_registry(self, operator):
+        """Test that each migrated operator resolves an expander in REGISTRY.
+
+        Given:
+            A GIQL operator class that ships GIQL_EXPAND=True (migrated onto the
+            ExpandOperators pass).
+        When:
+            Resolving it against the import-populated process-wide REGISTRY for
+            the generic target.
+        Then:
+            A built-in expander should resolve — a migrated operator always has a
+            registered expander, so the pass never leaves it on a deleted emitter.
+        """
+        # Arrange & act
+        resolved = REGISTRY.resolve(GenericTarget(), operator)
+
+        # Assert
+        assert resolved is not None
 
 
 class TestOptedInRestoresFlag:
@@ -1765,35 +1943,42 @@ class TestExpandOperatorsWalk:
         """Test that only the flagged operator type is replaced when both registered.
 
         Given:
-            A migrated operator and an INTERSECTS, both with registered
-            expanders, but only INTERSECTS flagged GIQL_EXPAND.
+            A genuinely-unmigrated operator (GIQLCluster, shipping
+            GIQL_EXPAND=False in every wave-3 branch) and an INTERSECTS, both with
+            registered expanders, but only INTERSECTS flagged GIQL_EXPAND for the
+            test.
         When:
             Running the pass.
         Then:
-            The INTERSECTS is replaced while the other operator node remains (the
+            The INTERSECTS is replaced while the unmigrated operator node remains
+            on its own shipped ``False`` flag — no opt-out ceremony needed (the
             gate is per-type).
         """
-        # Arrange
+        # Arrange — the held-off subject is genuinely unmigrated: it survives on
+        # its own shipped GIQL_EXPAND=False, not on a test opt-out.
+        held_off = GIQLCluster
+        assert held_off in _UNMIGRATED_OPERATORS
+        assert held_off.GIQL_EXPAND is False
         clean_registry.register(
-            GenericTarget(), GIQLDisjoin, lambda n, c: exp.column("DJ")
+            GenericTarget(), held_off, lambda n, c: exp.column("CL")
         )
         clean_registry.register(
             GenericTarget(), Intersects, lambda n, c: exp.column("IX")
         )
-        tables = _tables(("variants", "peaks"))
+        tables = _tables(("peaks",))
         ast = _prepare(
-            "SELECT * FROM DISJOIN(variants) "
+            "SELECT *, CLUSTER(interval) AS cluster_id FROM peaks "
             "WHERE EXISTS (SELECT * FROM peaks WHERE interval INTERSECTS 'chr1:1-100')",
             tables,
         )
         pass_ = ExpandOperators(GenericTarget(), tables, clean_registry)
 
-        # Act (a migrated operator ships flagged, so opt it out to hold the control)
-        with _opted_in(Intersects), _opted_out(_A_MIGRATED_OPERATOR):
+        # Act — only INTERSECTS is opted in; the unmigrated operator stays off.
+        with _opted_in(Intersects):
             result = pass_.transform(ast)
 
         # Assert
-        assert list(result.find_all(GIQLDisjoin))
+        assert list(result.find_all(held_off))
         assert not list(result.find_all(Intersects))
 
     def test_walk_shares_alias_sequence_across_sibling_expanders(self, clean_registry):

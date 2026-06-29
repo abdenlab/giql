@@ -86,9 +86,15 @@ def _gap(minuend: str, subtrahend: str) -> exp.Expression:
 def _bool_param(param: exp.Expression | None) -> bool:
     """Coerce an optional DISTANCE boolean argument to a Python ``bool``.
 
-    Mirrors ``BaseGIQLGenerator._extract_bool_param`` so the expander reads the
-    ``stranded`` / ``signed`` keyword arguments identically to the legacy
-    emitter.
+    Mirrors ``BaseGIQLGenerator._extract_bool_param`` in how it reads the
+    ``stranded`` / ``signed`` keyword arguments, with one *intentional*
+    divergence: for an :class:`sqlglot.exp.Boolean` node this returns
+    ``bool(param.this)`` (a true Python ``bool``), whereas the legacy
+    ``_extract_bool_param`` returns the raw ``param_expr.this`` (already a
+    ``bool`` in practice, but unhardened). The coercion is strictly safer — it
+    guarantees a ``bool`` regardless of what the parser stored — and never
+    changes the observed branch selection, so the two stay behaviorally
+    equivalent. See TODO(#146): folding these two readers together.
 
     Parameters
     ----------

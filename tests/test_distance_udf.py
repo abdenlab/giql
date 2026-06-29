@@ -817,12 +817,29 @@ def _legacy_distance_case(stranded: bool, signed: bool) -> str:
     )
 
 
-def _eval_case(case_sql: str, row) -> object:
-    """Execute one distance CASE over one parity row, returning the scalar."""
+def _eval_case(conn, case_sql: str, row) -> object:
+    """Execute one distance CASE over one parity row, returning the scalar.
+
+    Reuses the caller-supplied *conn* (a module-scoped in-memory DuckDB) rather
+    than opening a fresh connection per row — every row is a standalone
+    ``SELECT ... FROM (VALUES)`` against no persistent state, so one connection
+    serves the whole parity sweep.
+    """
+    query = f"SELECT {case_sql} AS d FROM {_row_values_cte(row)}"
+    return conn.execute(query).fetchone()[0]
+
+
+@pytest.fixture(scope="module")
+def parity_conn():
+    """A module-scoped in-memory DuckDB connection for the parity/property sweep.
+
+    Opened once and shared across every parity row and Hypothesis example
+    instead of reconnecting per row; each evaluation is a self-contained
+    ``SELECT`` over inline ``VALUES``, so no per-row isolation is needed.
+    """
     conn = duckdb.connect(":memory:")
     try:
-        query = f"SELECT {case_sql} AS d FROM {_row_values_cte(row)}"
-        return conn.execute(query).fetchone()[0]
+        yield conn
     finally:
         conn.close()
 
@@ -833,7 +850,9 @@ class TestDistanceExpanderLegacyParity:
     @pytest.mark.parametrize(
         "shape_id, stranded, signed", _SHAPES, ids=[s[0] for s in _SHAPES]
     )
-    def test_expander_matches_legacy_distance_case(self, shape_id, stranded, signed):
+    def test_expander_matches_legacy_distance_case(
+        self, parity_conn, shape_id, stranded, signed
+    ):
         """
         GIVEN the four DISTANCE shapes (unsigned/signed x non-stranded/stranded)
             plus overlap, chrom-mismatch, and strand-invalid input rows
@@ -848,8 +867,8 @@ class TestDistanceExpanderLegacyParity:
 
         # Act & assert
         for row in _PARITY_ROWS:
-            expander_result = _eval_case(expander_case, row)
-            legacy_result = _eval_case(legacy_case, row)
+            expander_result = _eval_case(parity_conn, expander_case, row)
+            legacy_result = _eval_case(parity_conn, legacy_case, row)
             assert expander_result == legacy_result, (
                 f"{shape_id}: expander {expander_result!r} != "
                 f"legacy {legacy_result!r} for row {row}"
@@ -866,12 +885,16 @@ class TestDistanceExpanderProperties:
         start_b=st.integers(min_value=0, max_value=10_000),
         len_b=st.integers(min_value=1, max_value=5_000),
     )
-    def test_distance_invariants_hold(self, start_a, len_a, start_b, len_b):
+    def test_distance_invariants_hold(
+        self, parity_conn, start_a, len_a, start_b, len_b
+    ):
         """
         GIVEN random A and B intervals (start + positive length)
         WHEN DISTANCE is evaluated unsigned, signed, and cross-chromosome
-        THEN unsigned == abs(signed), overlapping intervals report 0, and a
-            cross-chromosome pair reports NULL.
+        THEN unsigned == abs(signed), overlapping intervals report 0, a
+            non-overlapping same-chrom pair reports the half-open gap + 1
+            (bedtools parity ground truth), and a cross-chromosome pair reports
+            NULL.
         """
         # Arrange
         end_a = start_a + len_a
@@ -882,13 +905,22 @@ class TestDistanceExpanderProperties:
         signed_case = _expander_distance_case(stranded=False, signed=True)
 
         # Act
-        unsigned = _eval_case(unsigned_case, same_chrom)
-        signed = _eval_case(signed_case, same_chrom)
-        cross = _eval_case(unsigned_case, cross_chrom)
+        unsigned = _eval_case(parity_conn, unsigned_case, same_chrom)
+        signed = _eval_case(parity_conn, signed_case, same_chrom)
+        cross = _eval_case(parity_conn, unsigned_case, cross_chrom)
 
         # Assert
         assert unsigned == abs(signed)
         overlaps = start_a < end_b and end_a > start_b
         if overlaps:
             assert unsigned == 0
+        else:
+            # Ground truth (bedtools closest -d): the unsigned distance of two
+            # non-overlapping same-chrom intervals is the raw half-open gap plus
+            # one. This ties the property test to the +1 offset directly, so
+            # dropping the +1 from the expander would fail here (not only in the
+            # legacy-parity test). The gap is end_a..start_b downstream or
+            # end_b..start_a upstream, whichever is non-negative.
+            gap_in_bases = max(start_b - end_a, start_a - end_b)
+            assert unsigned == gap_in_bases + 1
         assert cross is None

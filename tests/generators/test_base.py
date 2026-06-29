@@ -677,7 +677,7 @@ class TestBaseGIQLGenerator:
     def test_giqldistance_sql_basic(self, tables_with_two_tables):
         """
         GIVEN a GIQLDistance with two column references
-        WHEN giqldistance_sql is called
+        WHEN the DISTANCE node is expanded
         THEN CASE expression for distance calculation is generated.
         """
         sql = (
@@ -700,7 +700,7 @@ class TestBaseGIQLGenerator:
     def test_giqldistance_sql_stranded(self, tables_with_two_tables):
         """
         GIVEN a GIQLDistance with stranded := true
-        WHEN giqldistance_sql is called
+        WHEN the DISTANCE node is expanded
         THEN Strand-aware distance CASE expression is generated.
         """
         sql = (
@@ -731,7 +731,7 @@ class TestBaseGIQLGenerator:
     def test_giqldistance_sql_signed(self, tables_with_two_tables):
         """
         GIVEN a GIQLDistance with signed := true
-        WHEN giqldistance_sql is called
+        WHEN the DISTANCE node is expanded
         THEN Signed distance CASE expression is generated.
         """
         sql = (
@@ -754,7 +754,7 @@ class TestBaseGIQLGenerator:
     def test_giqldistance_sql_stranded_and_signed(self, tables_with_two_tables):
         """
         GIVEN a GIQLDistance with both stranded and signed := true
-        WHEN giqldistance_sql is called
+        WHEN the DISTANCE node is expanded
         THEN Combined stranded+signed distance expression is generated.
         """
         sql = (
@@ -791,7 +791,7 @@ class TestBaseGIQLGenerator:
         Given:
             Two 0-based closed-interval tables and DISTANCE.
         When:
-            giqldistance_sql is called.
+            the DISTANCE node is expanded.
         Then:
             It should canonicalize each table-side end as (end + 1) for the
             closed->half-open conversion, distinct from the bedtools-parity
@@ -966,7 +966,7 @@ class TestBaseGIQLGenerator:
     def test_giqldistance_sql_literal_first_arg_error(self, tables_with_two_tables):
         """
         GIVEN a GIQLDistance with literal range as first argument
-        WHEN giqldistance_sql is called
+        WHEN the DISTANCE node is expanded
         THEN ValueError is raised indicating literals not supported.
         """
         sql = "SELECT DISTANCE('chr1:1000-2000', b.interval) as dist FROM features_b b"
@@ -982,7 +982,7 @@ class TestBaseGIQLGenerator:
     def test_giqldistance_sql_literal_second_arg_error(self, tables_with_two_tables):
         """
         GIVEN a GIQLDistance with literal range as second argument
-        WHEN giqldistance_sql is called
+        WHEN the DISTANCE node is expanded
         THEN ValueError is raised indicating literals not supported.
         """
         sql = "SELECT DISTANCE(a.interval, 'chr1:1000-2000') as dist FROM features_a a"
