@@ -44,6 +44,7 @@ from giql.expressions import GIQLNearest
 from giql.generators.base import BaseGIQLGenerator
 from giql.resolver import ResolvedInterval
 from giql.resolver import ResolvedRef
+from giql.targets import Capabilities
 from giql.targets import GenericTarget
 
 #: Reserved column names the window-function fallback synthesizes inside its
@@ -75,6 +76,7 @@ def _distance_and_filters(
     table_name: str,
     target_ref: ResolvedRef,
     ref: ResolvedInterval,
+    capabilities: Capabilities,
     ref_fragments: tuple[str, str, str, str | None] | None = None,
 ) -> tuple[str, str, list[str], str]:
     """Build the shared distance SQL, the qualified target columns, and WHERE.
@@ -85,6 +87,11 @@ def _distance_and_filters(
     and the optional ``max_distance`` filter all reproduce the legacy
     ``giqlnearest_sql`` emitter exactly. Each form derives its deterministic
     ORDER BY tiebreaker from the target columns itself.
+
+    ``capabilities`` is the active target's :class:`~giql.targets.Capabilities`,
+    forwarded to :meth:`BaseGIQLGenerator._nearest_passthrough` to choose the
+    target's de-canonicalization emit form (``* REPLACE`` vs the portable
+    ``* EXCEPT``); both call sites pass ``ctx.capabilities``.
 
     ``ref_fragments`` optionally overrides the reference ``(chrom, start, end,
     strand)`` SQL fragments. The LATERAL form consumes the resolution's
@@ -98,7 +105,7 @@ def _distance_and_filters(
 
     output_table = BaseGIQLGenerator._nearest_output_encoding(expression, target_ref)
     passthrough = BaseGIQLGenerator._nearest_passthrough(
-        table_name, target_start, target_end, output_table
+        table_name, target_start, target_end, output_table, capabilities
     )
 
     if ref_fragments is not None:
@@ -189,7 +196,9 @@ def _lateral_form(
         _abs_distance_expr,
         where_clauses,
         passthrough,
-    ) = _distance_and_filters(expression, table_name, target_ref, ref)
+    ) = _distance_and_filters(
+        expression, table_name, target_ref, ref, ctx.capabilities
+    )
     where_sql = " AND ".join(where_clauses)
     # The wrapping level reads the inner row's *bare* column names (the passthrough
     # projected ``<target>.*``), so the tiebreaker qualifies them by the wrapper
@@ -358,7 +367,12 @@ def _fallback_form(
         where_clauses,
         passthrough,
     ) = _distance_and_filters(
-        expression, table_name, target_ref, ref, ref_fragments=ref_fragments
+        expression,
+        table_name,
+        target_ref,
+        ref,
+        ctx.capabilities,
+        ref_fragments=ref_fragments,
     )
 
     # Surface the reference-key columns so the rewritten join can match each

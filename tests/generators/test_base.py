@@ -1659,37 +1659,45 @@ class TestBaseGIQLGenerator:
             The query is transpiled.
         Then:
             It should wrap the target in a __giql_canon_* CTE carrying the
-            canonical conversion, and the distance CASE should read the bare
-            canonical target columns with no in-CASE canonicalization.
+            canonical conversion (a star REPLACE on DuckDB, the portable star
+            EXCEPT form on the generic / DataFusion family — #145), and the
+            distance CASE should read the bare canonical target columns with no
+            in-CASE canonicalization.
         """
         # Arrange
         sql = "SELECT * FROM NEAREST(genes, reference := 'chr1:1000-2000', k := 1)"
+        tables = [
+            Table(
+                "genes",
+                coordinate_system=coordinate_system,
+                interval_type=interval_type,
+            )
+        ]
 
         # Act — the target's coordinate canonicalization now lives in the
         # CanonicalizeCoordinates pass (#123): a non-canonical target is wrapped
         # in a __giql_canon_* CTE before generation, so the distance CASE reads
-        # already-canonical columns.
-        output = transpile(
-            sql,
-            tables=[
-                Table(
-                    "genes",
-                    coordinate_system=coordinate_system,
-                    interval_type=interval_type,
-                )
-            ],
-        )
+        # already-canonical columns. The wrapper's emit strategy is capability
+        # driven (#145): REPLACE on DuckDB, the portable EXCEPT form otherwise.
+        duckdb_output = transpile(sql, tables=tables, dialect="duckdb")
+        generic_output = transpile(sql, tables=tables)
 
         # Assert — the wrapper carries the canonical conversion; the distance
         # CASE reads the bare canonical columns against the literal [1000, 2000).
-        assert f"REPLACE ({wrap_start}, {wrap_end}) FROM genes" in output
+        assert f"REPLACE ({wrap_start}, {wrap_end}) FROM genes" in duckdb_output
         assert (
-            'WHEN 1000 < __giql_canon_0."end" AND 2000 > __giql_canon_0."start" THEN 0'
-        ) in output
-        assert (
-            'WHEN 2000 <= __giql_canon_0."start" THEN (__giql_canon_0."start" - 2000 + 1)'
-        ) in output
-        assert 'ELSE (1000 - __giql_canon_0."end" + 1)' in output
+            f'EXCEPT ("start", "end"), {wrap_start}, {wrap_end} FROM genes'
+        ) in generic_output
+        for output in (duckdb_output, generic_output):
+            assert (
+                'WHEN 1000 < __giql_canon_0."end" AND 2000 > __giql_canon_0."start" '
+                "THEN 0"
+            ) in output
+            assert (
+                'WHEN 2000 <= __giql_canon_0."start" THEN '
+                '(__giql_canon_0."start" - 2000 + 1)'
+            ) in output
+            assert 'ELSE (1000 - __giql_canon_0."end" + 1)' in output
 
     def test_giqlnearest_should_pass_target_columns_through_when_target_is_canonical(
         self,
@@ -1724,25 +1732,31 @@ class TestBaseGIQLGenerator:
             The query is transpiled.
         Then:
             The ``*`` passthrough should de-canonicalize the interval columns
-            back to the target's declared encoding via a star REPLACE, so the
-            returned row carries the table's own convention; the synthesized
-            ``distance`` column is encoding-invariant and stays unwrapped.
+            back to the target's declared encoding so the returned row carries the
+            table's own convention — via a star REPLACE on DuckDB and the portable
+            star EXCEPT form on the generic / DataFusion family (#145); the
+            synthesized ``distance`` column is encoding-invariant and stays
+            unwrapped.
         """
         # Arrange
         sql = "SELECT * FROM NEAREST(genes, reference := 'chr1:1000-2000', k := 1)"
+        tables = [Table("genes", coordinate_system="1based", interval_type="closed")]
 
         # Act
-        output = transpile(
-            sql,
-            tables=[Table("genes", coordinate_system="1based", interval_type="closed")],
-        )
+        duckdb_output = transpile(sql, tables=tables, dialect="duckdb")
+        generic_output = transpile(sql, tables=tables)
 
         # Assert — passthrough de-canonicalizes 1-based-closed start as (start + 1)
         # and leaves end identity; the distance column carries no round-trip.
         assert (
             '__giql_canon_0.* REPLACE ((__giql_canon_0."start" + 1) AS "start", '
             '__giql_canon_0."end" AS "end")'
-        ) in output
+        ) in duckdb_output
+        assert (
+            '__giql_canon_0.* EXCEPT ("start", "end"), '
+            '(__giql_canon_0."start" + 1) AS "start", '
+            '__giql_canon_0."end" AS "end"'
+        ) in generic_output
 
     def test_giqlnearest_should_canonicalize_reference_column_when_reference_is_one_based_closed(
         self, tables_mixed_conventions

@@ -31,6 +31,7 @@ from giql.resolver import META_KEY
 from giql.resolver import resolve_operator_refs
 from giql.table import Table
 from giql.table import Tables
+from giql.targets import DuckDBTarget
 from giql.targets import GenericTarget
 from giql.transpile import transpile
 
@@ -64,6 +65,11 @@ def _prepare(query: str, tables: Tables) -> exp.Expression:
     ast = parse_one(query, dialect=GIQLDialect)
     ast = resolve_operator_refs(ast, tables)
     return canonicalize_coordinates(ast)
+
+
+def _resolve(query: str, tables: Tables) -> exp.Expression:
+    """Parse *query* and run pass 1 only, leaving pass 2 for the caller."""
+    return resolve_operator_refs(parse_one(query, dialect=GIQLDialect), tables)
 
 
 def _canon_ctes(ast: exp.Expression) -> list[exp.CTE]:
@@ -788,23 +794,30 @@ class TestNearestTargetCanonicalization:
         Then:
             The target should be wrapped in a __giql_canon_* CTE, the distance
             CASE should read the bare canonical columns, and the passed-through
-            row should de-canonicalize the interval back to the declared encoding.
+            row should de-canonicalize the interval back to the declared encoding
+            — via a star REPLACE on DuckDB and the portable star EXCEPT form on
+            the generic / DataFusion family (#145).
         """
         # Arrange
         sql = "SELECT * FROM NEAREST(genes, reference := 'chr1:1000-2000', k := 1)"
+        tables = [Table("genes", coordinate_system="1based", interval_type="closed")]
 
         # Act
-        output = transpile(
-            sql,
-            tables=[Table("genes", coordinate_system="1based", interval_type="closed")],
-        )
+        duckdb_output = transpile(sql, tables=tables, dialect="duckdb")
+        generic_output = transpile(sql, tables=tables)
 
         # Assert
-        assert f"{CANON_PREFIX}0 AS (SELECT * REPLACE" in output
-        assert 'WHEN 1000 < __giql_canon_0."end"' in output
+        assert f"{CANON_PREFIX}0 AS (SELECT * REPLACE" in duckdb_output
+        assert f"{CANON_PREFIX}0 AS (SELECT * EXCEPT" in generic_output
+        for output in (duckdb_output, generic_output):
+            assert 'WHEN 1000 < __giql_canon_0."end"' in output
         assert (
             '__giql_canon_0.* REPLACE ((__giql_canon_0."start" + 1) AS "start"'
-        ) in output
+        ) in duckdb_output
+        assert (
+            '__giql_canon_0.* EXCEPT ("start", "end"), '
+            '(__giql_canon_0."start" + 1) AS "start"'
+        ) in generic_output
 
     def test_canonical_target_not_wrapped(self):
         """Test a canonical NEAREST target is left unwrapped.
@@ -834,3 +847,155 @@ class TestNearestTargetCanonicalization:
         # Assert
         assert opted_in == flag_off
         assert CANON_PREFIX not in opted_in
+
+
+class TestCanonicalProjectionCapabilities:
+    """The wrapper-CTE emit strategy is chosen from target capabilities (#145)."""
+
+    def test_canonicalize_coordinates_should_emit_except_without_star_replace(
+        self, disjoin_opted_in
+    ):
+        """Test the wrapper uses the portable EXCEPT form without star-replace support.
+
+        Given:
+            A non-canonical DISJOIN AST and a Capabilities lacking
+            supports_star_replace (the generic / DataFusion family).
+        When:
+            canonicalize_coordinates is called directly with those capabilities.
+        Then:
+            The synthesized wrapper CTE should project the portable
+            SELECT * EXCEPT (...) form and never a star REPLACE.
+        """
+        # Arrange
+        ast = _resolve("SELECT * FROM DISJOIN(variants)", _tables(("1based", "closed")))
+
+        # Act
+        canonicalize_coordinates(ast, GenericTarget().capabilities)
+
+        # Assert
+        body = _canon_ctes(ast)[0].this.sql()
+        assert "* EXCEPT" in body
+        assert "REPLACE" not in body
+        assert '("start" - 1) AS "start"' in body
+
+    def test_canonicalize_coordinates_should_emit_replace_with_star_replace(
+        self, disjoin_opted_in
+    ):
+        """Test the wrapper uses star REPLACE on a REPLACE-capable target.
+
+        Given:
+            A non-canonical DISJOIN AST and a Capabilities with
+            supports_star_replace (DuckDB).
+        When:
+            canonicalize_coordinates is called directly with those capabilities.
+        Then:
+            The synthesized wrapper CTE should substitute the interval columns in
+            place via a star REPLACE and never the EXCEPT form.
+        """
+        # Arrange
+        ast = _resolve("SELECT * FROM DISJOIN(variants)", _tables(("1based", "closed")))
+
+        # Act
+        canonicalize_coordinates(ast, DuckDBTarget().capabilities)
+
+        # Assert
+        body = _canon_ctes(ast)[0].this.sql()
+        assert "* REPLACE" in body
+        assert "EXCEPT" not in body
+        assert '("start" - 1) AS "start"' in body
+
+    def test_canonicalize_coordinates_should_emit_replace_when_capabilities_none(
+        self, disjoin_opted_in
+    ):
+        """Test a direct caller with no capabilities keeps the historical REPLACE form.
+
+        Given:
+            A non-canonical DISJOIN AST.
+        When:
+            canonicalize_coordinates is called with no capabilities argument.
+        Then:
+            The wrapper should default to the star REPLACE form, preserving the
+            historical behavior for direct callers.
+        """
+        # Arrange
+        ast = _resolve("SELECT * FROM DISJOIN(variants)", _tables(("1based", "closed")))
+
+        # Act
+        canonicalize_coordinates(ast)
+
+        # Assert
+        body = _canon_ctes(ast)[0].this.sql()
+        assert "* REPLACE" in body
+        assert "EXCEPT" not in body
+
+    def test_canonicalize_coordinates_should_not_re_wrap_on_a_second_pass(
+        self, disjoin_opted_in
+    ):
+        """Test the pass is idempotent over the EXCEPT wrapper it already inserted.
+
+        Given:
+            A non-canonical DISJOIN AST canonicalized once with EXCEPT-form
+            capabilities.
+        When:
+            canonicalize_coordinates is run a second time over the same AST.
+        Then:
+            It should not synthesize a second wrapper — the rewritten slot now
+            points at the canonical CTE, so exactly one __giql_canon_ CTE remains.
+        """
+        # Arrange
+        caps = GenericTarget().capabilities
+        ast = _resolve("SELECT * FROM DISJOIN(variants)", _tables(("1based", "closed")))
+        canonicalize_coordinates(ast, caps)
+
+        # Act
+        canonicalize_coordinates(ast, caps)
+
+        # Assert
+        assert len(_canon_ctes(ast)) == 1
+
+    def test_transpile_should_emit_except_wrapper_for_datafusion_dialect(self):
+        """Test the DataFusion dialect threads its capabilities into the wrapper.
+
+        Given:
+            A non-canonical DISJOIN over a 1-based closed table.
+        When:
+            Transpiling with dialect="datafusion".
+        Then:
+            The wrapper CTE and passthrough should use the portable EXCEPT form
+            (DataFusion lacks star REPLACE) with no leaked operator.
+        """
+        # Arrange
+        tables = [Table("variants", coordinate_system="1based", interval_type="closed")]
+
+        # Act
+        sql = transpile(
+            "SELECT * FROM DISJOIN(variants)", tables=tables, dialect="datafusion"
+        )
+
+        # Assert
+        assert "SELECT * EXCEPT" in sql
+        assert "REPLACE" not in sql
+        assert "G_I_Q_L" not in sql
+
+    def test_transpile_should_emit_except_wrapper_when_no_dialect(self):
+        """Test the generic (no-dialect) default emits the portable EXCEPT wrapper.
+
+        Given:
+            A non-canonical DISJOIN over a 1-based closed table.
+        When:
+            Transpiling with no dialect (the generic default target).
+        Then:
+            The wrapper CTE should use the portable EXCEPT form, not star REPLACE
+            — pinning that the no-dialect default resolves GenericTarget
+            (supports_star_replace=False) and emits the not-DuckDB-runnable
+            portable form, guarding against a regression back to REPLACE.
+        """
+        # Arrange
+        tables = [Table("variants", coordinate_system="1based", interval_type="closed")]
+
+        # Act
+        sql = transpile("SELECT * FROM DISJOIN(variants)", tables=tables)
+
+        # Assert
+        assert "SELECT * EXCEPT" in sql
+        assert "REPLACE" not in sql

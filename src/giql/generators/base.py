@@ -12,6 +12,7 @@ from giql.resolver import ResolvedColumn
 from giql.resolver import ResolvedRef
 from giql.table import Table
 from giql.table import Tables
+from giql.targets import Capabilities
 
 
 class BaseGIQLGenerator(Generator):
@@ -71,6 +72,7 @@ class BaseGIQLGenerator(Generator):
         target_start: str,
         target_end: str,
         output_table: Table | None,
+        capabilities: Capabilities | None = None,
     ) -> str:
         """Project the target's full row, de-canonicalizing the interval columns.
 
@@ -80,10 +82,19 @@ class BaseGIQLGenerator(Generator):
         through as a plain ``{table_name}.*`` — the byte-identical identity fast
         path. When it is non-canonical the interval columns, canonical inside the
         ``__giql_canon_*`` CTE the target was rewritten to, are de-canonicalized
-        back into that encoding via a star ``REPLACE`` so the passed-through
-        interval matches the target's own convention. (Only non-canonical targets
-        are wrapped, so the ``REPLACE`` appears only where a canonical CTE already
-        shapes the SQL.)
+        back into that encoding so the passed-through interval matches the target's
+        own convention.
+
+        The emit strategy is chosen from *capabilities*, following the precedent
+        of :func:`giql.expanders.disjoin._disjoin_passthrough` (issue #145) — the
+        same two emit forms, with an added ``capabilities is None`` arm for direct
+        callers (in production the sole caller always passes ``ctx.capabilities``):
+
+        * ``{table_name}.* REPLACE (...)`` when ``supports_star_replace`` holds (or
+          no capabilities are supplied) — substitutes start/end in place;
+        * the portable ``{table_name}.* EXCEPT (start, end), <start>, <end>`` form
+          otherwise (the generic baseline / DataFusion family). Row-equivalent but
+          not column-order-equivalent, and not DuckDB-runnable.
 
         :param table_name:
             The relation the row is selected from (the canon CTE name when wrapped,
@@ -94,9 +105,11 @@ class BaseGIQLGenerator(Generator):
             Physical end column name
         :param output_table:
             The target's declared :class:`~giql.table.Table`, or ``None``
+        :param capabilities:
+            The active target's :class:`~giql.targets.Capabilities`; ``None``
+            defaults to the ``* REPLACE`` form.
         :return:
-            The passthrough projection fragment (``{table_name}.*`` or a star
-            ``REPLACE``)
+            The passthrough projection fragment
         """
         if output_table is None or (
             output_table.coordinate_system == "0based"
@@ -105,15 +118,16 @@ class BaseGIQLGenerator(Generator):
             return f"{table_name}.*"
         pt_start = decanonical_start(f'{table_name}."{target_start}"', output_table)
         pt_end = decanonical_end(f'{table_name}."{target_end}"', output_table)
-        # TODO(#142): this emits an unconditional ``* REPLACE`` (DuckDB-only).
-        # When DataFusion gains correlated LATERAL, adopt the capability branch the
-        # DISJOIN expander uses (``giql.expanders.disjoin._disjoin_passthrough``):
-        # ``* REPLACE`` where ``supports_star_replace`` holds, the portable
-        # ``* EXCEPT`` form otherwise, so a non-canonical NEAREST passthrough runs
-        # on the DataFusion family too.
+        if capabilities is None or capabilities.supports_star_replace:
+            return (
+                f"{table_name}.* REPLACE "
+                f'({pt_start} AS "{target_start}", {pt_end} AS "{target_end}")'
+            )
+        # Portable form for engines without ``* REPLACE`` (generic / DataFusion):
+        # drop the interval columns from the star and re-project them recomputed.
         return (
-            f"{table_name}.* REPLACE "
-            f'({pt_start} AS "{target_start}", {pt_end} AS "{target_end}")'
+            f'{table_name}.* EXCEPT ("{target_start}", "{target_end}"), '
+            f'{pt_start} AS "{target_start}", {pt_end} AS "{target_end}"'
         )
 
     @staticmethod

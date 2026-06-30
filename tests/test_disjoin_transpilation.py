@@ -503,6 +503,7 @@ class TestDisjoinTranspilation:
                     interval_type="closed",
                 )
             ],
+            dialect="duckdb",
         )
 
         # Assert
@@ -511,6 +512,8 @@ class TestDisjoinTranspilation:
         # Target and explicit self-reference dedupe to a single wrapper CTE: one
         # CTE definition plus the two FROM references (target + reference).
         assert sql.count("__giql_canon_") == 3
+        # REPLACE is the DuckDB wrapper form; the generic / DataFusion target emits
+        # the portable EXCEPT form (#145), covered separately.
         assert "SELECT * REPLACE" in sql
 
     def test_giqldisjoin_sql_should_emit_one_exists_clause_when_query_mixes_self_and_distinct_reference_disjoins(
@@ -752,10 +755,13 @@ class TestDisjoinCanonicalization:
             tables=[
                 Table("features", coordinate_system="1based", interval_type="closed")
             ],
+            dialect="duckdb",
         )
 
         # Assert
         assert "__giql_canon_" in sql
+        # REPLACE is the DuckDB wrapper form; generic / DataFusion emits the
+        # portable EXCEPT form (#145).
         assert "SELECT * REPLACE" in sql
         assert '("start" - 1) AS "start"' in sql
         # No inline canonicalization arithmetic survives in the emitter output.
@@ -781,10 +787,13 @@ class TestDisjoinCanonicalization:
                 "features",
                 Table("refs", coordinate_system="1based", interval_type="closed"),
             ],
+            dialect="duckdb",
         )
 
         # Assert
         assert "__giql_canon_" in sql
+        # REPLACE is the DuckDB wrapper form; generic / DataFusion emits the
+        # portable EXCEPT form (#145).
         assert "SELECT * REPLACE" in sql
         # The breakpoint CTE reads the canonical endpoints verbatim, no inline shift.
         assert '("start" - 1) AS pos' not in sql
@@ -827,9 +836,11 @@ class TestDisjoinCanonicalization:
             tables=[
                 Table("features", coordinate_system="1based", interval_type="closed")
             ],
+            dialect="duckdb",
         )
 
-        # Assert
+        # Assert — REPLACE is the DuckDB wrapper form (#145); the dedupe behavior
+        # is target-independent.
         assert sql.count("AS (SELECT * REPLACE") == 1
         assert sql.count("__giql_canon_") == 3
 

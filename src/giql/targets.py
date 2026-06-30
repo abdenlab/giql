@@ -6,11 +6,13 @@ sqlglot output dialect used to serialize standard AST for that engine.
 
 This is step 1 of epic #137. The targets and capability descriptors defined
 here are the foundation that later steps build on — the operator-expander
-registry is keyed by ``(target, operator)`` and emission choices become
+registry is keyed by ``(target, operator)`` and emission choices are
 capability lookups rather than scattered ``if dialect == ...`` branches.
-At this step the model is wired into :func:`giql.transpile.transpile` only
-to resolve the ``dialect`` parameter and drive the existing DuckDB IEJoin
-gate; no emission behaviour changes.
+As of #143/#145 the model actively drives emission: the INTERSECTS join
+strategy (``range_join_strategy``), the NEAREST LATERAL-vs-window form
+(``supports_lateral``), and the coordinate-canonicalization wrapper and
+NEAREST/DISJOIN passthroughs (``supports_star_replace``) all read from the
+active target's capabilities.
 """
 
 from dataclasses import dataclass
@@ -37,9 +39,10 @@ class Capabilities:
         ``BaseGIQLGenerator.SUPPORTS_LATERAL`` generator attribute has been
         removed.
     supports_star_replace : bool
-        Whether the engine supports ``SELECT * REPLACE (...)``. Drives the
-        coordinate-canonicalization output: ``* REPLACE`` where supported,
-        an explicit portable projection otherwise (#143). Supported by
+        Whether the engine supports ``SELECT * REPLACE (...)``. Drives every
+        coordinate-canonicalization site — the canonicalizer wrapper CTE and the
+        DISJOIN / NEAREST passthroughs (#143/#145): ``* REPLACE`` where supported,
+        the portable ``* EXCEPT`` projection otherwise. Supported by
         DuckDB / BigQuery / Snowflake / ClickHouse; not by PostgreSQL,
         SQLite, or DataFusion.
     supports_qualify : bool
@@ -86,14 +89,15 @@ class GenericTarget(Target):
     conservative, maximally portable baseline that matches today's
     :class:`giql.generators.base.BaseGIQLGenerator` output.
 
-    "SQL-92-ish", not strict SQL-92: because ``supports_star_replace=False``, the
-    DISJOIN passthrough over a **non-canonical** target falls back to a
-    ``SELECT * EXCEPT (...)`` projection (re-appending the de-canonicalized
-    interval columns). ``* EXCEPT`` is **not** SQL-92 and is **not
+    "SQL-92-ish", not strict SQL-92: because ``supports_star_replace=False``,
+    every coordinate-canonicalization site over a **non-canonical** target falls
+    back to a ``SELECT * EXCEPT (...)`` projection (re-appending the recomputed
+    interval columns) — the canonicalizer wrapper CTE and the DISJOIN / NEAREST
+    passthroughs alike. ``* EXCEPT`` is **not** SQL-92 and is **not
     DuckDB-runnable** — it is a DataFusion-family extension — so the generic
-    target's non-canonical DISJOIN output runs only on an ``* EXCEPT``-capable
-    engine. A canonical (0-based half-open) target passes the row through as a
-    plain, fully portable ``SELECT *``.
+    target's non-canonical output runs only on an ``* EXCEPT``-capable engine.
+    A canonical (0-based half-open) target passes the row through as a plain,
+    fully portable ``SELECT *``.
     """
 
     name: str = "generic"
@@ -128,12 +132,26 @@ class DuckDBTarget(Target):
 class DataFusionTarget(Target):
     """Apache DataFusion target.
 
-    sqlglot has no DataFusion dialect, so serialization falls back to the
-    generic form (``sqlglot_dialect = None``) for now; #145 finalizes
-    DataFusion serialization. The capability values below are conservative
-    and provisional — they are validated against a real DataFusion engine
-    when the operator migrations exercise them (#142, #145). DataFusion
-    supports ``* EXCEPT`` / ``* EXCLUDE`` but not ``* REPLACE``.
+    sqlglot has no DataFusion dialect, so serialization uses the generic form
+    (``sqlglot_dialect = None``); this is the finalized strategy (#145) — the
+    portable SQL the generic generator emits runs on DataFusion, verified
+    end-to-end by the cross-target oracle (``tests/integration/datafusion/``):
+    every operator at the default encoding, and the canonicalizing operators
+    (DISJOIN / NEAREST) across all four coordinate encodings plus custom-column
+    and strand schemas.
+
+    The capability values below are validated against a real DataFusion engine by
+    that oracle: ``supports_lateral=False`` (no correlated-LATERAL physical plan,
+    so NEAREST takes the decorrelated window fallback), ``supports_star_replace=
+    False`` (DataFusion supports ``* EXCEPT`` / ``* EXCLUDE`` but not
+    ``* REPLACE``, so the canonicalizer and the NEAREST/DISJOIN passthroughs emit
+    the portable ``* EXCEPT`` form), ``supports_qualify=False``, and the binned
+    equi-join range strategy.
+
+    One documented gap remains (#160, dependent on #146): a ``SELECT *`` /
+    ``SELECT b.*`` over a correlated NEAREST exposes the fallback's reserved
+    ``__giql_x_*`` columns, so the cross-target identity claim is narrowed to
+    explicitly-projected queries until a query-level projection seam lands.
     """
 
     name: str = "datafusion"

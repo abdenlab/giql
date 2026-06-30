@@ -55,8 +55,10 @@ def transpile(
 ) -> str:
     """Transpile a GIQL query to SQL.
 
-    Parses the GIQL syntax and converts it to standard SQL-92 compatible
-    output (uses LATERAL joins where needed for operations like NEAREST).
+    Parses the GIQL syntax and converts it to portable SQL for the active target
+    (uses LATERAL joins where needed for operations like NEAREST). The output is
+    not strictly SQL-92: depending on the target it may use engine extensions
+    such as ``LATERAL`` or ``SELECT * EXCEPT`` (see the ``dialect`` parameter).
 
     Parameters
     ----------
@@ -79,7 +81,15 @@ def transpile(
         ``"datafusion"`` and ``None`` use the generic binned equi-join path
         and accept ``intersects_bin_size``. Hard-error projection shapes
         raise ``ValueError`` at transpile time; see the performance guide
-        for the full enumeration.
+        for the full enumeration. The target's capabilities also choose the
+        coordinate-canonicalization emit form for a non-canonically-encoded
+        table: ``"duckdb"`` emits ``SELECT * REPLACE (...)``, while the generic
+        (``None``) and ``"datafusion"`` targets emit the portable
+        ``SELECT * EXCEPT (...), <start>, <end>`` form, which runs on
+        ``* EXCEPT``-capable engines (the DataFusion family) but **not** on
+        DuckDB — pass ``dialect="duckdb"`` for DuckDB-runnable output. Tables in
+        the canonical 0-based half-open encoding are unaffected (they emit
+        portable SQL on every target).
     intersects_bin_size : int | None
         Bin size for INTERSECTS equi-join optimization. When a query
         contains a full-table column-to-column INTERSECTS join, the
@@ -235,9 +245,11 @@ def transpile(
     # Pass 2 of the normalization pipeline (epic #114): synthesize canonical
     # __giql_canon_* wrapper CTEs for non-canonical interval operands of operators
     # that opt in via GIQL_CANONICALIZE; those operators are rewritten here, and
-    # operators that do not opt in are left untouched.
+    # operators that do not opt in are left untouched. The active target's
+    # capabilities choose the wrapper's emit strategy (* REPLACE vs the portable
+    # * EXCEPT form — epic #137 / #145).
     with _reraise_as_value_error("Canonicalization error"):
-        ast = canonicalize_coordinates(ast)
+        ast = canonicalize_coordinates(ast, target.capabilities)
 
     # Pass 3 of the normalization pipeline (epic #137): replace each GIQL operator
     # node that opts in (GIQL_EXPAND) and resolves a registered expander with the
