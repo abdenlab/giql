@@ -34,31 +34,44 @@ reference, assumed canonical), is left untouched — the readability-vs-volume
 tradeoff the epic calls out (only synthesize a wrapper when canonicalization
 actually changes columns).
 
-Engine portability (known limitation)
--------------------------------------
-The wrapper projection uses ``SELECT * REPLACE (...)`` to canonicalize the
-interval columns in place while passing every other source column through
-untouched (the registry declares only the genomic columns, so an explicit
-full-column projection is not available). ``* REPLACE`` is supported by DuckDB,
-BigQuery, Snowflake, and ClickHouse, but **not** by PostgreSQL, SQLite, or
-DataFusion — so a non-canonical encoding currently transpiles to
-engine-incompatible SQL on those targets. Identity-encoded (default 0-based
-half-open) relations are unaffected: they skip wrapping entirely and emit
-portable SQL. Making the emit strategy dialect-aware (an explicit portable
-projection when the target lacks ``REPLACE`` or the full schema is declared) is
-tracked in https://github.com/abdenlab/giql/issues/132.
+Engine portability (capability-driven, issue #145)
+---------------------------------------------------
+The wrapper projection canonicalizes the interval columns while passing every
+other source column through untouched (the registry declares only the genomic
+columns, so an explicit full-column projection is not available). The emit
+strategy is chosen from the active target's :class:`~giql.targets.Capabilities`,
+following the DISJOIN passthrough's precedent (#143) — the same two emit forms,
+though this wrapper additionally accepts ``capabilities=None`` (a direct caller
+default, see :func:`canonicalize_coordinates`):
+
+* ``SELECT * REPLACE (...)`` when ``capabilities.supports_star_replace`` holds
+  (DuckDB / BigQuery / Snowflake / ClickHouse) — substitutes start/end in place,
+  preserving source column order;
+* the portable ``SELECT * EXCEPT (start, end), <start>, <end>`` form otherwise
+  (the generic baseline / DataFusion family), which every ``* EXCEPT``-capable
+  engine plans. This form is row-equivalent but **not column-order-equivalent**:
+  ``* EXCEPT`` drops the interval columns and re-appends the recomputed ones at
+  the end of the projection. It is also not SQL-92 and not DuckDB-runnable.
+
+Identity-encoded (default 0-based half-open) relations are unaffected either way:
+they skip wrapping entirely and emit portable SQL. The capability is threaded in
+from :func:`giql.transpile.transpile` via the active target; a direct caller that
+passes no capabilities defaults to the ``* REPLACE`` form (the historical
+behavior). This finalizes the dialect-aware emit strategy formerly tracked by
+https://github.com/abdenlab/giql/issues/132.
 
 Gating (epic #114, step 6)
 --------------------------
 The pass is gated per operator by a ``GIQL_CANONICALIZE`` class attribute on the
 operator's expression class. An operator opts in by setting
-``GIQL_CANONICALIZE = True``; absent or ``False`` (the default for every operator
-as of this issue) the pass ignores it entirely. The operator port issues — #122
-(DISJOIN) and #123 (NEAREST / DISTANCE / predicates) — flip these flags as each
-operator's emitter is moved off in-emitter canonicalization
-(:mod:`giql.canonical`) and onto this pass's output. **With every flag off the
-pass is a strict no-op and the emitted SQL is byte-identical**, so the existing
-suite is the migration oracle.
+``GIQL_CANONICALIZE = True``; absent or ``False`` the pass ignores it entirely.
+The operator port issues — #122 (DISJOIN) and #123 (NEAREST / DISTANCE /
+predicates) — flipped these flags as each operator's emitter moved off in-emitter
+canonicalization (:mod:`giql.canonical`) and onto this pass's output. As of those
+ports every migrated operator opts in by default, so the pass actively
+synthesizes wrappers; an operator can still toggle its flag off (a test or a
+not-yet-migrated operator), in which case the pass leaves it untouched and the
+emitted SQL is byte-identical for it.
 
 De-canonicalization hook
 -------------------------
@@ -124,6 +137,7 @@ from giql.resolver import ResolvedColumn
 from giql.resolver import ResolvedInterval
 from giql.resolver import ResolvedRef
 from giql.table import Table
+from giql.targets import Capabilities
 
 __all__ = [
     "CANON_PREFIX",
@@ -149,7 +163,9 @@ _OPERATORS: tuple[type[exp.Expression], ...] = (
 )
 
 
-def canonicalize_coordinates(expression: exp.Expression) -> exp.Expression:
+def canonicalize_coordinates(
+    expression: exp.Expression, capabilities: Capabilities | None = None
+) -> exp.Expression:
     """Synthesize canonical wrapper CTEs for non-canonical operator operands.
 
     Walks *expression* for opted-in GIQL operators (those whose expression class
@@ -159,20 +175,28 @@ def canonicalize_coordinates(expression: exp.Expression) -> exp.Expression:
     half-open coordinates and rewrites the slot (AST node + ``ResolvedRef``
     metadata) to point at the canonical CTE.
 
-    The pass mutates and returns *expression* in place. **When no operator opts
-    in — the state as of issue #121 — it is a strict no-op: no node is touched
-    and the emitted SQL is byte-identical.**
+    The pass mutates and returns *expression* in place. For an operator whose
+    ``GIQL_CANONICALIZE`` flag is off, or whose operands are already in the
+    canonical 0-based half-open encoding, it touches nothing and leaves the
+    emitted SQL byte-identical.
 
     Parameters
     ----------
     expression : exp.Expression
         The pass-1-annotated AST.
+    capabilities : Capabilities | None
+        The active target's capabilities, used to choose the wrapper projection's
+        emit strategy (``* REPLACE`` vs the portable ``* EXCEPT`` form — see the
+        module docstring). :func:`giql.transpile.transpile` passes the active
+        target's capabilities; ``None`` (a direct caller) defaults to the
+        ``* REPLACE`` form, preserving the historical behavior.
 
     Returns
     -------
     exp.Expression
-        The same *expression*, with canonical wrapper CTEs inserted and migrated
-        operator slots rewritten (none, while every flag is off).
+        The same *expression*, with canonical wrapper CTEs inserted and the
+        opted-in operator slots that reference non-canonical tables rewritten to
+        point at them.
     """
     # Column / interval operands (DISTANCE, predicates, NEAREST's non-table
     # reference) canonicalize their metadata in place; this is independent of the
@@ -192,7 +216,7 @@ def canonicalize_coordinates(expression: exp.Expression) -> exp.Expression:
     new_ctes: list[exp.CTE] = []
 
     for node, arg, ref in targets:
-        body = _canonical_projection(ref)
+        body = _canonical_projection(ref, capabilities)
         body_sql = body.sql()
         name = body_to_name.get(body_sql)
         if name is None:
@@ -394,15 +418,28 @@ def _fresh_name(next_name, taken: set[str]) -> str:
     return candidate
 
 
-def _canonical_projection(ref: ResolvedRef) -> exp.Select:
+def _canonical_projection(
+    ref: ResolvedRef, capabilities: Capabilities | None
+) -> exp.Select:
     """Build the ``SELECT`` body that projects *ref*'s table to canonical form.
 
     The projection is a **full-row passthrough**: ``SELECT *`` keeps every
-    physical column of the source relation, and a star ``REPLACE`` rewrites only
-    the two interval columns — ``start`` / ``end``, under their original physical
-    names — with the :mod:`giql.canonical` arithmetic for the table's declared
-    encoding. ``chrom`` and every non-interval column flow through the star
-    untouched.
+    physical column of the source relation, and only the two interval columns —
+    ``start`` / ``end``, under their original physical names — are rewritten with
+    the :mod:`giql.canonical` arithmetic for the table's declared encoding.
+    ``chrom`` and every non-interval column flow through the star untouched.
+
+    The emit strategy is chosen from *capabilities* (issue #145), following the
+    precedent of :func:`giql.expanders.disjoin._disjoin_passthrough` — the same
+    two emit forms, with an added ``capabilities is None`` arm for direct callers
+    (the passthrough always receives a concrete ``ctx.capabilities``):
+
+    * ``SELECT * REPLACE (...)`` when ``supports_star_replace`` holds (or no
+      capabilities are supplied) — substitutes the interval columns in place,
+      preserving source column order;
+    * the portable ``SELECT * EXCEPT (start, end), <start>, <end>`` form otherwise
+      — drops the interval columns from the star and re-appends them recomputed.
+      Row-equivalent but not column-order-equivalent, and not DuckDB-runnable.
 
     The full row (rather than a bare ``chrom`` / ``start`` / ``end`` triple) is
     required by table-function operators whose final projection passes the whole
@@ -417,19 +454,20 @@ def _canonical_projection(ref: ResolvedRef) -> exp.Select:
     # Quote the interval identifiers: the canonical column names are physical and
     # routinely reserved words (the default genomic layout's ``start`` / ``end``),
     # so the executed wrapper must quote them.
-    star = exp.Star(
-        replace=[
-            exp.alias_(
-                _canonical_start_expr(start, table),
-                exp.to_identifier(start, quoted=True),
-            ),
-            exp.alias_(
-                _canonical_end_expr(end, table),
-                exp.to_identifier(end, quoted=True),
-            ),
-        ]
+    start_id = exp.to_identifier(start, quoted=True)
+    end_id = exp.to_identifier(end, quoted=True)
+    start_proj = exp.alias_(_canonical_start_expr(start, table), start_id)
+    end_proj = exp.alias_(_canonical_end_expr(end, table), end_id)
+    if capabilities is None or capabilities.supports_star_replace:
+        star = exp.Star(replace=[start_proj, end_proj])
+        return exp.Select(expressions=[star]).from_(exp.to_table(relation))
+    # Portable form: drop the interval columns from the star and re-project them
+    # recomputed under their own names. EXCEPT removes them from the row; the
+    # trailing projections add them back in canonical form.
+    star = exp.Star(except_=[exp.column(start_id), exp.column(end_id)])
+    return exp.Select(expressions=[star, start_proj, end_proj]).from_(
+        exp.to_table(relation)
     )
-    return exp.Select(expressions=[star]).from_(exp.to_table(relation))
 
 
 def _canonical_start_expr(start: str, table: Table | None) -> exp.Expression:
