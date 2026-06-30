@@ -238,6 +238,7 @@ class TestTranspileCluster:
 
         assert "SELECT" in sql
         assert "SUM" in sql.upper() or "LAG" in sql.upper()
+        assert "G_I_Q_L" not in sql  # no leaked, unexpanded operator
 
     def test_cluster_with_distance(self):
         """
@@ -255,6 +256,7 @@ class TestTranspileCluster:
 
         assert "SELECT" in sql
         assert "100" in sql
+        assert "G_I_Q_L" not in sql  # no leaked, unexpanded operator
 
     def test_cluster_stranded(self):
         """
@@ -272,6 +274,7 @@ class TestTranspileCluster:
 
         assert "SELECT" in sql
         assert "strand" in sql.lower()
+        assert "G_I_Q_L" not in sql  # no leaked, unexpanded operator
 
 
 class TestTranspileMerge:
@@ -292,6 +295,7 @@ class TestTranspileMerge:
         assert "MIN" in sql.upper()
         assert "MAX" in sql.upper()
         assert "GROUP BY" in sql.upper()
+        assert "G_I_Q_L" not in sql  # no leaked, unexpanded operator
 
     def test_merge_with_distance(self):
         """
@@ -306,6 +310,7 @@ class TestTranspileMerge:
 
         assert "SELECT" in sql
         assert "100" in sql
+        assert "G_I_Q_L" not in sql  # no leaked, unexpanded operator
 
     def test_merge_with_aggregation(self):
         """
@@ -320,6 +325,7 @@ class TestTranspileMerge:
 
         assert "SELECT" in sql
         assert "COUNT" in sql.upper()
+        assert "G_I_Q_L" not in sql  # no leaked, unexpanded operator
 
 
 class TestTranspileNearest:

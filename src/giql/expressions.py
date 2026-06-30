@@ -110,15 +110,6 @@ class SpatialPredicate(exp.Binary):
 #: half-open) operands are left untouched and the emitted SQL stays byte-identical.
 _CANONICALIZE = True
 
-#: Default opt-out from the ``ExpandOperators`` pass (epic #137, step 2). The
-#: per-operator ``GIQL_EXPAND`` flag mirrors ``GIQL_CANONICALIZE``: an operator
-#: takes the new AST-expansion path only when it sets ``GIQL_EXPAND = True`` *and*
-#: an expander is registered for it; otherwise the legacy ``*_sql`` emitter runs.
-#: This is the opt-out default: an operator inherits it and stays on the legacy
-#: emitter until its migration step flips the flag to ``True`` alongside its
-#: registered expander. Operators already migrated override it on their own class.
-_EXPAND = False
-
 
 class Intersects(SpatialPredicate):
     """INTERSECTS spatial predicate.
@@ -244,11 +235,14 @@ class GIQLCluster(exp.Func):
         "predicate": False,  # pairwise boolean gate (current row vs PREV(col))
     }
 
-    # Inert today: the CLUSTER/MERGE transformers rewrite these nodes before the
-    # ExpandOperators pass runs, so the pass never sees a GIQLCluster to dispatch
-    # and this flag is not a live opt-in. It is forward-looking for #144, which
-    # migrates these operators onto the expander registry.
-    GIQL_EXPAND = _EXPAND
+    #: Migrated to the ExpandOperators pass (epic #137, issue #144). CLUSTER is
+    #: expanded by ``giql.expanders.cluster`` — a whole-query rewrite into the
+    #: two-level ``lag_calc`` form — replacing the legacy
+    #: ``giql.transformer.ClusterTransformer`` pre-pass transformer. Note CLUSTER
+    #: deliberately does NOT set ``GIQL_CANONICALIZE``: the expander derives its
+    #: columns from the FROM table, so pass 2 is intentionally a no-op here and the
+    #: emitted SQL stays byte-identical to the legacy pre-pass output.
+    GIQL_EXPAND = True
 
     @classmethod
     def from_arg_list(cls, args):
@@ -291,11 +285,14 @@ class GIQLMerge(exp.Func):
         "predicate": False,  # pairwise boolean gate (current row vs PREV(col))
     }
 
-    # Inert today: the CLUSTER/MERGE transformers rewrite these nodes before the
-    # ExpandOperators pass runs, so the pass never sees a GIQLMerge to dispatch
-    # and this flag is not a live opt-in. It is forward-looking for #144, which
-    # migrates these operators onto the expander registry.
-    GIQL_EXPAND = _EXPAND
+    #: Migrated to the ExpandOperators pass (epic #137, issue #144). MERGE is
+    #: expanded by ``giql.expanders.merge`` — a whole-query rewrite into the
+    #: clustered-aggregation form (built on CLUSTER) — replacing the legacy
+    #: ``giql.transformer.MergeTransformer`` pre-pass transformer. Like CLUSTER,
+    #: MERGE deliberately does NOT set ``GIQL_CANONICALIZE`` (columns come from the
+    #: FROM table), so pass 2 is intentionally a no-op and the SQL stays
+    #: byte-identical to the legacy pre-pass output.
+    GIQL_EXPAND = True
 
     @classmethod
     def from_arg_list(cls, args):
