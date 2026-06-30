@@ -22,10 +22,8 @@ from giql.resolver import resolve_operator_refs
 from giql.table import Table
 from giql.table import Tables
 from giql.targets import resolve_target
-from giql.transformer import ClusterTransformer
 from giql.transformer import IntersectsBinnedJoinTransformer
 from giql.transformer import IntersectsDuckDBIEJoinTransformer
-from giql.transformer import MergeTransformer
 
 
 @overload
@@ -210,8 +208,6 @@ def transpile(
         if duckdb_sql is not None:
             return duckdb_sql
 
-    merge_transformer = MergeTransformer(tables_container)
-    cluster_transformer = ClusterTransformer(tables_container)
     generator = BaseGIQLGenerator(tables=tables_container)
 
     with _reraise_as_value_error("Transformation error"):
@@ -219,19 +215,20 @@ def transpile(
         # declined the query (returned None) and fell back to the binned plan,
         # exactly as before. ``intersects_bin_size`` is rejected up front for
         # iejoin targets, so the binned transformer always sees its default there.
+        #
+        # CLUSTER and MERGE used to be rewritten here too; they are now expanded in
+        # pass 3 (ExpandOperators) by giql.expanders.cluster / .merge (#144).
         if not target_overrides_intersects:
             intersects_transformer = IntersectsBinnedJoinTransformer(
                 tables_container,
                 bin_size=intersects_bin_size,
             )
             ast = intersects_transformer.transform(ast)
-        ast = merge_transformer.transform(ast)
-        ast = cluster_transformer.transform(ast)
 
     # Pass 1 of the normalization pipeline (epic #114): attach resolution
-    # metadata to every GIQL operator slot ahead of generation. DISJOIN's
-    # expander consumes this metadata (step 2); the remaining operators still
-    # use the generator's legacy resolver paths until their ports land.
+    # metadata to every GIQL operator slot ahead of generation. Every migrated
+    # operator's expander consumes this metadata in pass 3 (CLUSTER/MERGE carry an
+    # empty resolution, deriving their columns from the FROM table instead).
     with _reraise_as_value_error("Resolution error"):
         ast = resolve_operator_refs(ast, tables_container)
 

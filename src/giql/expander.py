@@ -102,9 +102,15 @@ class ExpansionContext:
         ``capabilities`` and ``sqlglot_dialect``.
     tables : Tables
         The registered :class:`~giql.table.Tables` container.
+    registry : ExpanderRegistry | None
+        The registry the pass is resolving against. Carried so a whole-query
+        rewrite (CLUSTER / MERGE) can re-enter :func:`expand_operators` over the
+        SELECT it just restructured and expand sibling operators it copied into
+        it, honoring a custom-registry pass run. ``None`` for a standalone
+        context built outside the pass.
     """
 
-    __slots__ = ("node", "resolution", "target", "tables", "_alias_seq")
+    __slots__ = ("node", "resolution", "target", "tables", "registry", "_alias_seq")
 
     def __init__(
         self,
@@ -113,11 +119,13 @@ class ExpansionContext:
         target: Target,
         tables: Tables,
         alias_seq: Callable[[], str] | None = None,
+        registry: ExpanderRegistry | None = None,
     ) -> None:
         self.node = node
         self.resolution = resolution
         self.target = target
         self.tables = tables
+        self.registry = registry
         # A single sequence is threaded across every context built for one
         # ``ExpandOperators`` run so aliases minted for sibling operators never
         # collide; a standalone context falls back to its own sequence.
@@ -514,7 +522,7 @@ def expand_operators(
                 "valid resolution metadata; pass 1 (resolve_operator_refs) must "
                 "run first and annotate every operator node."
             )
-        ctx = ExpansionContext(node, resolution, target, tables, alias_seq)
+        ctx = ExpansionContext(node, resolution, target, tables, alias_seq, registry=reg)
         replacement = fn(node, ctx)
         if not isinstance(replacement, exp.Expression):
             raise TypeError(

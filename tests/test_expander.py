@@ -1172,44 +1172,38 @@ class TestNoOpWhenInert:
         assert result is ast
         assert list(result.find_all(GIQLDisjoin))
 
-    def test_transpile_sql_unchanged_with_pass_inert(self):
-        """Test that transpile output is byte-identical for an unmigrated operator.
+    def test_expand_operators_skips_opted_out_operator_with_default_registry(self):
+        """Test that the pass skips an opted-out operator even with its expander live.
 
         Given:
-            A CLUSTER query (an operator not migrated onto the pass in any wave-3
-            branch, so its GIQL_EXPAND is False and no expander resolves), with
-            the default registry.
+            A migrated operator query and the import-populated default REGISTRY (so
+            its expander resolves), but the operator opted out of GIQL_EXPAND for
+            the test.
         When:
-            Running the ExpandOperators pass (default REGISTRY) over the resolved
-            AST and serializing both the original and the pass-run AST.
+            Running the ExpandOperators pass over the default REGISTRY.
         Then:
-            The pass leaves the operator node in place, the serialized SQL is
-            byte-identical, and no expander alias prefix appears — the pass is
-            inert for any operator that has not been migrated.
+            It should leave the operator node in place and return the same tree —
+            the per-type GIQL_EXPAND gate holds even when an expander is registered
+            (after #144 no operator ships unmigrated, so the gate is exercised via
+            an opt-out rather than a shipped False).
         """
         # Arrange
-        query = "SELECT *, CLUSTER(interval) AS cluster_id FROM peaks"
-        tables = _tables(("peaks",))
-        ast = _prepare(query, tables)
-        from giql.generators import BaseGIQLGenerator
-
-        before = BaseGIQLGenerator(tables=tables).generate(ast)
-        before_ops = len(list(ast.find_all(GIQLCluster)))
+        operator = _A_MIGRATED_OPERATOR
+        ast, tables = _prepare_operator(operator)
+        before_ops = len(list(ast.find_all(operator)))
 
         # Act — the wired-in pass over the default REGISTRY must be a no-op here.
-        result = expand_operators(ast, GenericTarget(), tables)
-        after = BaseGIQLGenerator(tables=tables).generate(result)
+        with _opted_out(operator):
+            result = expand_operators(ast, GenericTarget(), tables)
 
         # Assert
-        assert after == before
-        assert len(list(result.find_all(GIQLCluster))) == before_ops
-        assert EXPAND_ALIAS_PREFIX not in after
+        assert result is ast
+        assert len(list(result.find_all(operator))) == before_ops
 
 
 # The nine GIQL operator expression classes the ExpandOperators pass inspects.
-# Each migrated operator ships opted in (GIQL_EXPAND=True) alongside its
-# registered expander; the rest ship opted out (False) and fall through to the
-# legacy emitter.
+# Every operator is now migrated (#144): each ships opted in (GIQL_EXPAND=True)
+# alongside its registered expander, so none falls through to a legacy emitter.
 from giql.expressions import Contains  # noqa: E402
 from giql.expressions import GIQLCluster  # noqa: E402
 from giql.expressions import GIQLDistance  # noqa: E402
@@ -1252,11 +1246,15 @@ _MIGRATED_OPERATORS = tuple(
 assert _MIGRATED_OPERATORS, "expected at least one migrated operator"
 #: An arbitrary migrated operator the operator-agnostic control tests target.
 _A_MIGRATED_OPERATOR = _MIGRATED_OPERATORS[0]
-#: Operators not yet migrated — they ship GIQL_EXPAND=False.
+#: Operators not yet migrated — they ship GIQL_EXPAND=False. Empty since #144
+#: migrated the last two (CLUSTER and MERGE): every operator now expands through
+#: the pass. Control tests that need an operator to behave as if unmigrated drive a
+#: migrated one through ``_opted_out`` rather than relying on a shipped ``False``.
 _UNMIGRATED_OPERATORS = tuple(
     op for op in _OPERATOR_CLASSES if op not in _MIGRATED_OPERATORS
 )
-assert _UNMIGRATED_OPERATORS, "expected at least one unmigrated operator"
+#: Pin the post-#144 invariant: every GIQL operator is migrated onto the pass.
+assert not _UNMIGRATED_OPERATORS, "every operator should be migrated after #144"
 
 
 #: A minimal GIQL query producing one node of each operator class, keyed by the
@@ -1314,28 +1312,90 @@ def _prepare_operator(operator: type) -> tuple[exp.Expression, Tables]:
     return _prepare(query, tables), tables
 
 
-class TestOperatorOptOut:
-    """Migrated operators opt into the pass; the rest still ship opted out."""
+class TestClusterMergeExpansion:
+    """CLUSTER and MERGE expand through the pass into their restructured forms (#144)."""
 
-    @pytest.mark.parametrize(
-        "operator", _UNMIGRATED_OPERATORS, ids=lambda c: c.__name__
-    )
-    def test_operator_class_ships_expand_disabled(self, operator):
-        """Test that each unmigrated operator class ships GIQL_EXPAND=False.
+    def test_transform_replaces_cluster_with_lag_calc_subquery(self):
+        """Test that the pass rewrites a CLUSTER query into the two-level form.
 
         Given:
-            A GIQL operator expression class that has not been migrated onto the
-            ExpandOperators pass.
+            A resolved ``SELECT *, CLUSTER(interval) ...`` AST and the default
+            REGISTRY (CLUSTER ships GIQL_EXPAND=True with a registered expander).
         When:
-            Reading its GIQL_EXPAND class attribute.
+            Running the ExpandOperators pass.
         Then:
-            It should be False (the operator still uses the legacy emitter).
+            It should consume the CLUSTER node in place (returning the same root
+            object), wrap the source in a ``lag_calc`` derived table with a LAG
+            window and an ``is_new_cluster`` CASE, project an outer SUM window, and
+            mint no expander alias.
         """
-        # Arrange & act
-        flag = operator.GIQL_EXPAND
+        # Arrange
+        ast, tables = _prepare_operator(GIQLCluster)
+
+        # Act
+        result = expand_operators(ast, GenericTarget(), tables)
 
         # Assert
-        assert flag is False
+        assert result is ast  # whole-query rewrite mutates the root in place
+        assert not list(result.find_all(GIQLCluster))
+        aliases = {sub.alias for sub in result.find_all(exp.Subquery) if sub.alias}
+        assert "lag_calc" in aliases
+        windows = list(result.find_all(exp.Window))
+        assert any(isinstance(w.this, exp.Sum) for w in windows)  # outer cluster id
+        assert any(
+            isinstance(w.this, exp.Anonymous) and w.this.name.upper() == "LAG"
+            for w in windows
+        )  # inner adjacency LAG
+        assert any(
+            isinstance(a, exp.Alias) and a.alias == "is_new_cluster"
+            for a in result.find_all(exp.Alias)
+        )
+        assert EXPAND_ALIAS_PREFIX not in result.sql(dialect=GIQLDialect)
+
+    def test_transform_replaces_merge_with_clustered_group_by(self):
+        """Test that the pass rewrites a MERGE query into the clustered-aggregation form.
+
+        Given:
+            A resolved ``SELECT MERGE(interval) ...`` AST and the default REGISTRY
+            (MERGE ships GIQL_EXPAND=True with a registered expander).
+        When:
+            Running the ExpandOperators pass.
+        Then:
+            It should consume the MERGE node in place (returning the same root
+            object), wrap a ``clustered`` subquery (itself wrapping a ``lag_calc``)
+            under a GROUP BY that includes the synthesized ``__giql_cluster_id``,
+            project MIN/MAX bounds, and mint no expander alias.
+        """
+        # Arrange
+        ast, tables = _prepare_operator(GIQLMerge)
+
+        # Act
+        result = expand_operators(ast, GenericTarget(), tables)
+
+        # Assert
+        assert result is ast  # whole-query rewrite mutates the root in place
+        assert not list(result.find_all(GIQLMerge))
+        aliases = {sub.alias for sub in result.find_all(exp.Subquery) if sub.alias}
+        assert "clustered" in aliases  # MERGE wraps the clustered subquery
+        assert "lag_calc" in aliases  # built on CLUSTER
+        group = result.find(exp.Group)
+        assert group is not None
+        assert any(
+            isinstance(g, exp.Column) and g.name == "__giql_cluster_id"
+            for g in group.expressions
+        )
+        assert any(isinstance(m, exp.Min) for m in result.find_all(exp.Min))
+        assert any(isinstance(m, exp.Max) for m in result.find_all(exp.Max))
+        assert EXPAND_ALIAS_PREFIX not in result.sql(dialect=GIQLDialect)
+
+
+class TestOperatorOptOut:
+    """Every operator is now migrated, so all ship GIQL_EXPAND=True.
+
+    The complementary ``test_operator_class_ships_expand_disabled`` was dropped
+    when #144 migrated the last operators: ``_UNMIGRATED_OPERATORS`` is empty, so
+    there is no class left to assert ships ``False``.
+    """
 
     @pytest.mark.parametrize(
         "operator", _MIGRATED_OPERATORS, ids=lambda c: c.__name__
@@ -1392,24 +1452,27 @@ class TestOptedInRestoresFlag:
         """Test that _opted_in restores GIQL_EXPAND when the body raises.
 
         Given:
-            An operator class at its default GIQL_EXPAND=False.
+            An operator driven to GIQL_EXPAND=False via _opted_out (every operator
+            now ships True after #144, so the restore target is set up explicitly).
         When:
             Its _opted_in body raises an exception.
         Then:
             The flag should be restored to False (the manager is exception-safe,
             so a raising expansion test cannot leak an opt-in into a later test).
         """
-        # Arrange
-        assert GIQLMerge.GIQL_EXPAND is False
+        # Arrange — set the restore target to False so the restore is observable.
+        operator = _A_MIGRATED_OPERATOR
+        with _opted_out(operator):
+            assert operator.GIQL_EXPAND is False
 
-        # Act
-        with pytest.raises(RuntimeError):
-            with _opted_in(GIQLMerge):
-                assert GIQLMerge.GIQL_EXPAND is True
-                raise RuntimeError("boom")
+            # Act
+            with pytest.raises(RuntimeError):
+                with _opted_in(operator):
+                    assert operator.GIQL_EXPAND is True
+                    raise RuntimeError("boom")
 
-        # Assert
-        assert GIQLMerge.GIQL_EXPAND is False
+            # Assert
+            assert operator.GIQL_EXPAND is False
 
 
 class TestIEJoinRegistryDeferral:
@@ -1938,22 +2001,19 @@ class TestExpandOperatorsWalk:
         """Test that only the flagged operator type is replaced when both registered.
 
         Given:
-            A genuinely-unmigrated operator (GIQLCluster, shipping
-            GIQL_EXPAND=False in every wave-3 branch) and an INTERSECTS, both with
-            registered expanders, but only INTERSECTS flagged GIQL_EXPAND for the
-            test.
+            A CLUSTER and an INTERSECTS, both with registered expanders, but
+            CLUSTER held off (opted out of GIQL_EXPAND) while only INTERSECTS is
+            opted in.
         When:
             Running the pass.
         Then:
-            The INTERSECTS is replaced while the unmigrated operator node remains
-            on its own shipped ``False`` flag — no opt-out ceremony needed (the
-            gate is per-type).
+            The INTERSECTS is replaced while the held-off operator node remains —
+            the gate is per-type, so opting CLUSTER out alone holds its expansion
+            off even though its expander is registered.
         """
-        # Arrange — the held-off subject is genuinely unmigrated: it survives on
-        # its own shipped GIQL_EXPAND=False, not on a test opt-out.
+        # Arrange — the held-off subject is a migrated operator driven off via
+        # _opted_out (after #144 no operator ships GIQL_EXPAND=False).
         held_off = GIQLCluster
-        assert held_off in _UNMIGRATED_OPERATORS
-        assert held_off.GIQL_EXPAND is False
         clean_registry.register(
             GenericTarget(), held_off, lambda n, c: exp.column("CL")
         )
@@ -1968,9 +2028,10 @@ class TestExpandOperatorsWalk:
         )
         pass_ = ExpandOperators(GenericTarget(), tables, clean_registry)
 
-        # Act — only INTERSECTS is opted in; the unmigrated operator stays off.
-        with _opted_in(Intersects):
-            result = pass_.transform(ast)
+        # Act — only INTERSECTS is opted in; CLUSTER is held off via opt-out.
+        with _opted_out(held_off):
+            with _opted_in(Intersects):
+                result = pass_.transform(ast)
 
         # Assert
         assert list(result.find_all(held_off))

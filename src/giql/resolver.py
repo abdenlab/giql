@@ -22,18 +22,20 @@ pass closes with a validation boundary (:func:`validate_operator_refs`) that
 asserts every operator slot carries well-formed resolution metadata, mirroring
 ``sqlglot``'s ``validate_qualify_columns`` and Spark's ``CheckAnalysis``.
 
-Scope note (epic #114, steps 1-3)
----------------------------------
-The pass is behavior-preserving. DISJOIN's expander
-(``giql.expanders.disjoin``, step 2) and NEAREST's emitter
-(``BaseGIQLGenerator.giqlnearest_sql``, step 3) consume the attached metadata;
-DISTANCE and the spatial predicates still use the generator's legacy resolver
-paths and ignore everything attached here until their port issues land. The
-resolution semantics computed here mirror the generator's historical
-``_resolve_target_table`` / ``_resolve_disjoin_reference`` /
-``_enclosing_cte_names`` (DISJOIN) and ``_resolve_nearest_reference`` /
-``_find_outer_table_in_lateral_join`` (NEAREST) behavior exactly; all of those
-helpers now live only here.
+Scope note (epic #114 / #137)
+-----------------------------
+The pass is behavior-preserving. Every operator in the ``_OPERATORS`` roster now
+takes the ``ExpandOperators`` path (epic #137): the DISJOIN, NEAREST, DISTANCE,
+and spatial-predicate (INTERSECTS / CONTAINS / WITHIN / ``SpatialSetPredicate``)
+expanders in :mod:`giql.expanders` consume the metadata attached here, resolving
+their reference slots and column operands through it. CLUSTER and MERGE (#144)
+declare no reference slots, so they resolve to an empty-but-valid
+:class:`OperatorResolution` and their expanders derive columns from the enclosing
+FROM table rather than from resolution. The resolution semantics computed here
+mirror the generator's historical ``_resolve_target_table`` /
+``_resolve_disjoin_reference`` / ``_enclosing_cte_names`` (DISJOIN) and
+``_resolve_nearest_reference`` / ``_find_outer_table_in_lateral_join`` (NEAREST)
+behavior exactly; all of those helpers now live only here.
 
 Two consequences of the zero-behavior-change constraint shape the
 implementation:
@@ -75,8 +77,10 @@ from giql.constants import DEFAULT_START_COL
 from giql.constants import DEFAULT_STRAND_COL
 from giql.constants import DJ_PREFIX
 from giql.expressions import Contains
+from giql.expressions import GIQLCluster
 from giql.expressions import GIQLDisjoin
 from giql.expressions import GIQLDistance
+from giql.expressions import GIQLMerge
 from giql.expressions import GIQLNearest
 from giql.expressions import Intersects
 from giql.expressions import SlotSpec
@@ -128,11 +132,17 @@ _DEFAULT_COLS: tuple[str, str, str] = (
     DEFAULT_END_COL,
 )
 
-#: The GIQL operator expression classes the pass inspects.
+#: The GIQL operator expression classes the pass inspects. CLUSTER and MERGE
+#: (#144) declare no reference slots, so they resolve to an empty-but-valid
+#: ``OperatorResolution``; the ``ExpandOperators`` pass requires that metadata to
+#: be present, and their expanders derive columns from the enclosing FROM table
+#: rather than from resolution.
 _OPERATORS: tuple[type[exp.Expression], ...] = (
     GIQLDisjoin,
     GIQLNearest,
     GIQLDistance,
+    GIQLCluster,
+    GIQLMerge,
     Intersects,
     Contains,
     Within,

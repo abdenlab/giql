@@ -401,6 +401,15 @@ Notes
 - MERGE is an aggregate operation that processes all matching rows
 - The operation sorts data internally, so pre-sorting is not required
 
+.. note::
+
+   CLUSTER and MERGE cannot be combined in a single ``SELECT`` — MERGE
+   aggregates rows away while CLUSTER is a per-row window over those same rows,
+   so no single query expresses both. Transpiling ``SELECT MERGE(interval),
+   CLUSTER(interval) FROM features`` raises a ``ValueError``. Use them in
+   separate queries instead — for example, CLUSTER over a subquery, or MERGE
+   over one.
+
 Related Operators
 ~~~~~~~~~~~~~~~~~
 
