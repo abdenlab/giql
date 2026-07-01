@@ -8,7 +8,7 @@ overlapping no reference interval; an omitted reference defaults to the target
 set.
 
 This module is the AST-expansion replacement for the legacy
-``BaseGIQLGenerator.giqldisjoin_sql`` emitter. It assembles the same WITH-CTE
+``giqldisjoin_sql`` generator emitter. It assembles the same WITH-CTE
 subquery, parses it back into a sqlglot :class:`~sqlglot.expressions.Expression`,
 and returns that node so the active target's serializer renders it — dissolving
 the emit-time string special-case left by epic #114.
@@ -102,7 +102,7 @@ def expand_disjoin(node: GIQLDisjoin, ctx: ExpansionContext) -> exp.Expression:
 def _build_disjoin_sql(node: GIQLDisjoin, ctx: ExpansionContext) -> str:
     """Assemble the DISJOIN WITH-CTE subquery SQL string for the active target.
 
-    Mirrors the legacy ``BaseGIQLGenerator.giqldisjoin_sql`` shape one named
+    Mirrors the legacy ``giqldisjoin_sql`` emitter's shape one named
     ``__giql_dj_*`` CTE at a time, with the #153 alias fix and the
     capability-driven passthrough applied.
     """
@@ -317,9 +317,9 @@ def _disjoin_resolution(
     ref = resolution.slot("reference")
     if ref is not None:
         if ref.kind == "subquery":
-            # Serializing the subquery with sqlglot's stock generator (not
-            # BaseGIQLGenerator) is safe because nested GIQL operators expand
-            # deepest-first: any GIQL construct inside this operand is already
+            # Serializing the subquery with sqlglot's stock generator is safe
+            # because nested GIQL operators expand deepest-first: any GIQL
+            # construct inside this operand is already
             # rewritten to standard AST by the time this outer DISJOIN expands,
             # so the stock generator only ever round-trips plain SQL here.
             ref_sql = reference.sql(dialect=GIQLDialect)

@@ -35,9 +35,8 @@ class Capabilities:
         NEAREST LATERAL-vs-window-function strategy (#142): a correlated NEAREST
         expands to a portable correlated ``LATERAL`` subquery where this holds
         and to a decorrelated window-function form where it does not. This
-        capability is the single source of truth — the former
-        ``BaseGIQLGenerator.SUPPORTS_LATERAL`` generator attribute has been
-        removed.
+        capability is the single source of truth — the former generator-level
+        ``SUPPORTS_LATERAL`` attribute has been removed.
     supports_star_replace : bool
         Whether the engine supports ``SELECT * REPLACE (...)``. Drives every
         coordinate-canonicalization site — the canonicalizer wrapper CTE and the
@@ -86,8 +85,8 @@ class GenericTarget(Target):
     """Portable SQL-92-ish target with no engine-specific features.
 
     This is the default target (``dialect=None``). Its capabilities are the
-    conservative, maximally portable baseline that matches today's
-    :class:`giql.generators.base.BaseGIQLGenerator` output.
+    conservative, maximally portable baseline, serialized through sqlglot's
+    dialect-less default (``sqlglot_dialect = None``).
 
     "SQL-92-ish", not strict SQL-92: because ``supports_star_replace=False``,
     every coordinate-canonicalization site over a **non-canonical** target falls
@@ -116,6 +115,15 @@ class DuckDBTarget(Target):
 
     Serializes through sqlglot's ``duckdb`` dialect and uses the IEJoin
     per-partition plan for column-to-column INTERSECTS joins.
+
+    Serializing through the ``duckdb`` dialect makes null ordering **explicit** on
+    ``ORDER BY`` / window terms, emitting ``NULLS FIRST`` where the generic
+    (dialect-less) serialization leaves it implicit. This is result-preserving for
+    every migrated operator because each sorts on a non-null coordinate key
+    (chromosome / position, or a same-chromosome-filtered distance), so the
+    explicit ``NULLS FIRST`` never reorders a NULL into or out of the top rows. A
+    future operator ordering on a nullable key would need to re-verify this before
+    relying on the DuckDB serialization being a semantic no-op.
     """
 
     name: str = "duckdb"
@@ -179,7 +187,11 @@ def resolve_target(dialect: str | None) -> Target:
     ----------
     dialect : str | None
         The target dialect name. ``None`` resolves to :class:`GenericTarget`;
-        ``"duckdb"`` and ``"datafusion"`` resolve to their respective targets.
+        ``"duckdb"`` and ``"datafusion"`` resolve to their respective built-in
+        targets. Any other name is resolved against the plugin registry — a
+        custom :class:`Target` declared through
+        :meth:`giql.expander.ExpanderRegistry.register_target` (or as a side
+        effect of :func:`giql.expander.register`) is selectable by its ``name``.
 
     Returns
     -------
@@ -189,14 +201,26 @@ def resolve_target(dialect: str | None) -> Target:
     Raises
     ------
     ValueError
-        If *dialect* is not a recognized target name.
+        If *dialect* is neither a built-in name nor a registered custom target.
     """
     if dialect is None:
         return GenericTarget()
 
     target_cls = _TARGETS_BY_NAME.get(dialect)
-    if target_cls is None:
-        raise ValueError(
-            f"Unknown dialect: {dialect!r}. Supported: 'duckdb', 'datafusion', or None."
-        )
-    return target_cls()
+    if target_cls is not None:
+        return target_cls()
+
+    # A non-built-in name may be a custom target registered on the plugin hub.
+    # Imported lazily so this module stays import-cycle-free: ``giql.expander``
+    # imports ``Target`` / ``GenericTarget`` from here at module load.
+    from giql.expander import REGISTRY
+
+    registered = REGISTRY.target(dialect)
+    if registered is not None:
+        return registered
+
+    raise ValueError(
+        f"Unknown dialect: {dialect!r}. Supported: 'duckdb', 'datafusion', None, "
+        "or a custom target registered via "
+        "giql.expander.REGISTRY.register_target()."
+    )

@@ -491,7 +491,7 @@ def _resolve_operator(
 def _target_name(target: exp.Expression) -> str:
     """Extract the target table name from an operator's ``this`` slot.
 
-    Mirrors ``BaseGIQLGenerator._resolve_target_table`` exactly.
+    Mirrors the legacy generator's ``_resolve_target_table`` exactly.
     """
     if isinstance(target, exp.Table):
         return target.name
@@ -969,7 +969,7 @@ def _lookup_aliased_table(
 def _enclosing_alias_map(node: exp.Expression) -> tuple[dict[str, str], str | None]:
     """Build the alias->table map of *node*'s enclosing SELECT.
 
-    Mirrors ``BaseGIQLGenerator.select_sql`` exactly: the FROM-clause table and
+    Mirrors the legacy generator's ``select_sql`` exactly: the FROM-clause table and
     every JOIN-clause table contribute an ``(alias or name) -> name`` entry, and
     the FROM-clause table name is the ``_current_table`` fallback. Only direct
     ``exp.Table`` operands participate (a LATERAL/derived join contributes

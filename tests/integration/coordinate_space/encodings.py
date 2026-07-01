@@ -5,9 +5,8 @@ A *canonical* interval in this module is always 0-based half-open. The
 integer values that should be stored under each of the four
 ``(coordinate_system, interval_type)`` combinations supported by GIQL.
 
-The translation is the inverse of
-:func:`giql.generators.base.BaseGIQLGenerator._canonical_start` /
-``_canonical_end``: re-encoding a canonical interval and feeding the stored
+The translation is the inverse of GIQL's coordinate canonicalization (see
+:mod:`giql.canonical`): re-encoding a canonical interval and feeding the stored
 values back through the canonicalization helpers must yield the original
 canonical values.
 """

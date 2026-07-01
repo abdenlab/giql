@@ -17,7 +17,6 @@ from giql.dialect import GIQLDialect
 from giql.expander import REGISTRY
 from giql.expander import ExpandOperators
 from giql.expressions import Intersects
-from giql.generators import BaseGIQLGenerator
 from giql.resolver import resolve_operator_refs
 from giql.table import Table
 from giql.table import Tables
@@ -46,11 +45,26 @@ def transpile(
 ) -> str: ...
 
 
+# Widened overload for arbitrary custom-target dialect names (the registry
+# plugin hub). It intentionally subsumes the ``Literal["duckdb"]`` overload
+# above, so the static ``dialect="duckdb"`` + ``intersects_bin_size`` guard is not
+# enforced for a ``str``-typed dialect; that combination still raises ``ValueError``
+# at runtime (see the body).
+@overload
 def transpile(
     giql: str,
     tables: list[str | Table] | None = None,
     *,
-    dialect: Literal["duckdb", "datafusion"] | None = None,
+    dialect: str,
+    intersects_bin_size: int | None = None,
+) -> str: ...
+
+
+def transpile(
+    giql: str,
+    tables: list[str | Table] | None = None,
+    *,
+    dialect: str | None = None,
     intersects_bin_size: int | None = None,
 ) -> str:
     """Transpile a GIQL query to SQL.
@@ -69,10 +83,14 @@ def transpile(
         Table configurations. Strings use default column mappings
         (chrom, start, end, strand). :class:`Table` objects provide
         custom column name mappings.
-    dialect : Literal["duckdb", "datafusion"] | None
+    dialect : str | None
         Optional target engine. Resolves to a :class:`giql.targets.Target`
         carrying the engine's capability set; ``None`` selects the generic
-        portable target. When set to ``"duckdb"``, column-to-column
+        portable target, ``"duckdb"`` / ``"datafusion"`` the built-in targets,
+        and any other name a custom :class:`giql.targets.Target` registered on
+        the plugin hub (see :func:`giql.expander.register` /
+        :meth:`giql.expander.ExpanderRegistry.register_target`). When set to
+        ``"duckdb"``, column-to-column
         ``INTERSECTS`` joins (INNER, SEMI, or ANTI) are transpiled into a
         per-chromosome dynamic-SQL pattern (``SET VARIABLE`` +
         ``query(getvariable(...))``) that DuckDB plans through its
@@ -218,8 +236,6 @@ def transpile(
         if duckdb_sql is not None:
             return duckdb_sql
 
-    generator = BaseGIQLGenerator(tables=tables_container)
-
     with _reraise_as_value_error("Transformation error"):
         # Reaching here with an iejoin target means the IEJoin transformer
         # declined the query (returned None) and fell back to the binned plan,
@@ -251,17 +267,20 @@ def transpile(
     with _reraise_as_value_error("Canonicalization error"):
         ast = canonicalize_coordinates(ast, target.capabilities)
 
-    # Pass 3 of the normalization pipeline (epic #137): replace each GIQL operator
-    # node that opts in (GIQL_EXPAND) and resolves a registered expander with the
-    # AST that expander produces for the active target. Operators that are
-    # unflagged or resolve no expander are left untouched and the generator renders
-    # them via their legacy ``*_sql`` emitter as before.
+    # Pass 3 of the normalization pipeline (epic #137): replace every GIQL operator
+    # node with the AST its registered expander produces for the active target.
+    # With every operator migrated, this pass fully consumes the GIQL dialect —
+    # nothing GIQL-specific survives into serialization.
     expand_pass = ExpandOperators(target, tables_container)
     with _reraise_as_value_error("Expansion error"):
         ast = expand_pass.transform(ast)
 
+    # Serialize the now-standard AST with the stock sqlglot serializer for the
+    # active target (epic #137, #146). The target's ``sqlglot_dialect`` selects the
+    # engine's serialization (``None`` is sqlglot's portable default); there is no
+    # custom GIQL generator anymore.
     with _reraise_as_value_error("Transpilation error"):
-        sql = generator.generate(ast)
+        sql = ast.sql(dialect=target.sqlglot_dialect)
 
     return sql
 
@@ -299,8 +318,9 @@ def _reraise_as_value_error(prefix: str, query: str | None = None) -> Iterator[N
     """Re-raise non-:class:`ValueError` exceptions as :class:`ValueError` with *prefix*.
 
     Lets user-facing :class:`ValueError`\\s from the parser, transformer chain,
-    and generator propagate verbatim (so the dialect's targeted error messages
-    survive the boundary) while wrapping unexpected exceptions in a uniform
+    expander pass, and stock serializer propagate verbatim (so the dialect's
+    targeted error messages survive the boundary) while wrapping unexpected
+    exceptions in a uniform
     :class:`ValueError` prefixed with the stage name. When *query* is supplied,
     the original input is appended to the message so parse errors retain the
     offending text.

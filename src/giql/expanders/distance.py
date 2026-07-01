@@ -8,8 +8,8 @@ expression with no joins, CTEs, or per-target divergence — so a single
 every target. DISTANCE emits identical SQL on DuckDB, DataFusion, and the
 generic baseline, so no per-target override is needed.
 
-The CASE this expander builds matches
-:meth:`giql.generators.base.BaseGIQLGenerator._generate_distance_case` exactly
+The CASE this expander builds matches the string builder
+:func:`giql.expanders._distance.generate_distance_case` exactly
 (bedtools ``closest -d`` semantics): overlapping intervals report ``0``,
 book-ended (adjacent) intervals report ``1``, and a raw half-open gap of ``N``
 bases reports ``N + 1``. The ``+ 1`` is applied to the absolute gap magnitude
@@ -32,6 +32,7 @@ from sqlglot import parse_one
 from giql.dialect import GIQLDialect
 from giql.expander import ExpansionContext
 from giql.expander import register
+from giql.expanders._params import coerce_bool_param
 from giql.expressions import GIQLDistance
 from giql.resolver import ResolvedColumn
 from giql.targets import GenericTarget
@@ -83,36 +84,6 @@ def _gap(minuend: str, subtrahend: str) -> exp.Expression:
     return exp.paren(exp.Add(this=diff, expression=exp.Literal.number(1)))
 
 
-def _bool_param(param: exp.Expression | None) -> bool:
-    """Coerce an optional DISTANCE boolean argument to a Python ``bool``.
-
-    Mirrors ``BaseGIQLGenerator._extract_bool_param`` in how it reads the
-    ``stranded`` / ``signed`` keyword arguments, with one *intentional*
-    divergence: for an :class:`sqlglot.exp.Boolean` node this returns
-    ``bool(param.this)`` (a true Python ``bool``), whereas the legacy
-    ``_extract_bool_param`` returns the raw ``param_expr.this`` (already a
-    ``bool`` in practice, but unhardened). The coercion is strictly safer — it
-    guarantees a ``bool`` regardless of what the parser stored — and never
-    changes the observed branch selection, so the two stay behaviorally
-    equivalent. See TODO(#146): folding these two readers together.
-
-    Parameters
-    ----------
-    param : exp.Expression | None
-        The ``stranded`` or ``signed`` argument node, or ``None`` if absent.
-
-    Returns
-    -------
-    bool
-        The coerced Python boolean (``False`` when the argument is absent).
-    """
-    if not param:
-        return False
-    if isinstance(param, exp.Boolean):
-        return bool(param.this)
-    return str(param).upper() in ("TRUE", "1", "YES")
-
-
 def _operand(ctx: ExpansionContext, arg: str, position: str) -> ResolvedColumn:
     """Return the resolved column for one DISTANCE interval operand.
 
@@ -141,7 +112,7 @@ def _operand(ctx: ExpansionContext, arg: str, position: str) -> ResolvedColumn:
     ValueError
         If the operand was deferred (a literal range or unresolved column).
     """
-    # TODO(#146): this read-required-column-or-raise pattern is duplicated across
+    # TODO: this read-required-column-or-raise pattern is duplicated across
     # expanders; hoist it to a shared ``ExpansionContext.require_column`` helper
     # once a second expander needs it.
     resolution = ctx.resolution
@@ -316,13 +287,12 @@ def _prepend_strand_guards(
     return case
 
 
-# KEEP IN SYNC: this expander and
-# ``BaseGIQLGenerator._generate_distance_case`` (base.py) build the *same*
-# distance CASE by two routes. The legacy method is retained only because
-# NEAREST still calls it for its ORDER BY / filter math; once NEAREST migrates
-# to the expander path that method can be deleted and this duplication retired.
-# Until then, any change to the distance math here must be mirrored there (and
-# vice versa). The parity test in tests/test_distance_udf.py guards the drift.
+# KEEP IN SYNC: this expander (AST) and the string builder
+# ``giql.expanders._distance.generate_distance_case`` build the *same* distance
+# CASE by two routes. The string form is retained because NEAREST assembles its
+# ORDER BY / filter math string-first and splices the CASE in. Any change to the
+# distance math here must be mirrored there (and vice versa). The parity test in
+# tests/test_distance_udf.py guards the drift.
 @register(GenericTarget, GIQLDistance)
 def expand_distance(node: exp.Expression, ctx: ExpansionContext) -> exp.Expression:
     """Expand a ``GIQLDistance`` node into a standard SQL ``CASE`` expression.
@@ -345,8 +315,8 @@ def expand_distance(node: exp.Expression, ctx: ExpansionContext) -> exp.Expressi
         The distance ``CASE`` that replaces the operator node and is rendered by
         the active target's serializer.
     """
-    stranded = _bool_param(node.args.get("stranded"))
-    signed = _bool_param(node.args.get("signed"))
+    stranded = coerce_bool_param(node.args.get("stranded"))
+    signed = coerce_bool_param(node.args.get("signed"))
 
     col_a = _operand(ctx, "this", "first")
     col_b = _operand(ctx, "expression", "second")

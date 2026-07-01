@@ -1,8 +1,8 @@
 """Generic expanders for the spatial predicates and set predicates (epic #137).
 
 Migrates INTERSECTS / CONTAINS / WITHIN and the ``ANY`` / ``ALL`` set predicates
-off the legacy ``*_sql`` emitters on :class:`giql.generators.base.BaseGIQLGenerator`
-and onto the operator-expander registry. Each expander turns one predicate node
+off the legacy ``*_sql`` generator emitters and onto the operator-expander
+registry. Each expander turns one predicate node
 into standard sqlglot AST built from the pass-1 :class:`~giql.resolver.ResolvedColumn`
 metadata (already canonicalized to 0-based half-open by pass 2), so the emitted SQL
 is byte-identical to the strings the legacy emitter produced.
@@ -58,7 +58,7 @@ def _fragment(fragment: str) -> exp.Expression:
 def _predicate_column(ctx: ExpansionContext, arg: str) -> ResolvedColumn:
     """Return the :class:`ResolvedColumn` for predicate operand *arg*.
 
-    Mirrors :meth:`giql.generators.base.BaseGIQLGenerator._predicate_operand`: the
+    Mirrors the legacy ``_predicate_operand`` emitter helper: the
     expander consumes only the pass-1 resolution; a missing column means pass 1 did
     not run (an internal invariant violation), so raise the historical message.
     """
@@ -78,7 +78,7 @@ def _range_predicate(
 ) -> exp.Expression:
     """Build the boolean AST for ``column <op_type> <literal range>``.
 
-    Reproduces :meth:`BaseGIQLGenerator._generate_range_predicate` as AST. The
+    Reproduces the legacy ``_generate_range_predicate`` emitter as AST. The
     column fragments are already canonical 0-based half-open (pass 2); the parsed
     range is canonicalized by the caller. Returns a parenthesized boolean.
     """
@@ -129,7 +129,7 @@ def _column_join(
 ) -> exp.Expression:
     """Build the boolean AST for a column-to-column spatial predicate.
 
-    Reproduces :meth:`BaseGIQLGenerator._generate_column_join` as AST. Both
+    Reproduces the legacy ``_generate_column_join`` emitter as AST. Both
     operands' fragments are pre-canonicalized (pass 2). Returns a parenthesized
     boolean.
     """
@@ -218,7 +218,7 @@ def expand_spatial_set(
 ) -> exp.Expression:
     """Expand a quantified set predicate (``ANY`` / ``ALL``) to boolean SQL AST.
 
-    Reproduces :meth:`BaseGIQLGenerator._generate_spatial_set`: the single left
+    Reproduces the legacy ``_generate_spatial_set`` emitter: the single left
     column is compared against every literal range, and the per-range conditions
     are OR-combined for ``ANY`` / AND-combined for ``ALL``, all wrapped in one
     outer paren.

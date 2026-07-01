@@ -16,7 +16,7 @@ import giql  # noqa: F401  (ensures the built-in expanders are registered)
 from giql.canonicalizer import canonicalize_coordinates
 from giql.dialect import GIQLDialect
 from giql.expander import ExpandOperators
-from giql.generators import BaseGIQLGenerator
+from giql.expanders._distance import generate_distance_case
 from giql.resolver import resolve_operator_refs
 from giql.table import Tables
 from giql.targets import GenericTarget
@@ -42,7 +42,7 @@ def _generate(sql: str) -> str:
     ast = resolve_operator_refs(ast, tables)
     ast = canonicalize_coordinates(ast)
     ast = ExpandOperators(GenericTarget(), tables).transform(ast)
-    return BaseGIQLGenerator().generate(ast)
+    return ast.sql()
 
 
 def _run(sql: str):
@@ -713,13 +713,13 @@ class TestStrandedSignedDistance:
         assert result is None, f"Expected NULL for '.' strand, got {result}"
 
 
-# --- Drift guard: expand_distance vs the legacy _generate_distance_case -------
+# --- Drift guard: expand_distance vs generate_distance_case -------------------
 #
-# DISTANCE moved onto the AST-expansion pass (expand_distance), but
-# BaseGIQLGenerator._generate_distance_case is retained because NEAREST still
-# calls it. The two compute the same distance by different routes; these tests
-# pin that they stay semantically equivalent until NEAREST migrates and the
-# legacy method can be deleted.
+# DISTANCE builds its CASE as AST (expand_distance), but NEAREST assembles its
+# SQL string-first and splices in the same CASE via the string builder
+# giql.expanders._distance.generate_distance_case. The two compute the same
+# distance by different routes; these tests pin that they stay semantically
+# equivalent so the string and AST forms cannot silently drift apart.
 
 #: Column expressions both routes are evaluated over. ``a``/``b`` are the two
 #: operand relations supplied by the parity harness's VALUES row.
@@ -801,9 +801,9 @@ def _expander_distance_case(stranded: bool, signed: bool) -> str:
     return ast.find(exp.Select).expressions[0].this.sql()
 
 
-def _legacy_distance_case(stranded: bool, signed: bool) -> str:
-    """Return the CASE the legacy _generate_distance_case builds for ``a``/``b``."""
-    return BaseGIQLGenerator()._generate_distance_case(
+def _string_distance_case(stranded: bool, signed: bool) -> str:
+    """Return the CASE the string builder generate_distance_case builds for a/b."""
+    return generate_distance_case(
         _CHROM_A,
         _START_A,
         _END_A,
@@ -844,34 +844,34 @@ def parity_conn():
         conn.close()
 
 
-class TestDistanceExpanderLegacyParity:
-    """expand_distance and the retained _generate_distance_case agree row-for-row."""
+class TestDistanceExpanderStringParity:
+    """expand_distance (AST) and generate_distance_case (string) agree row-for-row."""
 
     @pytest.mark.parametrize(
         "shape_id, stranded, signed", _SHAPES, ids=[s[0] for s in _SHAPES]
     )
-    def test_expander_matches_legacy_distance_case(
+    def test_expander_matches_string_distance_case(
         self, parity_conn, shape_id, stranded, signed
     ):
         """
         GIVEN the four DISTANCE shapes (unsigned/signed x non-stranded/stranded)
             plus overlap, chrom-mismatch, and strand-invalid input rows
-        WHEN the same inputs run through expand_distance and the retained
-            _generate_distance_case
+        WHEN the same inputs run through expand_distance (AST) and
+            generate_distance_case (the string builder NEAREST uses)
         THEN both routes return the identical scalar for every row, pinning the
-            two distance implementations against drift until NEAREST migrates.
+            two distance implementations against drift.
         """
         # Arrange
         expander_case = _expander_distance_case(stranded, signed)
-        legacy_case = _legacy_distance_case(stranded, signed)
+        string_case = _string_distance_case(stranded, signed)
 
         # Act & assert
         for row in _PARITY_ROWS:
             expander_result = _eval_case(parity_conn, expander_case, row)
-            legacy_result = _eval_case(parity_conn, legacy_case, row)
-            assert expander_result == legacy_result, (
+            string_result = _eval_case(parity_conn, string_case, row)
+            assert expander_result == string_result, (
                 f"{shape_id}: expander {expander_result!r} != "
-                f"legacy {legacy_result!r} for row {row}"
+                f"string {string_result!r} for row {row}"
             )
 
 

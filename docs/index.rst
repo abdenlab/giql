@@ -48,6 +48,7 @@ See the :doc:`GIQL transpiler <transpilation/index>` docs.
    transpilation/schema-mapping
    transpilation/execution
    transpilation/performance
+   transpilation/extending
    transpilation/api-reference
 
 

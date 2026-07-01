@@ -4,7 +4,17 @@ A SQL dialect for genomic range queries.
 """
 
 from giql.constants import DEFAULT_BIN_SIZE
+from giql.expander import REGISTRY
+from giql.expander import ExpanderRegistry
+from giql.expander import ExpansionContext
+from giql.expander import OperatorExpander
+from giql.expander import register
 from giql.table import Table
+from giql.targets import Capabilities
+from giql.targets import DataFusionTarget
+from giql.targets import DuckDBTarget
+from giql.targets import GenericTarget
+from giql.targets import Target
 from giql.transpile import transpile
 
 __version__ = "0.1.0"
@@ -14,4 +24,15 @@ __all__ = [
     "DEFAULT_BIN_SIZE",
     "Table",
     "transpile",
+    # Extension hook: register custom targets and override operator expanders.
+    "register",
+    "REGISTRY",
+    "ExpanderRegistry",
+    "ExpansionContext",
+    "OperatorExpander",
+    "Target",
+    "Capabilities",
+    "GenericTarget",
+    "DuckDBTarget",
+    "DataFusionTarget",
 ]

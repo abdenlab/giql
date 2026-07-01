@@ -12,7 +12,6 @@ from giql import Table
 from giql.canonicalizer import canonicalize_coordinates
 from giql.dialect import GIQLDialect
 from giql.expander import ExpandOperators
-from giql.generators import BaseGIQLGenerator
 from giql.resolver import resolve_operator_refs
 from giql.table import Tables
 from giql.targets import DataFusionTarget
@@ -31,7 +30,7 @@ def _generate_for_target(sql: str, tables: Tables, target) -> str:
     ast = resolve_operator_refs(ast, tables)
     ast = canonicalize_coordinates(ast)
     ast = ExpandOperators(target, tables).transform(ast)
-    return BaseGIQLGenerator(tables=tables).generate(ast)
+    return ast.sql()
 
 
 def _generate(sql: str, tables: Tables) -> str:
@@ -49,7 +48,7 @@ def _generate(sql: str, tables: Tables) -> str:
     ast = resolve_operator_refs(ast, tables)
     ast = canonicalize_coordinates(ast)
     ast = ExpandOperators(GenericTarget(), tables).transform(ast)
-    return BaseGIQLGenerator(tables=tables).generate(ast)
+    return ast.sql()
 
 
 @pytest.fixture
@@ -287,6 +286,39 @@ class TestNearestDataFusionFallbackShape:
         assert "<= 3" in output
         assert "LATERAL" not in output.upper()
 
+    def test_fallback_preserves_signed_and_max_distance(
+        self, tables_with_peaks_and_genes
+    ):
+        """Test the DataFusion fallback keeps signed distance and the max filter.
+
+        Given:
+            A correlated NEAREST(signed := true, max_distance := 100000) on the
+            DataFusion target (the decorrelated window path).
+        When:
+            Transpiling.
+        Then:
+            The window form should retain the signed distance CASE (`ELSE -(`)
+            and the `<= 100000` max-distance filter — the `signed`/`max_distance`
+            branches of the shared distance/filter builder on the fallback path.
+        """
+        # Arrange
+        sql = (
+            "SELECT * FROM peaks CROSS JOIN LATERAL NEAREST("
+            "genes, reference := peaks.interval, signed := true, "
+            "max_distance := 100000) AS b"
+        )
+
+        # Act
+        output = _generate_for_target(
+            sql, tables_with_peaks_and_genes, DataFusionTarget()
+        )
+
+        # Assert
+        assert "ROW_NUMBER(" in output.upper()
+        assert "LATERAL" not in output.upper()
+        assert "ELSE -(" in output
+        assert "<= 100000" in output
+
 
 class TestNearestUnaliasedCorrelatedFallback:
     """The fallback synthesizes a LATERAL alias when the user omits one (B3)."""
@@ -410,6 +442,6 @@ class TestNearestFallbackDetachContract:
         # makes the pass's ``node.replace`` a no-op.
         assert nearest.root() is not result
         assert not list(result.find_all(GIQLNearest))
-        output = BaseGIQLGenerator(tables=tables_with_peaks_and_genes).generate(result)
+        output = result.sql()
         assert "LATERAL" not in output.upper()
         assert "ROW_NUMBER(" in output.upper()
