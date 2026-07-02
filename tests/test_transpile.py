@@ -469,6 +469,9 @@ class TestTranspileDialects:
                 "FROM peaks a, genes b",
                 ["peaks", "genes"],
             ),
+            ("SELECT * FROM DISJOIN(peaks)", ["peaks"]),
+            ("SELECT CLUSTER(interval) FROM peaks", ["peaks"]),
+            ("SELECT MERGE(interval) FROM peaks", ["peaks"]),
         ],
         ids=[
             "intersects_literal",
@@ -478,6 +481,9 @@ class TestTranspileDialects:
             "join",
             "any",
             "distance",
+            "disjoin",
+            "cluster",
+            "merge",
         ],
     )
     def test_transpile_datafusion_matches_generic_output(self, query, tables):
@@ -547,6 +553,46 @@ class TestTranspileDialects:
 
         # Assert
         assert generic_sql == duckdb_sql == datafusion_sql
+
+    @pytest.mark.parametrize(
+        "query, tables",
+        [
+            ("SELECT * FROM DISJOIN(peaks)", ["peaks"]),
+            (
+                "SELECT * FROM NEAREST(genes, reference := 'chr1:1000-2000', k := 3)",
+                ["genes"],
+            ),
+            ("SELECT CLUSTER(interval) FROM peaks", ["peaks"]),
+            ("SELECT MERGE(interval) FROM peaks", ["peaks"]),
+        ],
+        ids=["disjoin", "nearest_standalone", "cluster", "merge"],
+    )
+    def test_duckdb_delta_is_only_nulls_ordering(self, query, tables):
+        """Test that duckdb serialization differs from generic only by NULLS order.
+
+        Given:
+            A window-carrying operator query.
+        When:
+            Transpiling for duckdb and for generic and removing every
+            ``NULLS FIRST`` / ``NULLS LAST`` token from both outputs.
+        Then:
+            The two null-ordering-stripped outputs should be identical — so the
+            *only* way duckdb serialization diverges from generic is the explicit
+            null ordering: the duckdb dialect *adds* ``NULLS FIRST`` where generic
+            leaves it implicit (DISJOIN / NEAREST) and *removes* the redundant
+            ``NULLS LAST`` the generic form spells out (CLUSTER / MERGE).
+        """
+
+        # Arrange
+        def _strip_nulls(sql):
+            return sql.replace(" NULLS FIRST", "").replace(" NULLS LAST", "")
+
+        # Act
+        generic_sql = transpile(query, tables=tables, dialect=None)
+        duckdb_sql = transpile(query, tables=tables, dialect="duckdb")
+
+        # Assert
+        assert _strip_nulls(duckdb_sql) == _strip_nulls(generic_sql)
 
     def test_transpile_datafusion_accepts_intersects_bin_size(self):
         """Test that datafusion honours the binned-join bin size identically.

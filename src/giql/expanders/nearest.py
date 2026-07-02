@@ -24,11 +24,11 @@ A literal-reference (standalone) NEAREST is already an uncorrelated subquery, so
 every target — DataFusion included — uses the LATERAL/standalone form unchanged;
 only the *correlated* shape needs the fallback.
 
-The expander reuses :class:`giql.generators.base.BaseGIQLGenerator`'s
-``_generate_distance_case`` (shared with DISTANCE, #140) and ``_nearest_*``
-passthrough/diagnostic helpers — all static, so they are called on the class with
-no generator instance — then parses the assembled SQL fragments into AST so the
-emitted SQL is reserialized by the active target's serializer.
+The expander assembles its distance/passthrough/filter SQL as string fragments
+(the ``_nearest_*`` helpers below and
+:func:`giql.expanders._distance.generate_distance_case`, shared in spirit with
+DISTANCE, #140), then parses the assembled fragments into AST so the emitted SQL
+is reserialized by the active target's serializer.
 """
 
 from __future__ import annotations
@@ -36,14 +36,21 @@ from __future__ import annotations
 from sqlglot import exp
 from sqlglot import parse_one
 
+from giql.canonical import decanonical_end
+from giql.canonical import decanonical_start
 from giql.dialect import GIQLDialect
 from giql.expander import EXPAND_ALIAS_PREFIX
 from giql.expander import ExpansionContext
 from giql.expander import register
+from giql.expanders._distance import generate_distance_case
+from giql.expanders._params import coerce_bool_param
 from giql.expressions import GIQLNearest
-from giql.generators.base import BaseGIQLGenerator
+from giql.range_parser import RangeParser
+from giql.resolver import META_KEY
+from giql.resolver import OperatorResolution
 from giql.resolver import ResolvedInterval
 from giql.resolver import ResolvedRef
+from giql.table import Table
 from giql.targets import Capabilities
 from giql.targets import GenericTarget
 
@@ -56,6 +63,146 @@ _RANK_COL = f"{EXPAND_ALIAS_PREFIX}rn"
 _REF_KEY_PREFIX = f"{EXPAND_ALIAS_PREFIX}rk_"
 
 
+def _nearest_output_encoding(
+    expression: GIQLNearest, target_ref: ResolvedRef
+) -> Table | None:
+    """Return the target's declared encoding for NEAREST's row passthrough.
+
+    ``CanonicalizeCoordinates`` (pass 2) records the original
+    :class:`~giql.table.Table` on the resolution when it wraps a non-canonical
+    target in a ``__giql_canon_*`` CTE (blanking the slot's own ``table``). For
+    an unwrapped target — a canonical registered table, or any target when the
+    pass did not run — the slot's own ``table`` carries the (identity) encoding.
+
+    :param expression:
+        GIQLNearest expression node
+    :param target_ref:
+        The resolved target reference (post pass 2)
+    :return:
+        The target's declared :class:`~giql.table.Table`, or ``None``
+    """
+    resolution = expression.meta.get(META_KEY)
+    if isinstance(resolution, OperatorResolution):
+        preserved = resolution.output_tables.get("this")
+        if preserved is not None:
+            return preserved
+    return target_ref.table
+
+
+def _nearest_passthrough(
+    table_name: str,
+    target_start: str,
+    target_end: str,
+    output_table: Table | None,
+    capabilities: Capabilities,
+) -> str:
+    """Project the target's full row, de-canonicalizing the interval columns.
+
+    NEAREST passes the whole target row through (``SELECT {table_name}.*``)
+    alongside the synthesized, encoding-invariant ``distance`` column. When the
+    target's declared encoding is canonical 0-based half-open the row passes
+    through as a plain ``{table_name}.*`` — the byte-identical identity fast
+    path. When it is non-canonical the interval columns, canonical inside the
+    ``__giql_canon_*`` CTE the target was rewritten to, are de-canonicalized
+    back into that encoding so the passed-through interval matches the target's
+    own convention.
+
+    The emit strategy is chosen from *capabilities*, following the precedent of
+    :func:`giql.expanders.disjoin._disjoin_passthrough` (issue #145) — the same
+    two emit forms:
+
+    * ``{table_name}.* REPLACE (...)`` when ``supports_star_replace`` holds —
+      substitutes start/end in place;
+    * the portable ``{table_name}.* EXCEPT (start, end), <start>, <end>`` form
+      otherwise (the generic baseline / DataFusion family). Row-equivalent but
+      not column-order-equivalent, and not DuckDB-runnable.
+
+    :param table_name:
+        The relation the row is selected from (the canon CTE name when wrapped,
+        else the registered table name) — also the column qualifier.
+    :param target_start:
+        Physical start column name
+    :param target_end:
+        Physical end column name
+    :param output_table:
+        The target's declared :class:`~giql.table.Table`, or ``None``
+    :param capabilities:
+        The active target's :class:`~giql.targets.Capabilities`.
+    :return:
+        The passthrough projection fragment
+    """
+    if output_table is None or (
+        output_table.coordinate_system == "0based"
+        and output_table.interval_type == "half_open"
+    ):
+        return f"{table_name}.*"
+    pt_start = decanonical_start(f'{table_name}."{target_start}"', output_table)
+    pt_end = decanonical_end(f'{table_name}."{target_end}"', output_table)
+    if capabilities.supports_star_replace:
+        return (
+            f"{table_name}.* REPLACE "
+            f'({pt_start} AS "{target_start}", {pt_end} AS "{target_end}")'
+        )
+    # Portable form for engines without ``* REPLACE`` (generic / DataFusion):
+    # drop the interval columns from the star and re-project them recomputed.
+    return (
+        f'{table_name}.* EXCEPT ("{target_start}", "{target_end}"), '
+        f'{pt_start} AS "{target_start}", {pt_end} AS "{target_end}"'
+    )
+
+
+def _raise_nearest_reference_error(
+    expression: GIQLNearest,
+    resolution: OperatorResolution | None,
+) -> None:
+    """Raise the historical diagnostic for an unresolved NEAREST reference.
+
+    ResolveOperatorRefs (pass 1) defers a reference slot it cannot resolve; this
+    re-raises the historical pre-pass error verbatim. The implicit-outer failures
+    rely on the :class:`~giql.resolver.SlotDeferral` the pass records (the
+    ancestor walk that distinguished them now lives in the pass); a literal-range
+    parse failure is reproduced by re-parsing.
+
+    :param expression:
+        GIQLNearest expression node
+    :param resolution:
+        The attached resolution metadata, if any
+    :raises ValueError:
+        Always — with the matching historical message
+    """
+    reference = expression.args.get("reference")
+
+    if reference is None:
+        # An absent reference is a correlated (implicit-outer) placement that the
+        # resolver could not tie to a registered outer table; consult the
+        # recorded deferral for the specific historical message.
+        deferral = (
+            resolution.deferral("reference") if resolution is not None else None
+        )
+        if deferral is not None and deferral.reason == "implicit_outer_unregistered":
+            raise ValueError(
+                f"Outer table '{deferral.detail}' not found in tables. "
+                "Please specify reference parameter explicitly."
+            )
+        raise ValueError(
+            "Could not find outer table in LATERAL join context. "
+            "Please specify reference parameter explicitly."
+        )
+
+    # An explicit reference that deferred is a literal range that failed to
+    # parse (column references always resolve). Re-parse to surface the
+    # original parse error in the historical message.
+    reference_sql = reference.sql(dialect=GIQLDialect)
+    range_str = reference_sql.strip("'\"")
+    try:
+        RangeParser.parse(range_str).to_zero_based_half_open()
+    except Exception as e:
+        raise ValueError(
+            f"Could not parse reference genomic range: {range_str}. Error: {e}"
+        )
+    raise ValueError(f"Could not parse reference genomic range: {range_str}.")
+
+
 def _nearest_params(
     expression: GIQLNearest,
 ) -> tuple[int, int | None, bool, bool]:
@@ -66,8 +213,8 @@ def _nearest_params(
     max_distance = expression.args.get("max_distance")
     max_dist_value = int(str(max_distance)) if max_distance else None
 
-    is_stranded = BaseGIQLGenerator._extract_bool_param(expression.args.get("stranded"))
-    is_signed = BaseGIQLGenerator._extract_bool_param(expression.args.get("signed"))
+    is_stranded = coerce_bool_param(expression.args.get("stranded"))
+    is_signed = coerce_bool_param(expression.args.get("signed"))
     return k_value, max_dist_value, is_stranded, is_signed
 
 
@@ -89,9 +236,9 @@ def _distance_and_filters(
     ORDER BY tiebreaker from the target columns itself.
 
     ``capabilities`` is the active target's :class:`~giql.targets.Capabilities`,
-    forwarded to :meth:`BaseGIQLGenerator._nearest_passthrough` to choose the
-    target's de-canonicalization emit form (``* REPLACE`` vs the portable
-    ``* EXCEPT``); both call sites pass ``ctx.capabilities``.
+    forwarded to :func:`_nearest_passthrough` to choose the target's
+    de-canonicalization emit form (``* REPLACE`` vs the portable ``* EXCEPT``);
+    both call sites pass ``ctx.capabilities``.
 
     ``ref_fragments`` optionally overrides the reference ``(chrom, start, end,
     strand)`` SQL fragments. The LATERAL form consumes the resolution's
@@ -103,8 +250,8 @@ def _distance_and_filters(
     target_chrom, target_start, target_end = target_ref.cols
     _k_value, max_dist_value, is_stranded, is_signed = _nearest_params(expression)
 
-    output_table = BaseGIQLGenerator._nearest_output_encoding(expression, target_ref)
-    passthrough = BaseGIQLGenerator._nearest_passthrough(
+    output_table = _nearest_output_encoding(expression, target_ref)
+    passthrough = _nearest_passthrough(
         table_name, target_start, target_end, output_table, capabilities
     )
 
@@ -129,7 +276,7 @@ def _distance_and_filters(
     target_start_expr = f'{table_name}."{target_start}"'
     target_end_expr = f'{table_name}."{target_end}"'
 
-    distance_expr = BaseGIQLGenerator._generate_distance_case(
+    distance_expr = generate_distance_case(
         ref_chrom,
         ref_start,
         ref_end,
@@ -466,8 +613,7 @@ def expand_nearest(node: exp.Expression, ctx: ExpansionContext) -> exp.Expressio
 
     ref = resolution.slot("reference")
     if not isinstance(ref, ResolvedInterval):
-        mode = BaseGIQLGenerator._detect_nearest_mode(node)
-        BaseGIQLGenerator._raise_nearest_reference_error(node, mode, resolution)
+        _raise_nearest_reference_error(node, resolution)
 
     # A literal-range reference is uncorrelated even under CROSS JOIN LATERAL: its
     # endpoints are constants, not outer-row columns, so the subquery stands alone

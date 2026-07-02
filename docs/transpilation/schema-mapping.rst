@@ -198,6 +198,11 @@ If your data uses 1-based coordinates (like VCF or GFF), configure the
    at transpile time and raises a ``ValueError`` naming the missing column(s)
    rather than emitting SQL that fails with an engine ``column not found`` error.
 
+   The projection form is chosen from the active target's
+   :class:`~giql.targets.Capabilities` (``supports_star_replace``). A custom
+   engine can select either form by registering a target with the appropriate
+   capabilities -- see :doc:`extending`.
+
 Working with Point Features
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

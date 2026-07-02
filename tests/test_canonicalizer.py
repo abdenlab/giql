@@ -26,7 +26,6 @@ from giql.expressions import GIQLDisjoin
 from giql.expressions import GIQLDistance
 from giql.expressions import GIQLNearest
 from giql.expressions import Intersects
-from giql.generators import BaseGIQLGenerator
 from giql.resolver import META_KEY
 from giql.resolver import resolve_operator_refs
 from giql.table import Table
@@ -114,7 +113,7 @@ class TestNoOpWhenFlagsOff:
         # now goes through its registered expander, so the pass-bypassed reference
         # must too, isolating pass 2's contribution to nothing.
         ast = ExpandOperators(GenericTarget(), tables).transform(ast)
-        expected = BaseGIQLGenerator(tables=tables).generate(ast)
+        expected = ast.sql()
 
         # Act
         actual = transpile(query, tables=[Table("variants")])
@@ -146,7 +145,7 @@ class TestNoOpWhenFlagsOff:
         # now expands through its registry entry, so the pass-bypassed reference
         # must run pass 3 too for the byte-identical comparison to isolate pass 2.
         ast = ExpandOperators(GenericTarget(), tables).transform(ast)
-        expected = BaseGIQLGenerator(tables=tables).generate(ast)
+        expected = ast.sql()
 
         # Act
         actual = transpile(query, tables=[variants])

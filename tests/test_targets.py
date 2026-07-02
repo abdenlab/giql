@@ -2,15 +2,23 @@
 
 import re
 from dataclasses import FrozenInstanceError
+from dataclasses import dataclass
 
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
+from sqlglot import parse_one
 
+from giql import REGISTRY
+from giql import ExpansionContext
+from giql import register
+from giql import transpile
+from giql.expressions import Within
 from giql.targets import Capabilities
 from giql.targets import DataFusionTarget
 from giql.targets import DuckDBTarget
 from giql.targets import GenericTarget
+from giql.targets import Target
 from giql.targets import resolve_target
 
 
@@ -326,7 +334,7 @@ def test_resolve_target_with_unsupported_dialect_raises(dialect):
     pattern = (
         re.escape(f"Unknown dialect: {dialect!r}.")
         + r".*"
-        + re.escape("'duckdb', 'datafusion', or None.")
+        + re.escape("'duckdb', 'datafusion', None,")
     )
     with pytest.raises(ValueError, match=pattern):
         resolve_target(dialect)
@@ -347,3 +355,266 @@ def test_resolve_target_with_arbitrary_unsupported_string_raises(dialect):
     # Act & assert
     with pytest.raises(ValueError, match="Unknown dialect"):
         resolve_target(dialect)
+
+
+@dataclass(frozen=True)
+class _PostgresTarget(Target):
+    """A capability-only custom target used to exercise the plugin hub."""
+
+    name: str = "postgres"
+    sqlglot_dialect: str | None = "postgres"
+    capabilities: Capabilities = Capabilities(
+        supports_lateral=True,
+        supports_star_replace=False,
+        supports_qualify=True,
+        range_join_strategy="binned",
+    )
+
+
+#: The process-wide REGISTRY state at import (built-in expanders). The custom
+#: target tests below mutate the global registry, so — mirroring test_expander.py
+#: — an autouse guard asserts the baseline is restored at every test boundary,
+#: catching any leaked target/expander (e.g. the "postgres" name this file both
+#: registers and, elsewhere, expects to be unresolved) deterministically.
+_REGISTRY_BASELINE = REGISTRY.snapshot()
+
+
+@pytest.fixture(autouse=True)
+def _registry_leak_guard():
+    assert REGISTRY.snapshot() == _REGISTRY_BASELINE, (
+        "REGISTRY differed from its baseline entering a test"
+    )
+    yield
+    assert REGISTRY.snapshot() == _REGISTRY_BASELINE, (
+        "a test leaked a registration into REGISTRY"
+    )
+
+
+@pytest.fixture
+def clean_registry():
+    saved = REGISTRY.snapshot()
+    try:
+        yield
+    finally:
+        REGISTRY.restore(saved)
+
+
+class TestCustomTargetInjection:
+    """Registering a custom target makes it selectable via ``transpile``."""
+
+    def test_register_target_makes_custom_target_resolvable(self, clean_registry):
+        """Test that a declared custom target resolves by name.
+
+        Given:
+            A custom Target declared through REGISTRY.register_target.
+        When:
+            resolve_target is called with its name.
+        Then:
+            It should return that exact target instance.
+        """
+        # Arrange
+        target = _PostgresTarget()
+        REGISTRY.register_target(target)
+
+        # Act & assert
+        assert resolve_target("postgres") is target
+
+    def test_transpile_resolves_capability_only_custom_target(self, clean_registry):
+        """Test end-to-end transpilation against a capability-only custom target.
+
+        Given:
+            A custom target that overrides no operators, only its capabilities.
+        When:
+            A WITHIN query is transpiled with dialect set to its name.
+        Then:
+            It should transpile through the generic expanders (its
+            ``supports_star_replace=False`` selects the portable form) rather
+            than raising ``Unknown dialect``.
+        """
+        # Arrange
+        REGISTRY.register_target(_PostgresTarget())
+        query = "SELECT * FROM peaks WHERE interval WITHIN 'chr1:1000-5000'"
+
+        # Act
+        output = transpile(query, tables=["peaks"], dialect="postgres")
+
+        # Assert
+        assert output == transpile(query, tables=["peaks"])  # generic form
+
+    def test_register_auto_declares_its_target(self, clean_registry):
+        """Test that registering an expander also declares its target by name.
+
+        Given:
+            An operator expander registered against a custom target via
+            @register, with no separate register_target call.
+        When:
+            resolve_target is called with the target's name.
+        Then:
+            It should resolve the custom target (declared as a side effect).
+        """
+
+        # Arrange
+        @register(_PostgresTarget, Within)
+        def _noop(node, ctx: ExpansionContext):
+            return node
+
+        # Act & assert
+        assert resolve_target("postgres") == _PostgresTarget()
+
+    def test_operator_override_on_custom_target_changes_output(self, clean_registry):
+        """Test that a per-target expander override reshapes the emitted SQL.
+
+        Given:
+            A custom target with a WITHIN expander registered that emits a
+            BETWEEN predicate instead of the generic two-sided comparison.
+        When:
+            A WITHIN query is transpiled against that target.
+        Then:
+            The emitted SQL should carry the override's BETWEEN form.
+        """
+
+        # Arrange
+        @register(_PostgresTarget, Within)
+        def _within_between(node, ctx: ExpansionContext):
+            col = ctx.resolution.column("this")
+            return parse_one(f"{col.start} BETWEEN 1000 AND 5000")
+
+        query = "SELECT * FROM peaks WHERE interval WITHIN 'chr1:1000-5000'"
+
+        # Act
+        output = transpile(query, tables=["peaks"], dialect="postgres")
+
+        # Assert
+        assert "BETWEEN 1000 AND 5000" in output
+
+    def test_register_target_skips_generic(self, clean_registry):
+        """Test that GenericTarget is never selectable by the name "generic".
+
+        Given:
+            An attempt to declare GenericTarget on the registry.
+        When:
+            resolve_target is called with "generic".
+        Then:
+            It should still raise (None is the sole way to select the generic
+            target), because register_target is a no-op for GenericTarget.
+        """
+        # Arrange
+        REGISTRY.register_target(GenericTarget())
+
+        # Act & assert
+        assert REGISTRY.target("generic") is None
+        with pytest.raises(ValueError, match="Unknown dialect"):
+            resolve_target("generic")
+
+    def test_resolve_target_builtin_name_shadows_registry(self, clean_registry):
+        """Test that a built-in dialect name resolves the built-in, not a shadow.
+
+        Given:
+            A custom Target registered under a built-in name ("duckdb").
+        When:
+            resolve_target is called with that name.
+        Then:
+            It should return the built-in DuckDBTarget — ``_TARGETS_BY_NAME`` is
+            consulted before the plugin registry, so a custom target cannot
+            hijack a reserved name.
+        """
+
+        # Arrange
+        @dataclass(frozen=True)
+        class _ShadowTarget(Target):
+            name: str = "duckdb"
+            sqlglot_dialect: str | None = "postgres"
+            capabilities: Capabilities = Capabilities(
+                supports_lateral=True,
+                supports_star_replace=False,
+                supports_qualify=False,
+                range_join_strategy="binned",
+            )
+
+        REGISTRY.register_target(_ShadowTarget())
+
+        # Act
+        resolved = resolve_target("duckdb")
+
+        # Assert
+        assert type(resolved) is DuckDBTarget
+
+    def test_resolve_target_error_names_custom_registration_path(self):
+        """Test that the unknown-dialect error points at the plugin registry.
+
+        Given:
+            A dialect name that is neither built-in nor registered.
+        When:
+            resolve_target is called with it.
+        Then:
+            The ValueError message should mention register_target, guiding the
+            user toward the custom-target extension path.
+        """
+        # Act & assert
+        with pytest.raises(ValueError, match="register_target"):
+            resolve_target("no-such-engine")
+
+
+class TestTargetDrivesSerialization:
+    """The active target's ``sqlglot_dialect`` selects the stock serializer."""
+
+    def test_duckdb_dialect_emits_engine_specific_ordering(self):
+        """Test that the duckdb target serializes through the duckdb dialect.
+
+        Given:
+            A DISJOIN query whose expansion carries a window ORDER BY.
+        When:
+            It is transpiled for the duckdb target versus the generic target.
+        Then:
+            The duckdb output should make DuckDB's default null ordering
+            explicit (``NULLS FIRST``) while the generic (dialect-less) output
+            should not — confirming ``sqlglot_dialect`` drives serialization.
+        """
+        # Arrange
+        query = "SELECT * FROM DISJOIN(peaks)"
+
+        # Act
+        generic_sql = transpile(query, tables=["peaks"])
+        duckdb_sql = transpile(query, tables=["peaks"], dialect="duckdb")
+
+        # Assert
+        assert "NULLS FIRST" in duckdb_sql
+        assert "NULLS FIRST" not in generic_sql
+
+    def test_custom_target_sqlglot_dialect_drives_serialization(self, clean_registry):
+        """Test that a registered custom target's sqlglot_dialect reaches ast.sql.
+
+        Given:
+            A capability-only custom target whose ``sqlglot_dialect="duckdb"``.
+        When:
+            A window-carrying operator (DISJOIN) is transpiled under its name
+            versus the generic (dialect-less) target.
+        Then:
+            The custom output should carry the duckdb-dialect ``NULLS FIRST``
+            that the generic output lacks — proving a *registered* target's
+            ``sqlglot_dialect`` is threaded into serialization, not only a
+            built-in's.
+        """
+
+        # Arrange
+        @dataclass(frozen=True)
+        class _DuckLikeTarget(Target):
+            name: str = "ducklike"
+            sqlglot_dialect: str | None = "duckdb"
+            capabilities: Capabilities = Capabilities(
+                supports_lateral=True,
+                supports_star_replace=False,
+                supports_qualify=False,
+                range_join_strategy="binned",
+            )
+
+        REGISTRY.register_target(_DuckLikeTarget())
+        query = "SELECT * FROM DISJOIN(peaks)"
+
+        # Act
+        generic_sql = transpile(query, tables=["peaks"])
+        custom_sql = transpile(query, tables=["peaks"], dialect="ducklike")
+
+        # Assert
+        assert "NULLS FIRST" in custom_sql
+        assert "NULLS FIRST" not in generic_sql

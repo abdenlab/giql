@@ -1,7 +1,7 @@
 """The operator-expander registry and the ``ExpandOperators`` pass (epic #137).
 
-This module is step 2 of epic #137. It lands the dispatch infrastructure that the
-remaining steps migrate each operator onto, one at a time:
+This module provides the dispatch infrastructure every GIQL operator expands
+through (epic #137, complete):
 
 * an :class:`OperatorExpander` protocol — ``expand(node, ctx) -> exp.Expression``,
   the unit that turns one GIQL operator node into standard sqlglot AST for the
@@ -11,8 +11,7 @@ remaining steps migrate each operator onto, one at a time:
   :class:`~giql.targets.Target` and its :class:`~giql.targets.Capabilities`,
   collision-safe alias minting, and the registered :class:`~giql.table.Tables`;
 * a :class:`ExpanderRegistry` keyed by ``(target, operator_type)`` resolving an
-  expander through the fallback chain ``(target, op)`` → ``(generic, op)`` →
-  the legacy ``*_sql`` emitter;
+  expander through the fallback chain ``(target, op)`` → ``(generic, op)``;
 * a :func:`register` decorator — the **public extension hook** by which a user
   adds a target or overrides an operator for one, e.g.
   ``@register(DuckDBTarget, GIQLDisjoin)``;
@@ -26,29 +25,25 @@ remaining steps migrate each operator onto, one at a time:
   ``(DuckDBTarget(), GIQLDisjoin) in REGISTRY`` tests for one;
 * the :class:`ExpandOperators` pass, which runs after
   :func:`giql.canonicalizer.canonicalize_coordinates`, walks the AST, and
-  replaces every opted-in GIQL operator node with the registry's expansion.
+  replaces every GIQL operator node with the registry's expansion.
 
-Gating (mirrors ``GIQL_CANONICALIZE``)
---------------------------------------
-The pass is gated per operator by a ``GIQL_EXPAND`` class attribute on the
-operator's expression class, exactly as pass 2 is gated by ``GIQL_CANONICALIZE``.
-An operator takes the new AST-expansion path **only when both** hold:
-
-* its class sets ``GIQL_EXPAND = True``, and
-* the registry resolves an expander for ``(active target, operator type)`` —
-  i.e. a ``(target, op)`` or ``(generic, op)`` expander is registered.
-
-Otherwise it falls through to the legacy ``*_sql`` emitter on
-:class:`giql.generators.base.BaseGIQLGenerator`. The built-in expanders register
-at import time via :mod:`giql.expanders`; the pass rewrites a node only when
-``GIQL_EXPAND=True`` **and** an expander resolves for ``(active target, operator
-type)``, and is a no-op for any operator that is unflagged or has no registered
-expander. A migration PR registers an expander, flips one operator's
-``GIQL_EXPAND`` flag, and deletes that operator's ``*_sql`` method.
+Dispatch
+--------
+With every operator migrated (epic #137 complete), the pass rewrites *every* GIQL
+operator node: it resolves an expander for ``(active target, operator type)``
+through the registry's fallback chain and replaces the node with the AST that
+expander returns. The built-in expanders register at import time via
+:mod:`giql.expanders`, so a built-in operator always resolves at least a
+``(generic, op)`` expander; a resolution miss is therefore an internal invariant
+violation (an operator with no registered expander) and the pass raises rather
+than leaving an un-serializable GIQL node in the tree. There is no per-operator
+opt-in flag and no legacy ``*_sql`` fallback — both were migration scaffolding
+removed once every operator was migrated (#146).
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Callable
 from typing import Protocol
 from typing import runtime_checkable
@@ -56,6 +51,15 @@ from typing import runtime_checkable
 from sqlglot import exp
 from sqlglot.helper import name_sequence
 
+from giql.expressions import Contains
+from giql.expressions import GIQLCluster
+from giql.expressions import GIQLDisjoin
+from giql.expressions import GIQLDistance
+from giql.expressions import GIQLMerge
+from giql.expressions import GIQLNearest
+from giql.expressions import Intersects
+from giql.expressions import SpatialSetPredicate
+from giql.expressions import Within
 from giql.resolver import META_KEY
 from giql.resolver import OperatorResolution
 from giql.resolver import ResolutionError
@@ -68,6 +72,7 @@ __all__ = [
     "ExpansionContext",
     "OperatorExpander",
     "ExpanderRegistry",
+    "RegistrySnapshot",
     "REGISTRY",
     "register",
     "expand_operators",
@@ -191,6 +196,25 @@ def _as_callable(expander: OperatorExpander | ExpanderFn) -> ExpanderFn:
     )
 
 
+@dataclass(frozen=True)
+class RegistrySnapshot:
+    """An opaque save/restore token for :class:`ExpanderRegistry` state.
+
+    Bundles the ``(target, operator)`` expander map and the declared-target map
+    captured by :meth:`ExpanderRegistry.snapshot`. Hand it back to
+    :meth:`ExpanderRegistry.restore` to return the registry to that state, or
+    compare two snapshots for equality to assert the registry returned to a
+    baseline (the leak-guard use).
+
+    A snapshot is compared by equality and handed to :meth:`restore` only; it is
+    **not** hashable (its two ``dict`` fields are mutable), so ``hash(snapshot)``
+    raises — never use one as a set member or dict key.
+    """
+
+    expanders: dict[tuple[Target, type], ExpanderFn]
+    targets: dict[str, Target]
+
+
 class ExpanderRegistry:
     """Maps ``(target, operator_type)`` to the expander that handles it.
 
@@ -201,7 +225,10 @@ class ExpanderRegistry:
     1. ``(target, op)`` — an expander registered for the *exact* active target;
     2. ``(generic, op)`` — the portable expander registered for
        :class:`~giql.targets.GenericTarget`;
-    3. ``None`` — no expander, so the caller keeps the legacy ``*_sql`` emitter.
+    3. ``None`` — no expander resolves. Every built-in operator registers a
+       ``(generic, op)`` expander, so this only arises for a cleared registry or
+       an operator with no generic fallback; the pass raises rather than emitting
+       (there is no legacy ``*_sql`` fallback).
 
     The registry keys on the frozen, value-equal :class:`~giql.targets.Target`
     *instance* (two ``DuckDBTarget()`` compare and hash alike), so registering
@@ -212,6 +239,7 @@ class ExpanderRegistry:
 
     def __init__(self) -> None:
         self._expanders: dict[tuple[Target, type], ExpanderFn] = {}
+        self._targets_by_name: dict[str, Target] = {}
 
     def register(
         self,
@@ -235,30 +263,72 @@ class ExpanderRegistry:
 
         Notes
         -----
-        A *non-generic* ``(target, operator)`` entry is intended to also act as a
-        join-rewrite override for operators with a built-in whole-query join
-        rewrite (notably :class:`~giql.expressions.Intersects`, whose binned
-        equi-join / DuckDB IEJoin transformers run before expansion), letting a
-        per-target expander assume responsibility for that rewrite. That bypass
-        is intended for a future INTERSECTS consumer and is **not wired by any
-        caller yet** — no transformer consults :meth:`has_override` here (see
-        #141).
+        Registering an expander also declares *target* by name (see
+        :meth:`register_target`), so a custom target becomes selectable via
+        ``transpile(dialect=target.name)`` as soon as any expander is registered
+        against it — a user overriding one operator need not also declare the
+        target separately.
+
+        A *non-generic* ``(target, operator)`` entry additionally acts as a
+        *join-rewrite override* (:meth:`has_override`) for operators with a
+        built-in whole-query join rewrite (notably
+        :class:`~giql.expressions.Intersects`, whose binned equi-join / DuckDB
+        IEJoin transformers run before expansion), letting a per-target expander
+        assume responsibility for that rewrite — :func:`giql.transpile.transpile`
+        consults :meth:`has_override` and bypasses the built-in transformers when
+        it holds.
         """
         self._expanders[(target, operator)] = _as_callable(expander)
+        self.register_target(target)
+
+    def register_target(self, target: Target) -> None:
+        """Declare *target* so ``transpile(dialect=target.name)`` resolves it.
+
+        The registry doubles as the target plugin hub: a custom
+        :class:`~giql.targets.Target` registered here (directly, or as a side
+        effect of :meth:`register`) is resolvable by name through
+        :func:`giql.targets.resolve_target`. This is the path for a
+        *capability-only* target — one that overrides no operators (so it never
+        calls :meth:`register`) but declares a distinct
+        :class:`~giql.targets.Capabilities` set / ``sqlglot_dialect``.
+
+        The built-in :class:`~giql.targets.GenericTarget` is intentionally **not**
+        declared: it is the portable fallback, selected only via ``dialect=None``
+        (see :func:`giql.targets.resolve_target`), never by name. The skip is
+        *by value* (``target == GenericTarget()``), so registering an expander
+        against ``GenericTarget`` is a no-op here — but a *custom*
+        :class:`~giql.targets.Target` subclass is declared under its own ``name``
+        even if that name happens to be ``"generic"`` (it does not compare equal to
+        the built-in). A later registration for the same name replaces an earlier
+        one.
+        """
+        if target == GenericTarget():
+            return
+        self._targets_by_name[target.name] = target
+
+    def target(self, name: str) -> Target | None:
+        """Return the registered custom target named *name*, or ``None``.
+
+        Consulted by :func:`giql.targets.resolve_target` for any dialect name
+        that is not a built-in, so a registered custom target is selectable via
+        ``transpile(dialect=name)``.
+        """
+        return self._targets_by_name.get(name)
 
     def resolve(self, target: Target, operator: type) -> ExpanderFn | None:
         """Return the expander for ``(target, operator)`` via the fallback chain.
 
         Tries the exact ``(target, op)`` entry, then the
-        ``(GenericTarget(), op)`` fallback, then ``None`` (legacy emitter).
+        ``(GenericTarget(), op)`` fallback, then ``None``. ``None`` means no
+        expander is registered; the :class:`ExpandOperators` pass treats that as
+        an internal invariant violation and raises (there is no legacy emitter).
 
-        A non-generic exact ``(target, op)`` entry is also intended to act as a
+        A non-generic exact ``(target, op)`` entry additionally acts as a
         *join-rewrite override* for operators with a built-in whole-query join
-        rewrite (notably :class:`~giql.expressions.Intersects`). That override is
-        intended for a future INTERSECTS consumer and is **not wired by any
-        caller yet** — resolution does not itself bypass the built-in
-        binned / IEJoin transformers (see :meth:`register`, :meth:`has_override`,
-        and #141).
+        rewrite (notably :class:`~giql.expressions.Intersects`); resolution itself
+        does not bypass the built-in binned / IEJoin transformers —
+        :func:`giql.transpile.transpile` does, gated on :meth:`has_override` (see
+        :meth:`register` and #141).
         """
         fn = self._expanders.get((target, operator))
         if fn is not None:
@@ -277,12 +347,13 @@ class ExpanderRegistry:
         ``(GenericTarget(), operator)`` fallback is *not* an override and does not
         count here.
 
-        Such an entry is intended to mark a target-specific override that
-        supersedes built-in handling (e.g. taking responsibility for the
-        whole-query join rewrite the built-in transformers would otherwise
-        perform). That mechanism is intended for a future INTERSECTS consumer and
-        is **not wired by any caller yet** — no transformer consults this method
-        in the current pipeline (see #141).
+        Such an entry marks a target-specific override that supersedes built-in
+        handling (e.g. taking responsibility for the whole-query join rewrite the
+        built-in transformers would otherwise perform).
+        :func:`giql.transpile.transpile` consults this method for
+        ``(target, Intersects)`` and, when it holds, bypasses the built-in
+        binned / IEJoin join transformers so the ``Intersects`` node flows to the
+        registered expander instead (see #141).
         """
         return target != GenericTarget() and (target, operator) in self._expanders
 
@@ -298,38 +369,44 @@ class ExpanderRegistry:
         self._expanders.pop((target, operator), None)
 
     def clear(self) -> None:
-        """Drop every registration.
+        """Drop every registration — both expanders and declared targets.
 
         The bulk form of :meth:`unregister`, and the **public reset** for the
         process-wide :data:`REGISTRY` — e.g. a test fixture that saves and
-        restores the registry around a body that registers custom expanders.
+        restores the registry around a body that registers custom expanders or
+        targets.
         """
         self._expanders.clear()
+        self._targets_by_name.clear()
 
-    def snapshot(self) -> dict[tuple[Target, type], ExpanderFn]:
-        """Return a shallow copy of the current registrations.
+    def snapshot(self) -> RegistrySnapshot:
+        """Return a shallow copy of the current registrations and targets.
 
         The save half of a save/restore seam that supports test
         baseline-isolation: capture the baseline with this and hand it back to
-        :meth:`restore` afterward, so the built-in expanders registered at import
-        survive an isolating fixture that would otherwise :meth:`clear` them
-        permanently.
+        :meth:`restore` afterward, so the built-in registrations survive an
+        isolating fixture that would otherwise :meth:`clear` them permanently.
 
-        The returned dict is a fresh mapping (mutating it does not affect the
-        registry), keyed by the same ``(target, operator)`` tuples.
+        The returned :class:`RegistrySnapshot` is a fresh, opaque value bundling
+        both the ``(target, operator)`` expander map and the declared-target map;
+        mutating the registry afterward does not affect it, and two snapshots
+        compare equal when the registry is in the same state.
         """
-        return dict(self._expanders)
+        return RegistrySnapshot(dict(self._expanders), dict(self._targets_by_name))
 
-    def restore(self, snapshot: dict[tuple[Target, type], ExpanderFn]) -> None:
+    def restore(self, snapshot: RegistrySnapshot) -> None:
         """Replace all registrations with those captured by :meth:`snapshot`.
 
         The restore half of the save/restore seam that supports test
         baseline-isolation. Drops every current entry and re-installs exactly the
-        *snapshot* contents, so a fixture can return the registry to a previously
-        captured baseline regardless of what its body registered or cleared.
+        *snapshot* contents (expanders and declared targets), so a fixture can
+        return the registry to a previously captured baseline regardless of what
+        its body registered or cleared.
         """
         self._expanders.clear()
-        self._expanders.update(snapshot)
+        self._expanders.update(snapshot.expanders)
+        self._targets_by_name.clear()
+        self._targets_by_name.update(snapshot.targets)
 
     def __contains__(self, key: tuple[Target, type]) -> bool:
         """Whether an *exact* ``(target, operator)`` entry is registered.
@@ -359,8 +436,8 @@ class ExpanderRegistry:
 
 #: The process-wide registry the :func:`register` decorator writes to and the
 #: :class:`ExpandOperators` pass reads from. The built-in expanders register into
-#: it at import time via :mod:`giql.expanders`; the pass rewrites a node only when
-#: an expander resolves here (and the operator is flagged ``GIQL_EXPAND``).
+#: it at import time via :mod:`giql.expanders`; the pass rewrites every GIQL
+#: operator node by resolving its expander here.
 REGISTRY = ExpanderRegistry()
 
 
@@ -414,34 +491,21 @@ def register(
     return decorator
 
 
-# The GIQL operator expression classes the pass inspects. Membership alone does
-# not opt an operator in: the per-class ``GIQL_EXPAND`` flag plus a registered
-# expander do (see module docstring). Imported lazily as a precaution; there is no
-# real cycle (``canonicalizer.py`` imports the same classes eagerly at module
-# level), so a later step may hoist these to module scope to match that sibling.
-def _giql_operators() -> tuple[type, ...]:
-    """Return the GIQL operator classes, imported lazily as a precaution."""
-    from giql.expressions import Contains
-    from giql.expressions import GIQLCluster
-    from giql.expressions import GIQLDisjoin
-    from giql.expressions import GIQLDistance
-    from giql.expressions import GIQLMerge
-    from giql.expressions import GIQLNearest
-    from giql.expressions import Intersects
-    from giql.expressions import SpatialSetPredicate
-    from giql.expressions import Within
-
-    return (
-        GIQLDisjoin,
-        GIQLNearest,
-        GIQLDistance,
-        GIQLCluster,
-        GIQLMerge,
-        Intersects,
-        Contains,
-        Within,
-        SpatialSetPredicate,
-    )
+# The GIQL operator expression classes the pass inspects. Every one is migrated,
+# so each resolves an expander through the registry (see module docstring).
+# Imported eagerly at module scope, as ``canonicalizer.py`` imports the same
+# classes: ``giql.expressions`` does not import this module, so there is no cycle.
+_GIQL_OPERATORS: tuple[type, ...] = (
+    GIQLDisjoin,
+    GIQLNearest,
+    GIQLDistance,
+    GIQLCluster,
+    GIQLMerge,
+    Intersects,
+    Contains,
+    Within,
+    SpatialSetPredicate,
+)
 
 
 def expand_operators(
@@ -450,19 +514,17 @@ def expand_operators(
     tables: Tables,
     registry: ExpanderRegistry | None = None,
 ) -> exp.Expression:
-    """Replace each opted-in GIQL operator with its registry expansion.
+    """Replace every GIQL operator node with its registry expansion.
 
     Pass 3 of the normalization pipeline (epic #137). Runs after
-    :func:`giql.canonicalizer.canonicalize_coordinates`. For every GIQL operator
-    node it dispatches to the new AST-expansion path **only when** the operator's
-    class sets ``GIQL_EXPAND = True`` *and* the registry resolves an expander for
-    ``(target, operator type)`` through its fallback chain; otherwise the node is
-    left untouched and the legacy ``*_sql`` emitter handles it.
+    :func:`giql.canonicalizer.canonicalize_coordinates`. Every GIQL operator is
+    migrated, so the pass dispatches *every* operator node: it resolves an expander
+    for ``(target, operator type)`` through the registry's fallback chain and
+    replaces the node with the AST that expander returns. A resolution miss is an
+    internal invariant violation (a built-in operator always has at least a
+    ``(generic, op)`` expander) and raises — there is no legacy ``*_sql`` fallback.
 
-    The pass mutates and returns *expression* in place. It touches only nodes
-    whose operator is flagged ``GIQL_EXPAND`` and resolves an expander; for every
-    other operator it is a no-op, leaving the emitted SQL byte-identical, so the
-    existing suite is the migration oracle.
+    The pass mutates and returns *expression* in place.
 
     Parameters
     ----------
@@ -479,12 +541,11 @@ def expand_operators(
     Returns
     -------
     exp.Expression
-        The same *expression*, with each opted-in operator node that resolves an
-        expander replaced by its target-specific expansion; nodes that are
-        unflagged or resolve no expander are left untouched.
+        The same *expression*, with each operator node replaced by its
+        target-specific expansion.
     """
     reg = registry if registry is not None else REGISTRY
-    operators = _giql_operators()
+    operators = _GIQL_OPERATORS
     alias_seq = name_sequence(EXPAND_ALIAS_PREFIX)
 
     # Collect first, then mutate: replacing nodes mid-walk is unsafe.
@@ -492,11 +553,19 @@ def expand_operators(
     for node in expression.walk():
         if not isinstance(node, operators):
             continue
-        if not getattr(node, "GIQL_EXPAND", False):
-            continue
         fn = reg.resolve(target, type(node))
         if fn is None:
-            continue
+            # Every built-in operator registers at least a ``(generic, op)``
+            # expander at import time, so a miss means the registry was cleared or
+            # a custom target shadowed an operator without providing one — an
+            # internal/config error, not user input. Fail loudly rather than
+            # leaving an un-serializable GIQL node for the stock serializer (there
+            # is no legacy ``*_sql`` fallback anymore).
+            raise ValueError(
+                f"No expander registered for {type(node).__name__} on target "
+                f"{target.name!r}; the ExpandOperators pass cannot leave a GIQL "
+                "operator node un-expanded."
+            )
         pending.append((node, fn))
 
     # Replace deepest-first: replacing an ancestor node detaches any collected

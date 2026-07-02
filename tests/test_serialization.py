@@ -1,6 +1,9 @@
-"""Tests for BaseGIQLGenerator.
+"""Tests for the stock serialization of expanded GIQL ASTs.
 
-Test specification: specs/test_base.md
+Coordinate canonicalization and every operator now expand to standard AST in the
+normalization passes; final SQL is produced by the stock sqlglot serializer
+(``ast.sql()``) rather than a custom generator (epic #137, #146). These tests
+pin that expanded output.
 """
 
 import pytest
@@ -16,7 +19,6 @@ from giql import transpile
 from giql.canonicalizer import canonicalize_coordinates
 from giql.dialect import GIQLDialect
 from giql.expander import ExpandOperators
-from giql.generators import BaseGIQLGenerator
 from giql.resolver import resolve_operator_refs
 from giql.table import Tables
 from giql.targets import GenericTarget
@@ -41,7 +43,7 @@ def _generate_through_passes(sql: str, tables: Tables) -> str:
     ast = resolve_operator_refs(ast, tables)
     ast = canonicalize_coordinates(ast)
     ast = ExpandOperators(GenericTarget(), tables).transform(ast)
-    return BaseGIQLGenerator(tables=tables).generate(ast)
+    return ast.sql()
 
 
 @pytest.fixture
@@ -101,63 +103,14 @@ def tables_mixed_conventions():
     return tables
 
 
-class TestBaseGIQLGenerator:
-    """Tests for BaseGIQLGenerator class."""
-
-    def test_instantiation_defaults(self):
-        """
-        GIVEN no tables provided
-        WHEN Generator is instantiated with defaults
-        THEN Generator has empty Tables.
-        """
-        generator = BaseGIQLGenerator()
-
-        assert generator.tables is not None
-        assert "variants" not in generator.tables
-
-    def test_instantiation_with_tables(self, tables_info):
-        """
-        GIVEN a valid Tables object with table definitions
-        WHEN Generator is instantiated with tables
-        THEN Generator stores tables and can resolve column references.
-        """
-        generator = BaseGIQLGenerator(tables=tables_info)
-
-        assert generator.tables is tables_info
-        assert "variants" in generator.tables
-
-    def test_instantiation_kwargs_forwarding(self):
-        """
-        GIVEN Generator with custom kwargs
-        WHEN Generator is instantiated with **kwargs
-        THEN Generator passes kwargs to parent class.
-        """
-        # The parent Generator class accepts various kwargs like 'pretty'
-        generator = BaseGIQLGenerator(pretty=True)
-
-        # If kwargs forwarding works, generator should have pretty attribute
-        assert generator.pretty is True
-
-    def test_select_sql_basic(self, tables_info):
-        """
-        GIVEN a SELECT expression with FROM clause containing a table
-        WHEN select_sql is called
-        THEN Table context is tracked and alias mapping is built.
-        """
-        sql = "SELECT * FROM variants"
-        ast = parse_one(sql, dialect=GIQLDialect)
-
-        generator = BaseGIQLGenerator(tables=tables_info)
-        output = generator.generate(ast)
-
-        expected = "SELECT * FROM variants"
-        assert output == expected
+class TestGeneratedSQL:
+    """Tests for the SQL produced by expanding + stock-serializing GIQL ASTs."""
 
     def test_select_sql_with_alias(self, tables_info):
         """
-        GIVEN a SELECT with aliased table (e.g., FROM table AS t)
-        WHEN select_sql is called
-        THEN Alias-to-table mapping includes the alias.
+        GIVEN an aliased-table INTERSECTS predicate (FROM variants AS v)
+        WHEN it is expanded and serialized
+        THEN the predicate expands to alias-qualified range checks.
         """
         sql = "SELECT * FROM variants AS v WHERE v.interval INTERSECTS 'chr1:1000-2000'"
 
@@ -170,25 +123,10 @@ class TestBaseGIQLGenerator:
         )
         assert output == expected
 
-    def test_select_sql_with_joins(self, tables_with_two_tables):
-        """
-        GIVEN a SELECT with JOINs
-        WHEN select_sql is called
-        THEN All joined tables and aliases are tracked.
-        """
-        sql = "SELECT * FROM features_a AS a JOIN features_b AS b ON a.id = b.id"
-        ast = parse_one(sql, dialect=GIQLDialect)
-
-        generator = BaseGIQLGenerator(tables=tables_with_two_tables)
-        output = generator.generate(ast)
-
-        expected = "SELECT * FROM features_a AS a JOIN features_b AS b ON a.id = b.id"
-        assert output == expected
-
     def test_intersects_sql_with_literal(self):
         """
         GIVEN an Intersects expression with literal range 'chr1:1000-2000'
-        WHEN intersects_sql is called
+        WHEN it is expanded and serialized
         THEN SQL with chrom = 'chr1' AND start < 2000 AND end > 1000 is generated.
         """
         sql = "SELECT * FROM variants WHERE interval INTERSECTS 'chr1:1000-2000'"
@@ -205,7 +143,7 @@ class TestBaseGIQLGenerator:
         """
         GIVEN an Intersects expression with column-to-column
             (a.interval INTERSECTS b.interval)
-        WHEN intersects_sql is called
+        WHEN it is expanded and serialized
         THEN SQL with column-to-column comparison is generated.
         """
         sql = (
@@ -249,7 +187,7 @@ class TestBaseGIQLGenerator:
     def test_contains_sql_point_query(self):
         """
         GIVEN a Contains expression with point query 'chr1:1000'
-        WHEN contains_sql is called
+        WHEN it is expanded and serialized
         THEN SQL with start <= 1000 AND end > 1000 is generated.
         """
         sql = "SELECT * FROM variants WHERE interval CONTAINS 'chr1:1500'"
@@ -265,7 +203,7 @@ class TestBaseGIQLGenerator:
     def test_contains_sql_range_query(self):
         """
         GIVEN a Contains expression with range query 'chr1:1000-2000'
-        WHEN contains_sql is called
+        WHEN it is expanded and serialized
         THEN SQL with start <= 1000 AND end >= 2000 is generated.
         """
         sql = "SELECT * FROM variants WHERE interval CONTAINS 'chr1:1500-2000'"
@@ -282,7 +220,7 @@ class TestBaseGIQLGenerator:
     def test_contains_sql_column_join(self, tables_with_two_tables):
         """
         GIVEN a Contains expression with column-to-column join
-        WHEN contains_sql is called
+        WHEN it is expanded and serialized
         THEN SQL with left contains right comparison is generated.
         """
         sql = (
@@ -326,7 +264,7 @@ class TestBaseGIQLGenerator:
     def test_within_sql_with_literal(self):
         """
         GIVEN a Within expression with literal range 'chr1:1000-2000'
-        WHEN within_sql is called
+        WHEN it is expanded and serialized
         THEN SQL with start >= 1000 AND end <= 2000 is generated.
         """
         sql = "SELECT * FROM variants WHERE interval WITHIN 'chr1:1000-5000'"
@@ -342,7 +280,7 @@ class TestBaseGIQLGenerator:
     def test_within_sql_column_join(self, tables_with_two_tables):
         """
         GIVEN a Within expression with column-to-column join
-        WHEN within_sql is called
+        WHEN it is expanded and serialized
         THEN SQL with left within right comparison is generated.
         """
         sql = (
@@ -362,7 +300,7 @@ class TestBaseGIQLGenerator:
     def test_spatialsetpredicate_sql_any(self):
         """
         GIVEN a SpatialSetPredicate with ANY quantifier and multiple ranges
-        WHEN spatialsetpredicate_sql is called
+        WHEN it is expanded and serialized
         THEN SQL with OR-combined conditions is generated.
         """
         sql = (
@@ -382,7 +320,7 @@ class TestBaseGIQLGenerator:
     def test_spatialsetpredicate_sql_all(self):
         """
         GIVEN a SpatialSetPredicate with ALL quantifier and multiple ranges
-        WHEN spatialsetpredicate_sql is called
+        WHEN it is expanded and serialized
         THEN SQL with AND-combined conditions is generated.
         """
         sql = (
@@ -810,23 +748,6 @@ class TestBaseGIQLGenerator:
         with pytest.raises(ValueError):
             _generate_through_passes(sql, Tables())
 
-    def test_select_sql_join_without_alias(self, tables_with_two_tables):
-        """
-        GIVEN a SELECT with JOIN where joined table has no alias
-        WHEN select_sql is called
-        THEN Table name is used directly in alias mapping.
-        """
-        sql = "SELECT * FROM features_a JOIN features_b ON features_a.id = features_b.id"
-        ast = parse_one(sql, dialect=GIQLDialect)
-
-        generator = BaseGIQLGenerator(tables=tables_with_two_tables)
-        output = generator.generate(ast)
-
-        expected = (
-            "SELECT * FROM features_a JOIN features_b ON features_a.id = features_b.id"
-        )
-        assert output == expected
-
     def test_expand_nearest_should_use_literal_strand_when_stranded(
         self, tables_with_peaks_and_genes
     ):
@@ -1027,7 +948,7 @@ class TestBaseGIQLGenerator:
     def test_intersects_sql_unqualified_column(self):
         """
         GIVEN an unqualified column reference (no table prefix) in spatial operation
-        WHEN intersects_sql is called
+        WHEN it is expanded and serialized
         THEN Default column names are used without table qualifier.
         """
         sql = "SELECT * FROM variants WHERE interval INTERSECTS 'chr1:1000-2000'"

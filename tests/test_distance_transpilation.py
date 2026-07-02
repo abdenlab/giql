@@ -10,7 +10,6 @@ from giql import transpile
 from giql.canonicalizer import canonicalize_coordinates
 from giql.dialect import GIQLDialect
 from giql.expander import ExpandOperators
-from giql.generators import BaseGIQLGenerator
 from giql.resolver import resolve_operator_refs
 from giql.table import Tables
 from giql.targets import GenericTarget
@@ -32,7 +31,7 @@ def _generate(sql: str, tables: Tables | None = None) -> str:
     ast = resolve_operator_refs(ast, tables)
     ast = canonicalize_coordinates(ast)
     ast = ExpandOperators(GenericTarget(), tables).transform(ast)
-    return BaseGIQLGenerator(tables=tables).generate(ast)
+    return ast.sql()
 
 
 class TestDistanceTranspilation:

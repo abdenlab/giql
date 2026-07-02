@@ -118,12 +118,6 @@ class Intersects(SpatialPredicate):
     """
 
     GIQL_CANONICALIZE = _CANONICALIZE
-    #: Migrated to the ExpandOperators registry (#141). A literal-range or
-    #: residual column-to-column INTERSECTS *predicate* expands through
-    #: ``giql.expanders.intersects``; a column-to-column INTERSECTS *join* is
-    #: consumed by the capability-gated binned / IEJoin pre-pass transformers
-    #: before this pass runs, so the predicate expander never sees it.
-    GIQL_EXPAND = True
 
     GIQL_SLOTS = (
         SlotSpec("this", frozenset({"column"}), required=True),
@@ -138,9 +132,6 @@ class Contains(SpatialPredicate):
     """
 
     GIQL_CANONICALIZE = _CANONICALIZE
-    #: Migrated to the ExpandOperators registry (#141); expands through
-    #: ``giql.expanders.intersects``.
-    GIQL_EXPAND = True
 
     GIQL_SLOTS = (
         SlotSpec("this", frozenset({"column"}), required=True),
@@ -155,9 +146,6 @@ class Within(SpatialPredicate):
     """
 
     GIQL_CANONICALIZE = _CANONICALIZE
-    #: Migrated to the ExpandOperators registry (#141); expands through
-    #: ``giql.expanders.intersects``.
-    GIQL_EXPAND = True
 
     GIQL_SLOTS = (
         SlotSpec("this", frozenset({"column"}), required=True),
@@ -181,9 +169,6 @@ class SpatialSetPredicate(exp.Expression):
     }
 
     GIQL_CANONICALIZE = _CANONICALIZE
-    #: Migrated to the ExpandOperators registry (#141); expands through
-    #: ``giql.expanders.intersects``.
-    GIQL_EXPAND = True
 
     GIQL_SLOTS = (
         SlotSpec("this", frozenset({"column"}), required=True),
@@ -235,14 +220,10 @@ class GIQLCluster(exp.Func):
         "predicate": False,  # pairwise boolean gate (current row vs PREV(col))
     }
 
-    #: Migrated to the ExpandOperators pass (epic #137, issue #144). CLUSTER is
-    #: expanded by ``giql.expanders.cluster`` — a whole-query rewrite into the
-    #: two-level ``lag_calc`` form — replacing the legacy
-    #: ``giql.transformer.ClusterTransformer`` pre-pass transformer. Note CLUSTER
-    #: deliberately does NOT set ``GIQL_CANONICALIZE``: the expander derives its
-    #: columns from the FROM table, so pass 2 is intentionally a no-op here and the
-    #: emitted SQL stays byte-identical to the legacy pre-pass output.
-    GIQL_EXPAND = True
+    # CLUSTER (expanded by ``giql.expanders.cluster`` — a whole-query rewrite into
+    # the two-level ``lag_calc`` form) deliberately does NOT set
+    # ``GIQL_CANONICALIZE``: the expander derives its columns from the FROM table,
+    # so pass 2 is intentionally a no-op here.
 
     @classmethod
     def from_arg_list(cls, args):
@@ -285,14 +266,10 @@ class GIQLMerge(exp.Func):
         "predicate": False,  # pairwise boolean gate (current row vs PREV(col))
     }
 
-    #: Migrated to the ExpandOperators pass (epic #137, issue #144). MERGE is
-    #: expanded by ``giql.expanders.merge`` — a whole-query rewrite into the
-    #: clustered-aggregation form (built on CLUSTER) — replacing the legacy
-    #: ``giql.transformer.MergeTransformer`` pre-pass transformer. Like CLUSTER,
-    #: MERGE deliberately does NOT set ``GIQL_CANONICALIZE`` (columns come from the
-    #: FROM table), so pass 2 is intentionally a no-op and the SQL stays
-    #: byte-identical to the legacy pre-pass output.
-    GIQL_EXPAND = True
+    # MERGE (expanded by ``giql.expanders.merge`` — a whole-query rewrite into the
+    # clustered-aggregation form, built on CLUSTER) deliberately does NOT set
+    # ``GIQL_CANONICALIZE`` (columns come from the FROM table), so pass 2 is
+    # intentionally a no-op here.
 
     @classmethod
     def from_arg_list(cls, args):
@@ -330,10 +307,6 @@ class GIQLDistance(exp.Func):
     }
 
     GIQL_CANONICALIZE = _CANONICALIZE
-    # Migrated to the registry's AST-expansion path (epic #137, issue #140): the
-    # generic expander in giql.expanders.distance builds the CASE; the legacy
-    # giqldistance_sql emitter is gone.
-    GIQL_EXPAND = True
 
     GIQL_SLOTS = (
         SlotSpec("this", frozenset({"column"}), required=True),
@@ -381,11 +354,6 @@ class GIQLNearest(exp.Func):
     #: half-open) operands are left untouched and the emitted SQL stays
     #: byte-identical.
     GIQL_CANONICALIZE = _CANONICALIZE
-    #: Migrated to the ExpandOperators pass (epic #137, issue #142): NEAREST is
-    #: expanded by ``giql.expanders.nearest`` — the portable correlated LATERAL
-    #: subquery where ``supports_lateral`` holds, a decorrelated window-function
-    #: form otherwise. The legacy ``giqlnearest_sql`` emitter has been removed.
-    GIQL_EXPAND = True
 
     GIQL_SLOTS = (
         SlotSpec("this", frozenset({"registered_table"}), required=True),
@@ -435,11 +403,6 @@ class GIQLDisjoin(exp.Func):
     #: (0-based half-open) operands are left unwrapped and the emitted SQL stays
     #: byte-identical.
     GIQL_CANONICALIZE = True
-    #: Opt DISJOIN into the ExpandOperators pass (epic #137, issue #143). DISJOIN
-    #: is migrated to a registered expander (``giql.expanders.disjoin``), so the
-    #: pass replaces the node with the expander's AST and the legacy
-    #: ``giqldisjoin_sql`` emitter is removed.
-    GIQL_EXPAND = True
 
     GIQL_SLOTS = (
         SlotSpec("this", frozenset({"registered_table"}), required=True),
