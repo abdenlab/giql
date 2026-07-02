@@ -136,7 +136,20 @@ def expand_cluster(node: GIQLCluster, ctx: ExpansionContext) -> exp.Expression:
     # re-run the pass over the restructured SELECT to expand any sibling pass-3
     # operators (spatial predicates, DISTANCE) carried into it. Safe from
     # recursion: the CLUSTER node is already replaced by its SUM window. (#144 B1)
-    expand_operators(select, ctx.target, ctx.tables, ctx.registry)
+    #
+    # expand_operators may return a new root (a registered statement finalizer can
+    # wrap it), and its contract requires callers to use the return value rather
+    # than assume in-place mutation, so reinstall a new root in place of `select`.
+    # Today the branch is never taken here — the sole finalizer-registering operator
+    # (a correlated NEAREST fallback) is already a plain join by this deepest-first
+    # re-walk, and its wrapper targets an inner SELECT rather than this re-walk root,
+    # so `result is select` in practice — but honoring the contract keeps the seam
+    # future-proof. A NEAREST fallback whose reserved columns are re-surfaced by this
+    # enclosing CLUSTER `SELECT *` remains a documented residual (#172), not a lost
+    # root.
+    result = expand_operators(select, ctx.target, ctx.tables, ctx.registry)
+    if result is not select:
+        select.replace(result)
     return node
 
 
@@ -229,9 +242,7 @@ def find_projected(select: exp.Select, op_type: type[_T]) -> list[_T]:
     for expression in select.expressions:
         if isinstance(expression, op_type):
             found.append(expression)
-        elif isinstance(expression, exp.Alias) and isinstance(
-            expression.this, op_type
-        ):
+        elif isinstance(expression, exp.Alias) and isinstance(expression.this, op_type):
             found.append(expression.this)
     return found
 

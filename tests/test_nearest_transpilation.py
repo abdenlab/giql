@@ -4,6 +4,8 @@ Tests verify that NEAREST() is correctly transpiled to SQL
 (LATERAL joins for correlated queries, ORDER BY + LIMIT for standalone).
 """
 
+import re
+
 import pytest
 from sqlglot import parse_one
 
@@ -445,3 +447,418 @@ class TestNearestFallbackDetachContract:
         output = result.sql()
         assert "LATERAL" not in output.upper()
         assert "ROW_NUMBER(" in output.upper()
+
+
+#: The reserved rank/key columns the decorrelated fallback exposes on its join and
+#: that the statement finalizer must project away from a surfacing star (#160).
+_RESERVED_FALLBACK_COLUMNS = (
+    "__giql_x_rk_chrom",
+    "__giql_x_rk_start",
+    "__giql_x_rk_end",
+    "__giql_x_rn",
+)
+
+#: The extra reserved key the fallback exposes in the stranded case (strand joins
+#: the partition/reference key), on top of ``_RESERVED_FALLBACK_COLUMNS``.
+_STRAND_RESERVED_COLUMN = "__giql_x_rk_strand"
+
+
+def _wrapper_except_names(output: str) -> set[str] | None:
+    """Return the excepted column names of a top-level ``SELECT * EXCEPT (...)``.
+
+    Extracts the names from the leading ``SELECT * EXCEPT (...)`` clause so the wrap
+    can be asserted by exact set rather than substring membership (which would pass
+    with an extra, missing, or misquoted column). Returns ``None`` when *output* is
+    not such a wrapper. The clause is parsed by string slice because sqlglot's
+    default parser does not round-trip a ``* EXCEPT`` list back into a ``Star``
+    except-set.
+    """
+    prefix = "SELECT * EXCEPT ("
+    if not output.startswith(prefix):
+        return None
+    inner = output[len(prefix) :]
+    names = inner[: inner.index(")")].split(",")
+    return {name.strip().strip('"') for name in names}
+
+
+class TestNearestFallbackReservedColumnProjection:
+    """The statement finalizer that hides the fallback's reserved columns (#160).
+
+    The DataFusion decorrelated fallback must expose reserved rank/key columns on
+    the rewritten join, which a ``SELECT *`` / ``b.*`` would leak. A registered
+    statement finalizer wraps the enclosing ``SELECT`` in ``SELECT * EXCEPT (...)``
+    when — and only when — a star projection surfaces them. These assert the wrap
+    shape without an engine; the cross-target result identity is covered by the
+    oracle.
+    """
+
+    def test_expand_nearest_should_wrap_star_except_reserved_when_b_star_on_datafusion(
+        self, tables_with_peaks_and_genes
+    ):
+        """Test a correlated ``SELECT b.*`` fallback is wrapped in ``* EXCEPT``.
+
+        Given:
+            A correlated NEAREST projected as ``SELECT b.*`` on the DataFusion
+            target (no LATERAL plan, so the decorrelated fallback runs).
+        When:
+            Transpiling.
+        Then:
+            The output should be a top-level ``SELECT * EXCEPT (...)`` wrapper whose
+            ``EXCEPT`` name-set equals exactly the reserved columns, hiding them
+            from output.
+        """
+        # Arrange
+        sql = (
+            "SELECT b.* FROM peaks a "
+            "CROSS JOIN LATERAL NEAREST(genes, reference := a.interval, k := 1) b"
+        )
+
+        # Act
+        output = _generate_for_target(
+            sql, tables_with_peaks_and_genes, DataFusionTarget()
+        )
+
+        # Assert
+        assert _wrapper_except_names(output) == set(_RESERVED_FALLBACK_COLUMNS)
+
+    def test_expand_nearest_should_wrap_star_except_reserved_when_unqualified_star_on_datafusion(  # noqa: E501
+        self, tables_with_peaks_and_genes
+    ):
+        """Test a correlated unqualified ``SELECT *`` fallback is wrapped.
+
+        Given:
+            A correlated NEAREST projected as unqualified ``SELECT *`` on the
+            DataFusion target — the star pulls the join relation's reserved
+            columns.
+        When:
+            Transpiling.
+        Then:
+            The output should be a top-level ``SELECT * EXCEPT (...)`` wrapper whose
+            ``EXCEPT`` name-set equals exactly the reserved columns.
+        """
+        # Arrange
+        sql = (
+            "SELECT * FROM peaks a "
+            "CROSS JOIN LATERAL NEAREST(genes, reference := a.interval, k := 1) b"
+        )
+
+        # Act
+        output = _generate_for_target(
+            sql, tables_with_peaks_and_genes, DataFusionTarget()
+        )
+
+        # Assert
+        assert _wrapper_except_names(output) == set(_RESERVED_FALLBACK_COLUMNS)
+
+    def test_expand_nearest_should_not_wrap_when_projection_is_explicit_on_datafusion(
+        self, tables_with_peaks_and_genes
+    ):
+        """Test an explicitly-projected fallback query is not wrapped.
+
+        Given:
+            A correlated NEAREST projecting named columns (``SELECT a.start,
+            b.start``) on the DataFusion target — no reserved column surfaces.
+        When:
+            Transpiling.
+        Then:
+            No ``* EXCEPT`` wrapper should be added (wrapping absent columns would
+            fail at engine runtime).
+        """
+        # Arrange
+        sql = (
+            "SELECT a.start, b.start FROM peaks a "
+            "CROSS JOIN LATERAL NEAREST(genes, reference := a.interval, k := 1) b"
+        )
+
+        # Act
+        output = _generate_for_target(
+            sql, tables_with_peaks_and_genes, DataFusionTarget()
+        )
+
+        # Assert
+        assert "EXCEPT" not in output
+
+    def test_expand_nearest_should_not_wrap_when_star_nests_over_explicit_inner_on_datafusion(  # noqa: E501
+        self, tables_with_peaks_and_genes
+    ):
+        """Test an outer ``SELECT *`` over an explicit inner fallback is not wrapped.
+
+        Given:
+            A correlated NEAREST whose reserved columns stay inside an inner
+            subquery that projects only named columns, with an outer ``SELECT *``
+            over it on the DataFusion target.
+        When:
+            Transpiling.
+        Then:
+            No wrapper should be added anywhere — the inner select does not surface
+            the reserved columns, so the outer ``*`` is clean (the false-positive
+            regression guard).
+        """
+        # Arrange
+        sql = (
+            "SELECT * FROM (SELECT a.start AS s FROM peaks a "
+            "CROSS JOIN LATERAL NEAREST(genes, reference := a.interval, k := 1) b) sub"
+        )
+
+        # Act
+        output = _generate_for_target(
+            sql, tables_with_peaks_and_genes, DataFusionTarget()
+        )
+
+        # Assert
+        assert "EXCEPT" not in output
+
+    def test_expand_nearest_should_wrap_inner_select_when_star_nests_over_b_star_on_datafusion(  # noqa: E501
+        self, tables_with_peaks_and_genes
+    ):
+        """Test the wrapper lands on the inner select when a star nests over ``b.*``.
+
+        Given:
+            A correlated NEAREST projected as ``SELECT b.*`` inside a subquery, with
+            an outer ``SELECT *`` over it on the DataFusion target.
+        When:
+            Transpiling.
+        Then:
+            The ``* EXCEPT`` wrapper should land on the *inner* select (the one that
+            surfaces the reserved columns), leaving the outer ``SELECT *`` plain.
+        """
+        # Arrange
+        sql = (
+            "SELECT * FROM (SELECT b.* FROM peaks a "
+            "CROSS JOIN LATERAL NEAREST(genes, reference := a.interval, k := 1) b) sub"
+        )
+
+        # Act
+        output = _generate_for_target(
+            sql, tables_with_peaks_and_genes, DataFusionTarget()
+        )
+
+        # Assert
+        assert not output.startswith("SELECT * EXCEPT (")
+        inner = output[output.index("SELECT * EXCEPT (") :]
+        assert _wrapper_except_names(inner) == set(_RESERVED_FALLBACK_COLUMNS)
+
+    def test_expand_nearest_should_not_wrap_on_lateral_capable_target(
+        self, tables_with_peaks_and_genes
+    ):
+        """Test the LATERAL form is never wrapped (no reserved columns leak).
+
+        Given:
+            The same correlated ``SELECT b.*`` NEAREST on the generic
+            (lateral-capable) target, which emits the LATERAL form with no reserved
+            columns.
+        When:
+            Transpiling.
+        Then:
+            No ``* EXCEPT`` wrapper should be added — the finalizer is registered
+            only by the decorrelated fallback path.
+        """
+        # Arrange
+        sql = (
+            "SELECT b.* FROM peaks a "
+            "CROSS JOIN LATERAL NEAREST(genes, reference := a.interval, k := 1) b"
+        )
+
+        # Act
+        output = _generate(sql, tables_with_peaks_and_genes)
+
+        # Assert
+        assert "EXCEPT" not in output
+        assert "LATERAL" in output.upper()
+
+    def test_expand_nearest_should_except_strand_key_when_stranded_b_star_on_datafusion(
+        self, tables_with_peaks_and_genes
+    ):
+        """Test a stranded correlated ``SELECT b.*`` fallback excepts the strand key.
+
+        Given:
+            A **stranded** correlated NEAREST projected as ``SELECT b.*`` on the
+            DataFusion target — the fallback's reference key includes strand, so it
+            exposes an extra reserved ``__giql_x_rk_strand`` column on the join.
+        When:
+            Transpiling.
+        Then:
+            The ``* EXCEPT`` wrapper's name-set should equal the base reserved
+            columns plus ``__giql_x_rk_strand`` — the strand key is hidden too.
+        """
+        # Arrange
+        sql = (
+            "SELECT b.* FROM peaks a "
+            "CROSS JOIN LATERAL "
+            "NEAREST(genes, reference := a.interval, k := 1, stranded := true) b"
+        )
+
+        # Act
+        output = _generate_for_target(
+            sql, tables_with_peaks_and_genes, DataFusionTarget()
+        )
+
+        # Assert
+        assert _wrapper_except_names(output) == set(_RESERVED_FALLBACK_COLUMNS) | {
+            _STRAND_RESERVED_COLUMN
+        }
+
+    def test_expand_nearest_should_not_wrap_when_projection_is_outer_relation_star_on_datafusion(  # noqa: E501
+        self, tables_with_peaks_and_genes
+    ):
+        """Test a star over the outer relation only is not wrapped.
+
+        Given:
+            A correlated NEAREST projecting ``SELECT a.*`` — a star over the outer
+            relation, which carries none of the fallback's reserved columns — on the
+            DataFusion target.
+        When:
+            Transpiling.
+        Then:
+            No ``* EXCEPT`` wrapper should be added; ``a.*`` surfaces no reserved
+            columns, and wrapping absent columns would fail at engine runtime.
+        """
+        # Arrange
+        sql = (
+            "SELECT a.* FROM peaks a "
+            "CROSS JOIN LATERAL NEAREST(genes, reference := a.interval, k := 1) b"
+        )
+
+        # Act
+        output = _generate_for_target(
+            sql, tables_with_peaks_and_genes, DataFusionTarget()
+        )
+
+        # Assert
+        assert "EXCEPT" not in output
+
+    def test_expand_nearest_should_not_double_wrap_when_projection_already_excepts_reserved_on_datafusion(  # noqa: E501
+        self, tables_with_peaks_and_genes
+    ):
+        """Test a star already excepting the reserved columns is not re-wrapped.
+
+        Given:
+            A correlated NEAREST whose user projection is already
+            ``SELECT * EXCEPT (<all reserved columns>)`` on the DataFusion target.
+        When:
+            Transpiling.
+        Then:
+            No second wrapper should be added — the star already excepts every
+            reserved name, so the finalizer's idempotency guard treats it as not
+            surfacing (exactly one ``EXCEPT`` clause in the output).
+        """
+        # Arrange
+        excepted = ", ".join(f'"{name}"' for name in _RESERVED_FALLBACK_COLUMNS)
+        sql = (
+            f"SELECT * EXCEPT ({excepted}) FROM peaks a "
+            "CROSS JOIN LATERAL NEAREST(genes, reference := a.interval, k := 1) b"
+        )
+
+        # Act
+        output = _generate_for_target(
+            sql, tables_with_peaks_and_genes, DataFusionTarget()
+        )
+
+        # Assert
+        assert output.count("EXCEPT") == 1
+        assert _wrapper_except_names(output) == set(_RESERVED_FALLBACK_COLUMNS)
+
+    def test_expand_nearest_should_wrap_when_b_star_qualifier_is_mixed_case_on_datafusion(  # noqa: E501
+        self, tables_with_peaks_and_genes
+    ):
+        """Test an unquoted mixed-case ``B.*`` over alias ``b`` is still wrapped.
+
+        Given:
+            A correlated NEAREST projected as ``SELECT B.*`` — an unquoted
+            qualifier whose case differs from the lateral alias ``b`` — on the
+            DataFusion target. Engines fold unquoted identifiers, so ``B`` binds to
+            the same relation as ``b``.
+        When:
+            Transpiling.
+        Then:
+            The output should be a top-level ``SELECT * EXCEPT (...)`` wrapper whose
+            ``EXCEPT`` name-set equals the reserved columns — a case-variant
+            qualifier must not slip the reserved columns through.
+        """
+        # Arrange
+        sql = (
+            "SELECT B.* FROM peaks a "
+            "CROSS JOIN LATERAL NEAREST(genes, reference := a.interval, k := 1) b"
+        )
+
+        # Act
+        output = _generate_for_target(
+            sql, tables_with_peaks_and_genes, DataFusionTarget()
+        )
+
+        # Assert
+        assert _wrapper_except_names(output) == set(_RESERVED_FALLBACK_COLUMNS)
+
+    def test_expand_nearest_should_not_mint_wrapper_alias_when_no_wrap_on_datafusion(
+        self, tables_with_peaks_and_genes
+    ):
+        """Test the no-wrap path does not advance the run's alias sequence.
+
+        Given:
+            The same correlated NEAREST projected as a wrapping ``SELECT b.*`` and
+            as a non-wrapping explicit projection on the DataFusion target — the
+            wrapper alias is minted lazily, only when a wrapper is emitted.
+        When:
+            Transpiling both.
+        Then:
+            The explicit (no-wrap) projection should mint exactly one fewer
+            ``__giql_x_<n>`` alias than the wrapped one — the wrapper's derived-table
+            alias is never minted, so the shared alias sequence is not advanced.
+        """
+        # Arrange
+        join = (
+            "FROM peaks a "
+            "CROSS JOIN LATERAL NEAREST(genes, reference := a.interval, k := 1) b"
+        )
+
+        # Act
+        wrapped = _generate_for_target(
+            f"SELECT b.* {join}", tables_with_peaks_and_genes, DataFusionTarget()
+        )
+        explicit = _generate_for_target(
+            f"SELECT a.start, b.start {join}",
+            tables_with_peaks_and_genes,
+            DataFusionTarget(),
+        )
+
+        # Assert
+        wrapped_aliases = set(re.findall(r"__giql_x_\d+", wrapped))
+        explicit_aliases = set(re.findall(r"__giql_x_\d+", explicit))
+        assert explicit_aliases < wrapped_aliases
+        assert len(wrapped_aliases) - len(explicit_aliases) == 1
+
+    def test_expand_cluster_over_nearest_should_not_crash_and_leaks_as_documented_residual_on_datafusion(  # noqa: E501
+        self, tables_with_peaks_and_genes
+    ):
+        """Test a ``SELECT *`` CLUSTER wrapping a correlated NEAREST is a documented leak.
+
+        Given:
+            A correlated NEAREST fallback nested under a ``SELECT *``-projecting
+            CLUSTER on the DataFusion target. The CLUSTER's copy+transplant detaches
+            the join the finalizer captured (``parent_select`` becomes ``None``), so
+            the finalizer no-ops and the outer ``SELECT *`` re-surfaces the reserved
+            columns.
+        When:
+            Transpiling.
+        Then:
+            It should transpile without error and leak the reserved columns — the
+            documented, unwrapped residual tracked by #172 — exercising the
+            finalizer's detached-join (``select is None``) no-op branch. This pins
+            the residual so a future change that alters it is caught.
+        """
+        # Arrange
+        sql = (
+            "SELECT *, CLUSTER(interval) AS cid FROM ("
+            "SELECT b.* FROM peaks a "
+            "CROSS JOIN LATERAL NEAREST(genes, reference := a.interval, k := 1) b"
+            ") sub"
+        )
+
+        # Act
+        output = _generate_for_target(
+            sql, tables_with_peaks_and_genes, DataFusionTarget()
+        )
+
+        # Assert
+        assert "EXCEPT" not in output
+        assert "__giql_x_rk_chrom" in output  # residual leak (#172), not wrapped

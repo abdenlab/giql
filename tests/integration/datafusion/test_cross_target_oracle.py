@@ -17,19 +17,19 @@ equi-join).
 NEAREST's correlated expansion is capability-driven (#142): lateral-capable
 targets (generic, duckdb) emit the portable ``LATERAL`` subquery, while
 DataFusion — which has no correlated-LATERAL physical plan — gets a decorrelated
-window-function fallback. For **explicitly-projected** queries (those selecting
-named columns) the two forms return identical rows, so the full three-target
-identity oracle now runs on every target for that projection shape (the former
-``_unsupported_pending_142`` ``pytest.raises`` pin has been promoted to a real
-identity test). The identity claim is narrowed to explicit projections because a
-``SELECT *`` / ``SELECT b.*`` over a correlated NEAREST on DataFusion additionally
-exposes the fallback's reserved ``__giql_x_*`` rank/key columns, a divergent
-output schema from the LATERAL form's — a known limitation pinned by the
-``xfail`` ``test_correlated_nearest_star_projection_diverges_on_datafusion`` case
-below and tracked for a query-level fix by #160 (dependent on #146). DISJOIN is
-migrated onto the expander registry (#143) and its previously pending-#153 gap
-(duplicate ``end`` output names) is closed, so its full three-target oracle now
-runs as a real cross-target identity test.
+window-function fallback. For a single correlated NEAREST per query the two forms
+return the same rows on every projection shape, so the full three-target identity
+oracle runs on every target — including ``SELECT *`` / ``SELECT b.*``: the
+fallback's reserved ``__giql_x_*`` rank/key columns, which its decorrelated join
+must expose, are projected away by a statement finalizer that wraps the enclosing
+SELECT in ``SELECT * EXCEPT (...)`` on the DataFusion path (#160), so no reserved
+column leaks. (Two correlated NEAREST fallbacks in one query, or a correlated
+NEAREST whose reserved columns are re-surfaced by an enclosing ``SELECT *``
+outside its own SELECT — e.g. a wrapping CLUSTER — are documented residuals that
+still leak on DataFusion, so the star cases below use a single correlated
+NEAREST.) DISJOIN is migrated onto the expander registry (#143) and its previously
+pending-#153 gap (duplicate ``end`` output names) is closed, so its full
+three-target oracle now runs as a real cross-target identity test.
 """
 
 import pytest
@@ -539,35 +539,25 @@ class TestCrossTargetOracleNearest:
             engines={"generic": "duckdb"},
         )
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="#160: SELECT b.* over a correlated NEAREST on DataFusion exposes "
-        "the decorrelated fallback's reserved __giql_x_rk_*/__giql_x_rn columns, "
-        "so the output schema diverges from the LATERAL form's on DuckDB. The "
-        "cross-target identity claim is narrowed to explicitly-projected queries "
-        "until #160 (dependent on #146) adds a query-level wrapper that projects "
-        "the reserved columns away on the DataFusion path; this flips to a real "
-        "identity test then.",
-    )
-    def test_correlated_nearest_star_projection_diverges_on_datafusion(
+    def test_correlated_nearest_star_projection_agrees_across_targets(
         self, cross_target_oracle
     ):
-        """Test SELECT b.* over a correlated NEAREST diverges per target (pins #160).
+        """Test SELECT b.* over a correlated NEAREST agrees on every target (#160).
 
         Given:
             A single-row peak and three candidate genes on chr1.
         When:
             A correlated ``NEAREST(..., k := 1)`` query projects ``b.*`` on every
-            target — DuckDB emits the LATERAL form (``genes.* + distance``) while
-            DataFusion's fallback additionally surfaces the reserved
-            ``__giql_x_rk_*`` / ``__giql_x_rn`` columns on ``b``.
+            target — DuckDB emits the LATERAL form (``genes.* + distance``) and
+            DataFusion's fallback wraps its output in ``SELECT * EXCEPT (...)`` to
+            hide the reserved ``__giql_x_rk_*`` / ``__giql_x_rn`` columns its
+            decorrelated join must expose.
         Then:
-            The cross-target row sets should NOT agree (DataFusion's rows carry the
-            extra reserved columns), so the oracle's identity assertion fails. This
-            xfail pins the known divergence so it is not silently forgotten; it
-            flips to a passing identity test when #160 hides the reserved columns.
+            Every target should return the single nearest gene with the same
+            columns (``genes.* + distance``) and agree — the reserved columns no
+            longer leak on DataFusion.
         """
-        # Arrange / Act & Assert (xfail: identity assertion is expected to fail)
+        # Arrange / Act / Assert
         cross_target_oracle(
             "SELECT b.* "
             "FROM peaks a "
@@ -579,6 +569,106 @@ class TestCrossTargetOracleNearest:
                 ("chr1", 280, 290),
             ],
             expected=[("chr1", 280, 290, 0)],
+            engines={"generic": "duckdb"},
+        )
+
+    def test_correlated_nearest_unqualified_star_agrees_across_targets(
+        self, cross_target_oracle
+    ):
+        """Test unqualified SELECT * over a correlated NEAREST agrees per target.
+
+        Given:
+            A single-row peak and three candidate genes on chr1.
+        When:
+            A correlated ``NEAREST(..., k := 1)`` query projects unqualified
+            ``SELECT *`` on every target — pulling both the outer peak row and the
+            nearest gene; DataFusion's fallback wraps the statement in
+            ``SELECT * EXCEPT (...)`` to strip the reserved join columns (#160).
+        Then:
+            Every target should return the outer peak columns plus the nearest
+            gene's ``genes.* + distance`` and agree, with no reserved columns
+            leaking on DataFusion.
+        """
+        # Arrange / Act / Assert
+        cross_target_oracle(
+            "SELECT * "
+            "FROM peaks a "
+            "CROSS JOIN LATERAL NEAREST(genes, reference := a.interval, k := 1) b",
+            peaks=[("chr1", 200, 300)],
+            genes=[
+                ("chr1", 1000, 1100),
+                ("chr1", 50, 60),
+                ("chr1", 280, 290),
+            ],
+            expected=[("chr1", 200, 300, "chr1", 280, 290, 0)],
+            engines={"generic": "duckdb"},
+        )
+
+    def test_correlated_nearest_stranded_star_projection_agrees_across_targets(
+        self, cross_target_oracle
+    ):
+        """Test stranded SELECT b.* correlated NEAREST agrees per target (#160).
+
+        Given:
+            A ``+`` peak and two candidate genes — a same-strand ``+`` gene and a
+            nearer opposite-strand ``-`` gene — on the stranded schema.
+        When:
+            A stranded correlated ``NEAREST(..., k := 1, stranded := true)`` projects
+            ``b.*`` on every target — DataFusion's fallback additionally exposes the
+            reserved ``__giql_x_rk_strand`` key column, which its ``* EXCEPT`` wrapper
+            must strip.
+        Then:
+            Every target should return the same-strand nearest gene with identical
+            columns (``genes.* + distance``) and agree — no reserved column, strand
+            key included, leaks on DataFusion.
+        """
+        # Arrange / Act / Assert
+        cross_target_oracle(
+            "SELECT b.* "
+            "FROM peaks a "
+            "CROSS JOIN LATERAL NEAREST("
+            "genes, reference := a.interval, k := 1, stranded := true) b",
+            tables=[Table("peaks"), Table("genes")],
+            columns=_STRANDED_COLUMNS,
+            peaks=[("chr1", 200, 300, "+")],
+            genes=[("chr1", 280, 290, "+"), ("chr1", 250, 260, "-")],
+            expected=[("chr1", 280, 290, "+", 0)],
+            engines={"generic": "duckdb"},
+        )
+
+    def test_correlated_nearest_star_projection_k_gt_1_agrees_across_targets(
+        self, cross_target_oracle
+    ):
+        """Test SELECT b.* over a k>1 correlated NEAREST agrees per target (#160).
+
+        Given:
+            One peak and four candidate genes at distinct distances on chr1.
+        When:
+            A correlated ``NEAREST(..., k := 3)`` projects ``b.*`` on every target —
+            DataFusion's fallback wraps its multi-row output in ``SELECT * EXCEPT
+            (...)``.
+        Then:
+            Every target should return the three nearest genes with identical columns
+            and agree — the reserved columns are stripped and the multi-row top-k
+            fan-out survives the wrapper.
+        """
+        # Arrange / Act / Assert
+        cross_target_oracle(
+            "SELECT b.* "
+            "FROM peaks a "
+            "CROSS JOIN LATERAL NEAREST(genes, reference := a.interval, k := 3) b",
+            peaks=[("chr1", 200, 300)],
+            genes=[
+                ("chr1", 280, 290),
+                ("chr1", 350, 360),
+                ("chr1", 420, 430),
+                ("chr1", 5000, 5100),
+            ],
+            expected=[
+                ("chr1", 280, 290, 0),
+                ("chr1", 350, 360, 51),
+                ("chr1", 420, 430, 121),
+            ],
             engines={"generic": "duckdb"},
         )
 

@@ -97,7 +97,18 @@ def expand_merge(node: GIQLMerge, ctx: ExpansionContext) -> exp.Expression:
     # subquery; the originals the pass collected are now unreachable, so re-run the
     # pass over the restructured SELECT to expand any sibling pass-3 operators
     # carried into it. Safe from recursion: the MERGE is already gone. (#144 B1)
-    expand_operators(select, ctx.target, ctx.tables, ctx.registry)
+    #
+    # expand_operators may return a new root (a registered statement finalizer can
+    # wrap it), and its contract requires callers to use the return value rather
+    # than assume in-place mutation, so reinstall a new root in place of `select`.
+    # Today the branch is never taken here — the sole finalizer-registering operator
+    # (a correlated NEAREST fallback) is already a plain join by this deepest-first
+    # re-walk, and MERGE's final projection is explicit, so a nested NEAREST fallback
+    # never surfaces its reserved columns here anyway — but honoring the contract
+    # keeps the seam future-proof.
+    result = expand_operators(select, ctx.target, ctx.tables, ctx.registry)
+    if result is not select:
+        select.replace(result)
     return node
 
 
@@ -202,9 +213,7 @@ def _transform_for_merge(
         )
     )
     select_exprs.append(
-        exp.alias_(
-            exp.Max(this=exp.column(end_col, quoted=True)), end_col, quoted=False
-        )
+        exp.alias_(exp.Max(this=exp.column(end_col, quoted=True)), end_col, quoted=False)
     )
 
     # Process other columns from original SELECT

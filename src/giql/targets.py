@@ -156,10 +156,17 @@ class DataFusionTarget(Target):
     the portable ``* EXCEPT`` form), ``supports_qualify=False``, and the binned
     equi-join range strategy.
 
-    One documented gap remains (#160, dependent on #146): a ``SELECT *`` /
-    ``SELECT b.*`` over a correlated NEAREST exposes the fallback's reserved
-    ``__giql_x_*`` columns, so the cross-target identity claim is narrowed to
-    explicitly-projected queries until a query-level projection seam lands.
+    A ``SELECT *`` / ``SELECT b.*`` over a correlated NEAREST used to expose the
+    decorrelated fallback's reserved ``__giql_x_*`` rank/key columns; a statement
+    finalizer now wraps the enclosing ``SELECT`` in ``SELECT * EXCEPT (...)`` on
+    the fallback path (#160), so the cross-target identity claim holds for star
+    projections over a single correlated NEAREST. (Residuals that still leak on
+    DataFusion, tracked by #172: two *correlated* NEAREST fallbacks in one query
+    share the fixed ``__giql_x_rk_*`` / ``__giql_x_rn`` column names — a
+    pre-existing latent collision independent of the projection wrapper; and a
+    correlated NEAREST whose reserved columns are re-surfaced by an enclosing
+    ``SELECT *`` *outside* its own SELECT, e.g. a wrapping ``CLUSTER``, which the
+    finalizer does not reach.)
     """
 
     name: str = "datafusion"
