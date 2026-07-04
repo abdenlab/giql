@@ -1370,6 +1370,238 @@ class TestNoOpWhenInert:
         assert not list(result.find_all(GIQLDisjoin))
 
 
+class TestStatementFinalizer:
+    """The query-level statement-finalizer seam.
+
+    An expander registers a finalizer via
+    :meth:`~giql.expander.ExpansionContext.add_statement_finalizer`;
+    :func:`~giql.expander.expand_operators` applies each to the statement, in
+    registration order, after every node-local replacement, threading the
+    (possibly new) root forward.
+    """
+
+    def test_add_statement_finalizer_should_run_on_post_replacement_root(
+        self, clean_registry
+    ):
+        """Test a registered finalizer receives the post-replacement statement root.
+
+        Given:
+            An expander for a DISJOIN AST that registers a finalizer capturing the
+            root it is handed.
+        When:
+            expand_operators runs.
+        Then:
+            The finalizer should receive the post-replacement root — the operator
+            node is gone, replaced by the expander's output.
+        """
+        # Arrange
+        captured = {}
+
+        def expander(node, ctx):
+            def finalize(root):
+                captured["root"] = root
+                return root
+
+            ctx.add_statement_finalizer(finalize)
+            return exp.Literal.string("expanded")
+
+        clean_registry.register(GenericTarget(), GIQLDisjoin, expander)
+        tables = _tables()
+        ast = _prepare("SELECT * FROM DISJOIN(variants)", tables)
+
+        # Act
+        expand_operators(ast, GenericTarget(), tables, clean_registry)
+
+        # Assert
+        assert "root" in captured
+        assert not list(captured["root"].find_all(GIQLDisjoin))
+        assert captured["root"].find(exp.Literal).this == "expanded"
+
+    def test_add_statement_finalizer_should_apply_in_registration_order(
+        self, clean_registry
+    ):
+        """Test finalizers run in the order they were registered.
+
+        Given:
+            An expander that registers two finalizers, each tagging a shared list.
+        When:
+            expand_operators runs.
+        Then:
+            The tags should appear in registration order.
+        """
+        # Arrange
+        order = []
+
+        def expander(node, ctx):
+            def make(tag):
+                def finalize(root):
+                    order.append(tag)
+                    return root
+
+                return finalize
+
+            ctx.add_statement_finalizer(make("first"))
+            ctx.add_statement_finalizer(make("second"))
+            return exp.Literal.string("expanded")
+
+        clean_registry.register(GenericTarget(), GIQLDisjoin, expander)
+        tables = _tables()
+        ast = _prepare("SELECT * FROM DISJOIN(variants)", tables)
+
+        # Act
+        expand_operators(ast, GenericTarget(), tables, clean_registry)
+
+        # Assert
+        assert order == ["first", "second"]
+
+    def test_expand_operators_should_return_finalizer_replacement_root(
+        self, clean_registry
+    ):
+        """Test a finalizer returning a new root propagates as the pass result.
+
+        Given:
+            An expander whose finalizer returns a brand-new statement root.
+        When:
+            expand_operators runs.
+        Then:
+            The pass should return that new root, not the mutated original.
+        """
+        # Arrange
+        replacement = parse_one("SELECT 'wrapped' AS finalized", dialect=GIQLDialect)
+
+        def expander(node, ctx):
+            ctx.add_statement_finalizer(lambda root: replacement)
+            return exp.Literal.string("expanded")
+
+        clean_registry.register(GenericTarget(), GIQLDisjoin, expander)
+        tables = _tables()
+        ast = _prepare("SELECT * FROM DISJOIN(variants)", tables)
+
+        # Act
+        result = expand_operators(ast, GenericTarget(), tables, clean_registry)
+
+        # Assert
+        assert result is replacement
+
+    def test_add_statement_finalizer_should_scope_finalizers_to_one_call(
+        self, clean_registry
+    ):
+        """Test each expand_operators call applies only its own finalizers.
+
+        Given:
+            A first call whose expander registers a finalizer, then a second call
+            whose expander registers none.
+        When:
+            Both calls run against the same registry.
+        Then:
+            The finalizer should run exactly once — proving the finalizer list is
+            per-call, not a persistent shared structure.
+        """
+        # Arrange
+        runs = []
+
+        def with_finalizer(node, ctx):
+            def finalize(root):
+                runs.append(1)
+                return root
+
+            ctx.add_statement_finalizer(finalize)
+            return exp.Literal.string("expanded")
+
+        def without_finalizer(node, ctx):
+            return exp.Literal.string("expanded")
+
+        tables = _tables()
+
+        # Act
+        clean_registry.register(GenericTarget(), GIQLDisjoin, with_finalizer)
+        expand_operators(
+            _prepare("SELECT * FROM DISJOIN(variants)", tables),
+            GenericTarget(),
+            tables,
+            clean_registry,
+        )
+        clean_registry.register(GenericTarget(), GIQLDisjoin, without_finalizer)
+        expand_operators(
+            _prepare("SELECT * FROM DISJOIN(variants)", tables),
+            GenericTarget(),
+            tables,
+            clean_registry,
+        )
+
+        # Assert
+        assert runs == [1]
+
+    def test_expand_operators_should_raise_when_finalizer_returns_non_expression(
+        self, clean_registry
+    ):
+        """Test a finalizer returning a non-Expression raises TypeError.
+
+        Given:
+            An expander whose finalizer returns a non-Expression — the common
+            mistake of forgetting to return the root.
+        When:
+            expand_operators runs.
+        Then:
+            It should raise TypeError rather than silently returning the
+            non-Expression, mirroring the node-local expander return guard.
+        """
+        # Arrange
+        def expander(node, ctx):
+            ctx.add_statement_finalizer(lambda root: None)
+            return exp.Literal.string("expanded")
+
+        clean_registry.register(GenericTarget(), GIQLDisjoin, expander)
+        tables = _tables()
+        ast = _prepare("SELECT * FROM DISJOIN(variants)", tables)
+
+        # Act & assert
+        with pytest.raises(TypeError, match="statement finalizer"):
+            expand_operators(ast, GenericTarget(), tables, clean_registry)
+
+    def test_add_statement_finalizer_should_not_reapply_under_reentrant_call(
+        self, clean_registry
+    ):
+        """Test a nested expand_operators call does not re-apply an outer finalizer.
+
+        Given:
+            An expander that registers a finalizer and then itself re-enters
+            expand_operators over a sub-AST (as CLUSTER / MERGE do).
+        When:
+            The outer expand_operators runs.
+        Then:
+            The outer finalizer should run exactly once — the nested call owns a
+            fresh per-call finalizer list and does not re-apply the outer one.
+        """
+        # Arrange
+        runs = []
+
+        def expander(node, ctx):
+            def finalize(root):
+                runs.append("outer")
+                return root
+
+            ctx.add_statement_finalizer(finalize)
+            # Re-enter over a plain sub-AST (no operators), mirroring CLUSTER/MERGE.
+            expand_operators(
+                parse_one("SELECT 1 AS x", dialect=GIQLDialect),
+                GenericTarget(),
+                ctx.tables,
+                clean_registry,
+            )
+            return exp.Literal.string("expanded")
+
+        clean_registry.register(GenericTarget(), GIQLDisjoin, expander)
+        tables = _tables()
+        ast = _prepare("SELECT * FROM DISJOIN(variants)", tables)
+
+        # Act
+        expand_operators(ast, GenericTarget(), tables, clean_registry)
+
+        # Assert
+        assert runs == ["outer"]
+
+
 # The nine GIQL operator expression classes the ExpandOperators pass inspects.
 # Every operator is migrated, so each resolves an expander through the registry;
 # this tuple is simply the operator roster the parametrized tests iterate.

@@ -8,6 +8,7 @@ from giql.expander import REGISTRY
 from giql.expander import ExpanderRegistry
 from giql.expander import ExpansionContext
 from giql.expander import OperatorExpander
+from giql.expander import StatementFinalizer
 from giql.expander import register
 from giql.table import Table
 from giql.targets import Capabilities
@@ -30,6 +31,7 @@ __all__ = [
     "ExpanderRegistry",
     "ExpansionContext",
     "OperatorExpander",
+    "StatementFinalizer",
     "Target",
     "Capabilities",
     "GenericTarget",

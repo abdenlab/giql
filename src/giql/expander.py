@@ -71,6 +71,7 @@ __all__ = [
     "EXPAND_ALIAS_PREFIX",
     "ExpansionContext",
     "OperatorExpander",
+    "StatementFinalizer",
     "ExpanderRegistry",
     "RegistrySnapshot",
     "REGISTRY",
@@ -113,9 +114,24 @@ class ExpansionContext:
         SELECT it just restructured and expand sibling operators it copied into
         it, honoring a custom-registry pass run. ``None`` for a standalone
         context built outside the pass.
+
+    A node-local expander that needs to rewrite the *enclosing* statement (rather
+    than just replace its own node) registers a :data:`StatementFinalizer` via
+    :meth:`add_statement_finalizer`; the pass applies every finalizer to the
+    statement after all node-local replacements. This is the query-level seam for
+    a target whose expansion must reshape the enclosing statement — for example to
+    project internal helper columns out of a surfacing ``SELECT *``.
     """
 
-    __slots__ = ("node", "resolution", "target", "tables", "registry", "_alias_seq")
+    __slots__ = (
+        "node",
+        "resolution",
+        "target",
+        "tables",
+        "registry",
+        "_alias_seq",
+        "_finalizers",
+    )
 
     def __init__(
         self,
@@ -125,6 +141,7 @@ class ExpansionContext:
         tables: Tables,
         alias_seq: Callable[[], str] | None = None,
         registry: ExpanderRegistry | None = None,
+        finalizers: list[StatementFinalizer] | None = None,
     ) -> None:
         self.node = node
         self.resolution = resolution
@@ -135,11 +152,37 @@ class ExpansionContext:
         # ``ExpandOperators`` run so aliases minted for sibling operators never
         # collide; a standalone context falls back to its own sequence.
         self._alias_seq = alias_seq or name_sequence(EXPAND_ALIAS_PREFIX)
+        # A single finalizer list is likewise shared across one run's contexts so
+        # a finalizer registered while expanding one node is applied once, after
+        # every node-local replacement; a standalone context gets its own (inert
+        # unless someone drives it manually).
+        self._finalizers = finalizers if finalizers is not None else []
 
     @property
     def capabilities(self):
         """The active target's :class:`~giql.targets.Capabilities`."""
         return self.target.capabilities
+
+    def add_statement_finalizer(self, finalizer: StatementFinalizer) -> None:
+        """Register a query-level :data:`StatementFinalizer` for this run.
+
+        The **query-level seam**: an expander is node-local — its return value
+        replaces only its own node — so a target that must rewrite the *enclosing*
+        statement (for example to project internal helper columns out of a
+        surfacing ``SELECT *``) registers a finalizer here instead.
+        :func:`expand_operators` applies every registered finalizer to the
+        statement, in registration order, *after* all node-local replacements
+        complete; each receives the current statement root and returns the
+        (possibly new) root.
+
+        A finalizer's returned root is emitted verbatim — beyond a type check that
+        it is an :class:`~sqlglot.expressions.Expression`, it is **not**
+        semantically re-validated — so it must not reference columns or relations
+        absent from the projection it rewrites: a wrapper over an absent column
+        builds without error but fails at engine runtime. Finalizers registered on a standalone context (one built
+        outside the pass) are collected but never applied.
+        """
+        self._finalizers.append(finalizer)
 
     def alias(self) -> str:
         """Mint a fresh, query-unique alias with the reserved expander prefix.
@@ -164,13 +207,15 @@ class OperatorExpander(Protocol):
     ``OperatorExpander`` (it has no ``expand`` method); register one by wrapping
     it (see :func:`register`, which accepts either form).
 
-    An expander is **node-local**: ``expand(node, ctx) -> exp.Expression`` sees
-    one operator node and returns the expression that replaces it in place. It
-    cannot express a whole-query rewrite such as the INTERSECTS IEJoin fold,
-    which restructures the surrounding query (joins, CTEs) rather than a single
-    node. That fold is therefore deferred — it would need a separate
-    query-level mechanism — and is handled by the pre-pass join transformers, not
-    by an expander.
+    An expander's **return value** is node-local: ``expand(node, ctx) ->
+    exp.Expression`` returns the one expression that replaces the operator node in
+    place. When a target additionally needs to rewrite the *enclosing* statement —
+    for example to project internal helper columns away from a surfacing
+    ``SELECT *`` — the expander registers a query-level :data:`StatementFinalizer`
+    via :meth:`ExpansionContext.add_statement_finalizer`, applied to the statement
+    after every node-local replacement. The INTERSECTS IEJoin whole-query fold is a
+    separate concern still handled by the pre-pass join transformers, not by an
+    expander.
     """
 
     def expand(self, node: exp.Expression, ctx: ExpansionContext) -> exp.Expression: ...
@@ -179,6 +224,14 @@ class OperatorExpander(Protocol):
 #: A bare expander function — the form most expanders are written in. The
 #: registry stores either an :class:`OperatorExpander` object or one of these.
 ExpanderFn = Callable[[exp.Expression, ExpansionContext], exp.Expression]
+
+#: A query-level statement finalizer: ``finalize(root) -> root``. An expander
+#: registers one via :meth:`ExpansionContext.add_statement_finalizer` to wrap or
+#: rewrite the enclosing statement after every node-local replacement; the pass
+#: applies each in registration order and threads the (possibly new) root through.
+#: Used, for example, to project internal helper columns out of a surfacing
+#: ``SELECT *`` / ``b.*``.
+StatementFinalizer = Callable[[exp.Expression], exp.Expression]
 
 
 def _as_callable(expander: OperatorExpander | ExpanderFn) -> ExpanderFn:
@@ -524,7 +577,11 @@ def expand_operators(
     internal invariant violation (a built-in operator always has at least a
     ``(generic, op)`` expander) and raises — there is no legacy ``*_sql`` fallback.
 
-    The pass mutates and returns *expression* in place.
+    The pass mutates *expression* in place for the node-local replacements, then
+    applies any :data:`StatementFinalizer` an expander registered (via
+    :meth:`ExpansionContext.add_statement_finalizer`) to the statement in
+    registration order. A finalizer may return a *new* root, so callers must use
+    the return value rather than assume in-place mutation.
 
     Parameters
     ----------
@@ -541,12 +598,16 @@ def expand_operators(
     Returns
     -------
     exp.Expression
-        The same *expression*, with each operator node replaced by its
-        target-specific expansion.
+        *expression* with each operator node replaced by its target-specific
+        expansion, after any registered statement finalizers have run — the same
+        object when no finalizer replaced the root, otherwise the finalized root.
     """
     reg = registry if registry is not None else REGISTRY
     operators = _GIQL_OPERATORS
     alias_seq = name_sequence(EXPAND_ALIAS_PREFIX)
+    # Shared across every context this run builds: an expander that must rewrite
+    # the enclosing statement appends a finalizer here, applied after the walk.
+    finalizers: list[StatementFinalizer] = []
 
     # Collect first, then mutate: replacing nodes mid-walk is unsafe.
     pending: list[tuple[exp.Expression, ExpanderFn]] = []
@@ -591,7 +652,15 @@ def expand_operators(
                 "valid resolution metadata; pass 1 (resolve_operator_refs) must "
                 "run first and annotate every operator node."
             )
-        ctx = ExpansionContext(node, resolution, target, tables, alias_seq, registry=reg)
+        ctx = ExpansionContext(
+            node,
+            resolution,
+            target,
+            tables,
+            alias_seq,
+            registry=reg,
+            finalizers=finalizers,
+        )
         replacement = fn(node, ctx)
         if not isinstance(replacement, exp.Expression):
             raise TypeError(
@@ -600,6 +669,20 @@ def expand_operators(
             )
         if replacement is not node:
             node.replace(replacement)
+
+    # Apply any query-level finalizers an expander registered, in registration
+    # order, once every node-local replacement is in place. A finalizer receives
+    # the current root and returns the (possibly new) root to thread forward.
+    for finalize in finalizers:
+        expression = finalize(expression)
+        if not isinstance(expression, exp.Expression):
+            # Mirror the node-local return guard: a finalizer that forgets to
+            # return the root would otherwise make the pass silently return the
+            # non-Expression far from the cause.
+            raise TypeError(
+                f"statement finalizer {finalize!r} returned "
+                f"{type(expression).__name__}, not exp.Expression"
+            )
 
     return expression
 

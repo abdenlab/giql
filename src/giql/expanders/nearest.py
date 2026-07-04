@@ -33,6 +33,8 @@ is reserialized by the active target's serializer.
 
 from __future__ import annotations
 
+from typing import Callable
+
 from sqlglot import exp
 from sqlglot import parse_one
 
@@ -41,6 +43,7 @@ from giql.canonical import decanonical_start
 from giql.dialect import GIQLDialect
 from giql.expander import EXPAND_ALIAS_PREFIX
 from giql.expander import ExpansionContext
+from giql.expander import StatementFinalizer
 from giql.expander import register
 from giql.expanders._distance import generate_distance_case
 from giql.expanders._params import coerce_bool_param
@@ -176,9 +179,7 @@ def _raise_nearest_reference_error(
         # An absent reference is a correlated (implicit-outer) placement that the
         # resolver could not tie to a registered outer table; consult the
         # recorded deferral for the specific historical message.
-        deferral = (
-            resolution.deferral("reference") if resolution is not None else None
-        )
+        deferral = resolution.deferral("reference") if resolution is not None else None
         if deferral is not None and deferral.reason == "implicit_outer_unregistered":
             raise ValueError(
                 f"Outer table '{deferral.detail}' not found in tables. "
@@ -343,9 +344,7 @@ def _lateral_form(
         _abs_distance_expr,
         where_clauses,
         passthrough,
-    ) = _distance_and_filters(
-        expression, table_name, target_ref, ref, ctx.capabilities
-    )
+    ) = _distance_and_filters(expression, table_name, target_ref, ref, ctx.capabilities)
     where_sql = " AND ".join(where_clauses)
     # The wrapping level reads the inner row's *bare* column names (the passthrough
     # projected ``<target>.*``), so the tiebreaker qualifies them by the wrapper
@@ -399,6 +398,108 @@ def _outer_relation(ref: ResolvedInterval) -> tuple[str, str]:
     return relation, alias
 
 
+def _projection_surfaces_reserved(
+    select: exp.Select, b_alias: str, reserved: list[str]
+) -> bool:
+    """Whether *select*'s projection would surface the fallback's reserved columns.
+
+    The decorrelated fallback exposes reserved rank/key columns on the join
+    relation *b_alias*. They reach the user output only through a projection that
+    stars over *b*: an unqualified ``*`` (``SELECT *``, which pulls every relation
+    including *b*) or a ``<b_alias>.*`` (matched case-insensitively unless the
+    qualifier is explicitly quoted, since engines fold unquoted identifiers).
+    Returns ``True`` for exactly those two shapes.
+
+    The check must be exact. It must NOT match an explicit projection or a
+    ``<other>.*`` (e.g. ``a.*``), because those never carry the reserved columns
+    and wrapping them in ``SELECT * EXCEPT (<absent column>)`` is not caught at
+    transpile time — sqlglot builds it happily — but fails at engine runtime. An
+    unqualified ``*`` that already ``EXCEPT``s every reserved name is treated as
+    *not* surfacing, so a re-run (or a second finalizer) never double-wraps.
+    """
+    for projection in select.expressions:
+        if isinstance(projection, exp.Star):
+            excepted = {col.name for col in (projection.args.get("except_") or [])}
+            if not set(reserved).issubset(excepted):
+                return True
+        elif isinstance(projection, exp.Column) and isinstance(
+            projection.this, exp.Star
+        ):
+            table = projection.args.get("table")
+            if table is None:
+                continue
+            # An unquoted ``B.*`` binds to the same relation as alias ``b`` because
+            # engines fold unquoted identifiers; match case-insensitively unless the
+            # qualifier is explicitly quoted (then its case is significant).
+            quoted = bool(table.args.get("quoted"))
+            if table.name == b_alias or (
+                not quoted and table.name.casefold() == b_alias.casefold()
+            ):
+                return True
+    return False
+
+
+def _wrap_star_except_reserved(
+    select: exp.Select, reserved: list[str], wrap_alias: str
+) -> exp.Select:
+    """Wrap *select* in ``SELECT * EXCEPT (reserved...) FROM (<select>) AS wrap_alias``.
+
+    Builds the projection-hiding wrapper as AST (mirroring the canonicalizer's
+    ``exp.Star(except_=[...])``); the reserved names are emitted as quoted column
+    references to match the quoted ``"__giql_x_*"`` columns the fallback projects.
+    The inner *select* is copied so the caller can ``replace`` it with the wrapper
+    without reparent-during-replace hazards.
+    """
+    star = exp.Star(except_=[exp.column(name, quoted=True) for name in reserved])
+    return exp.select(star).from_(
+        exp.Subquery(
+            this=select.copy(),
+            alias=exp.TableAlias(this=exp.to_identifier(wrap_alias)),
+        )
+    )
+
+
+def _make_reserved_column_finalizer(
+    join: exp.Join,
+    reserved: list[str],
+    b_alias: str,
+    alias_factory: Callable[[], str],
+) -> StatementFinalizer:
+    """Build the statement finalizer that hides the fallback's reserved columns.
+
+    A ``SELECT *`` / ``<b>.*`` over the decorrelated join would leak the reserved
+    rank/key columns *b* must expose for the ON clause. The returned finalizer
+    (the query-level seam) wraps the join's *enclosing* SELECT in
+    ``SELECT * EXCEPT (reserved...)`` when — and only when — that SELECT's
+    projection surfaces them, so the DataFusion fallback's output schema matches
+    the LATERAL form's on ``SELECT *`` and ``<b>.*``.
+
+    The enclosing SELECT is resolved lazily via ``join.parent_select`` at finalize
+    time (not captured eagerly): if a later CLUSTER/MERGE transplant detached the
+    join, ``parent_select`` is ``None`` and the finalizer is a no-op. Wrapping the
+    *enclosing* SELECT rather than the statement root is load-bearing — a
+    ``SELECT * FROM (SELECT a.start ... NEAREST ... ) sub`` never surfaces the
+    reserved columns, so the outer ``*`` must be left alone. The wrapper alias is
+    likewise minted lazily (*alias_factory* is only called when a wrapper is
+    actually emitted), so the no-wrap path does not advance the run's alias
+    sequence.
+    """
+
+    def finalize(root: exp.Expression) -> exp.Expression:
+        select = join.parent_select
+        if select is None or not _projection_surfaces_reserved(
+            select, b_alias, reserved
+        ):
+            return root
+        wrapper = _wrap_star_except_reserved(select, reserved, alias_factory())
+        if select is root:
+            return wrapper
+        select.replace(wrapper)
+        return root
+
+    return finalize
+
+
 def _fallback_form(
     expression: GIQLNearest,
     ctx: ExpansionContext,
@@ -416,6 +517,12 @@ def _fallback_form(
     sharing that key, reproducing the per-row LATERAL semantics. Swaps the parent
     ``LATERAL`` for the decorrelated subquery in place and returns the (now
     detached) NEAREST node, so the pass's own ``node.replace`` is a no-op.
+
+    Because the rewritten relation *b* must expose reserved rank/key columns for
+    the ON clause, this also registers a statement finalizer (via
+    :meth:`~giql.expander.ExpansionContext.add_statement_finalizer`) that projects
+    those columns away from a surfacing ``SELECT *`` / ``b.*`` on the enclosing
+    SELECT, so the fallback's output schema matches the LATERAL form's (#160).
 
     The no-op return relies on NEAREST having no nestable inner GIQL operator: a
     detached node carrying a still-pending descendant would strand that
@@ -486,8 +593,11 @@ def _fallback_form(
     strand_name = f"{_REF_KEY_PREFIX}strand"
     stranded_key = is_stranded and ref.strand is not None
 
-    key_names = [f"{_REF_KEY_PREFIX}chrom", f"{_REF_KEY_PREFIX}start",
-                 f"{_REF_KEY_PREFIX}end"]
+    key_names = [
+        f"{_REF_KEY_PREFIX}chrom",
+        f"{_REF_KEY_PREFIX}start",
+        f"{_REF_KEY_PREFIX}end",
+    ]
     source_frags = [ref.chrom, ref.start, ref.end]
     if stranded_key:
         key_names.append(strand_name)
@@ -503,9 +613,7 @@ def _fallback_form(
 
     # Reference fragments now point at the renamed relation's safe columns.
     renamed = [f'{ref_relation_alias}."{name}"' for name in key_names]
-    renamed_strand = (
-        f'{ref_relation_alias}."{strand_name}"' if stranded_key else None
-    )
+    renamed_strand = f'{ref_relation_alias}."{strand_name}"' if stranded_key else None
     ref_fragments = (renamed[0], renamed[1], renamed[2], renamed_strand)
 
     (
@@ -576,6 +684,19 @@ def _fallback_form(
     join.set("kind", None)
     join.set("side", None)
     join.set("on", on_expr)
+
+    # A ``SELECT *`` / ``<b>.*`` over this decorrelated join would leak the
+    # reserved rank/key columns b must expose for the ON clause — a schema the
+    # LATERAL form never emits. Register a statement finalizer (the query-level
+    # seam) that projects them away from the enclosing SELECT's star, so the
+    # DataFusion fallback's ``SELECT *`` / ``b.*`` output matches the LATERAL
+    # form's. Explicit projections never surface the reserved columns and are left
+    # untouched (#160).
+    # key_names (the rk_* columns) and _RANK_COL (rn) are distinct by construction.
+    reserved = key_names + [_RANK_COL]
+    ctx.add_statement_finalizer(
+        _make_reserved_column_finalizer(join, reserved, alias, ctx.alias)
+    )
 
     # The LATERAL (and the NEAREST node within it) is now detached; returning the
     # node unchanged makes the pass's ``node.replace`` a no-op.

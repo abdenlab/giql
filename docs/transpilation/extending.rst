@@ -143,11 +143,35 @@ one expression that replaces the operator node in place. It cannot *return* a
 reshaped enclosing query. An expander may still restructure the query it sits in
 as a side effect and then return the node unchanged — the built-in CLUSTER and
 MERGE expanders do exactly this, rewriting their single-table ``SELECT`` in place.
-What no expander can express is a rewrite that **adds or reshapes joins** across
-relations: the DuckDB IEJoin plan for column-to-column INTERSECTS joins is handled
-by a capability-gated pre-pass transformer, not an expander, because it restructures
-the surrounding join. A general query-level expander seam for such join rewrites is
-planned future work.
+
+When an expander must rewrite the **enclosing statement** — wrap an enclosing
+``SELECT``, or reshape a projection it does not own — it registers a *statement
+finalizer* via :meth:`~giql.expander.ExpansionContext.add_statement_finalizer`.
+The pass applies every registered finalizer to the statement, in registration
+order, after all node-local replacements complete; each receives the current
+statement root and returns the (possibly new) root. The built-in NEAREST
+DataFusion fallback uses this to wrap its output in
+``SELECT * EXCEPT (...)`` and hide the reserved rank/key columns its decorrelated
+join must expose:
+
+.. code-block:: python
+
+   def expand(self, node, ctx):
+       # ... rewrite the node / enclosing join in place ...
+       ctx.add_statement_finalizer(lambda root: wrap_or_return(root))
+       return node
+
+A finalizer's returned root is emitted **as-is** — the pass does not re-validate
+it — so a finalizer that reshapes a projection must not reference columns or
+relations absent from what it rewrites. Wrapping a projection in
+``SELECT * EXCEPT (missing_col)``, for instance, builds without error at transpile
+time but fails at engine runtime. The built-in fallback guards this by wrapping
+only when the projection genuinely surfaces the columns it excepts; a custom
+finalizer should apply the same discipline.
+
+The one query-level rewrite that is *not* an expander is a fold that **adds or
+reshapes joins** across relations: the DuckDB IEJoin plan for column-to-column
+INTERSECTS joins stays a capability-gated pre-pass transformer by design.
 
 
 Undoing a registration

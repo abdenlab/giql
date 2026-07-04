@@ -12,14 +12,19 @@ import pytest
 
 import giql
 
-#: The extension-hook symbols #146 added to ``giql.__all__`` (beyond the
-#: pre-existing ``DEFAULT_BIN_SIZE`` / ``Table`` / ``transpile``).
+#: The extension-hook symbols exported from ``giql.__all__`` (beyond the
+#: pre-existing ``DEFAULT_BIN_SIZE`` / ``Table`` / ``transpile``): #146 added the
+#: registry/target hooks, #160 added ``StatementFinalizer`` (the query-level seam
+#: type, root-exported so an extension author has a public type to annotate a
+#: finalizer against — the seam has no ``Protocol`` form the way ``expand`` has
+#: ``OperatorExpander``).
 _EXTENSION_HOOK_EXPORTS = [
     "register",
     "REGISTRY",
     "ExpanderRegistry",
     "ExpansionContext",
     "OperatorExpander",
+    "StatementFinalizer",
     "Target",
     "Capabilities",
     "GenericTarget",
@@ -35,6 +40,7 @@ _REEXPORT_ORIGINS = [
     ("ExpanderRegistry", "giql.expander"),
     ("ExpansionContext", "giql.expander"),
     ("OperatorExpander", "giql.expander"),
+    ("StatementFinalizer", "giql.expander"),
     ("Target", "giql.targets"),
     ("Capabilities", "giql.targets"),
     ("GenericTarget", "giql.targets"),
