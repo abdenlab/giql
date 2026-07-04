@@ -37,15 +37,19 @@ from giql.expander import ExpansionContext
 from giql.expander import expand_operators
 from giql.expander import register
 
-# Shared CLUSTER/MERGE expansion toolkit (MERGE is built on CLUSTER).
-from giql.expanders.cluster import GenomicColumns
+# The shared, operator-neutral expansion toolkit lives in the neutral ``_genomic``
+# module (#163). ``expand_cluster_query`` is the one deliberate CLUSTER-reuse
+# point — MERGE composes the CLUSTER rewrite to build its clustered subquery — so
+# it is imported from the CLUSTER expander as a documented composition rather than
+# incidental coupling.
+from giql.expanders._genomic import GenomicColumns
+from giql.expanders._genomic import extract_stranded
+from giql.expanders._genomic import find_projected
+from giql.expanders._genomic import genomic_columns
+from giql.expanders._genomic import reject_cluster_merge_mix
+from giql.expanders._genomic import require_top_level_projection
+from giql.expanders._genomic import transplant
 from giql.expanders.cluster import expand_cluster_query
-from giql.expanders.cluster import extract_stranded
-from giql.expanders.cluster import find_projected
-from giql.expanders.cluster import genomic_columns
-from giql.expanders.cluster import reject_cluster_merge_mix
-from giql.expanders.cluster import require_top_level_projection
-from giql.expanders.cluster import transplant
 from giql.expressions import GIQLCluster
 from giql.expressions import GIQLMerge
 from giql.targets import GenericTarget
