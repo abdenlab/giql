@@ -430,9 +430,12 @@ class TestClusterExpander:
         )
 
         # Act
+        # dialect="duckdb" so the flag-hiding star emits DuckDB's EXCLUDE spelling
+        # (#184); the generic EXCEPT form is not DuckDB-executable.
         sql = transpile(
             "SELECT *, CLUSTER(interval) AS cluster_id FROM intervals",
             tables=["intervals"],
+            dialect="duckdb",
         )
         cursor = conn.execute(sql)
         columns = [desc[0] for desc in cursor.description]
@@ -441,6 +444,8 @@ class TestClusterExpander:
         # Assert
         assert [r["cluster_id"] for r in rows] == [1, 1, 2]
         assert [r["is_new_cluster"] for r in rows] == [7, 7, 7]
+        # The synthesized flag is hidden; only the user's is_new_cluster surfaces.
+        assert "__giql_is_new_cluster" not in columns
 
     @pytest.mark.parametrize(
         "query, expected_with",
@@ -514,7 +519,9 @@ class TestClusterExpander:
         )
 
         # Act
-        sql = transpile(query, tables=["peaks"])
+        # dialect="duckdb" so the flag-hiding star emits DuckDB's EXCLUDE spelling
+        # (#184); the generic EXCEPT form is not DuckDB-executable.
+        sql = transpile(query, tables=["peaks"], dialect="duckdb")
         cursor = conn.execute(sql)
         columns = [desc[0] for desc in cursor.description]
         rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
@@ -651,6 +658,168 @@ class TestClusterExpander:
 
         # Assert
         assert rows == [("chr1", 1)]
+
+    def test_transpile_should_hide_flag_when_cluster_projects_star(self):
+        """Test that a star-projected CLUSTER EXCEPTs the synthesized flag.
+
+        Given:
+            A top-level CLUSTER with a SELECT * projection.
+        When:
+            Transpiling the query.
+        Then:
+            The outer star should EXCEPT the synthesized __giql_is_new_cluster flag so
+            it never surfaces in the query output (#184), and the bare flag name
+            should not appear as a projected column.
+        """
+        # Act
+        sql = transpile(
+            "SELECT *, CLUSTER(interval) AS cid FROM peaks", tables=["peaks"]
+        )
+
+        # Assert
+        assert 'EXCEPT ("__giql_is_new_cluster")' in sql
+
+    def test_transpile_should_execute_star_without_flag_when_cluster_projects_star(
+        self,
+    ):
+        """Test that a star-projected CLUSTER omits the flag from its output columns.
+
+        Given:
+            A star-projected CLUSTER over a seeded table.
+        When:
+            Transpiling for DuckDB and executing it.
+        Then:
+            The output columns should be exactly the user columns plus the cluster id,
+            with the synthesized __giql_is_new_cluster flag hidden (#184), and the
+            cluster ids should be correct.
+        """
+        # Arrange
+        duckdb = pytest.importorskip("duckdb")
+        conn = duckdb.connect(":memory:")
+        conn.execute(
+            'CREATE TABLE peaks (chrom VARCHAR, "start" INTEGER, "end" INTEGER)'
+        )
+        conn.executemany(
+            "INSERT INTO peaks VALUES (?, ?, ?)",
+            [("chr1", 10, 20), ("chr1", 15, 30), ("chr1", 100, 110)],
+        )
+
+        # Act
+        sql = transpile(
+            "SELECT *, CLUSTER(interval) AS cid FROM peaks",
+            tables=["peaks"],
+            dialect="duckdb",
+        )
+        cursor = conn.execute(sql)
+        columns = [desc[0] for desc in cursor.description]
+        rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+        # Assert
+        assert columns == ["chrom", "start", "end", "cid"]
+        assert sorted(r["cid"] for r in rows) == [1, 1, 2]
+
+    def test_transpile_should_apply_user_except_inside_and_hide_flag_outside(self):
+        """Test that a user's own EXCEPT survives while the flag is still hidden.
+
+        Given:
+            A star-projected CLUSTER whose projection carries a user EXCEPT on a column.
+        When:
+            Transpiling for DuckDB and executing it.
+        Then:
+            The user-excepted column should be dropped (applied inside the lag_calc
+            subquery) and the synthesized flag should also be absent, leaving the
+            remaining user columns plus the cluster id (#184).
+        """
+        # Arrange
+        duckdb = pytest.importorskip("duckdb")
+        conn = duckdb.connect(":memory:")
+        conn.execute(
+            "CREATE TABLE peaks "
+            '(chrom VARCHAR, "start" INTEGER, "end" INTEGER, score INTEGER)'
+        )
+        conn.executemany(
+            "INSERT INTO peaks VALUES (?, ?, ?, ?)",
+            [("chr1", 10, 20, 5), ("chr1", 15, 30, 5), ("chr1", 100, 110, 9)],
+        )
+
+        # Act
+        sql = transpile(
+            "SELECT * EXCEPT (score), CLUSTER(interval) AS cid FROM peaks",
+            tables=["peaks"],
+            dialect="duckdb",
+        )
+        columns = [desc[0] for desc in conn.execute(sql).description]
+
+        # Assert
+        assert columns == ["chrom", "start", "end", "cid"]
+
+    def test_transpile_should_dedup_star_without_flag_when_cluster_distinct(self):
+        """Test that DISTINCT over a star-projected CLUSTER dedups without the flag.
+
+        Given:
+            A CLUSTER over rows that collapse to one distinct interval, projected with
+            DISTINCT over a bare star.
+        When:
+            Transpiling for DuckDB and executing it.
+        Then:
+            The output should dedup to the single distinct row rather than splitting on
+            the now-hidden __giql_is_new_cluster flag — the star-leak fix (#184) also
+            resolves the DISTINCT-star dedup confound noted in #181.
+        """
+        # Arrange
+        duckdb = pytest.importorskip("duckdb")
+        conn = duckdb.connect(":memory:")
+        conn.execute(
+            'CREATE TABLE peaks (chrom VARCHAR, "start" INTEGER, "end" INTEGER)'
+        )
+        conn.executemany(
+            "INSERT INTO peaks VALUES (?, ?, ?)",
+            [("chr1", 10, 20), ("chr1", 10, 20), ("chr1", 10, 20)],
+        )
+
+        # Act
+        sql = transpile(
+            "SELECT DISTINCT *, CLUSTER(interval) AS cid FROM peaks",
+            tables=["peaks"],
+            dialect="duckdb",
+        )
+        rows = conn.execute(sql).fetchall()
+
+        # Assert
+        assert rows == [("chr1", 10, 20, 1)]
+
+    def test_transpile_should_hide_flag_when_cluster_nested_below_root(self):
+        """Test that a nested CLUSTER's flag does not leak through an enclosing star.
+
+        Given:
+            A star-projected CLUSTER nested inside a FROM-subquery, with the outer
+            query projecting a bare star over it.
+        When:
+            Transpiling for DuckDB and executing it.
+        Then:
+            The nested CLUSTER should EXCEPT its synthesized flag so the enclosing
+            star does not re-surface it — hiding runs for every CLUSTER expansion,
+            not only a root one (#184).
+        """
+        # Arrange
+        duckdb = pytest.importorskip("duckdb")
+        conn = duckdb.connect(":memory:")
+        conn.execute(
+            'CREATE TABLE peaks (chrom VARCHAR, "start" INTEGER, "end" INTEGER)'
+        )
+        conn.executemany(
+            "INSERT INTO peaks VALUES (?, ?, ?)",
+            [("chr1", 10, 20), ("chr1", 15, 30), ("chr1", 100, 110)],
+        )
+        query = "SELECT * FROM (SELECT *, CLUSTER(interval) AS cid FROM peaks) x"
+
+        # Act
+        sql = transpile(query, tables=["peaks"], dialect="duckdb")
+        columns = [desc[0] for desc in conn.execute(sql).description]
+
+        # Assert
+        assert "__giql_is_new_cluster" not in columns
+        assert columns == ["chrom", "start", "end", "cid"]
 
     def test_transpile_should_execute_when_cluster_with_limit_and_offset(self):
         """Test that CLUSTER with LIMIT/OFFSET returns the correct row window.

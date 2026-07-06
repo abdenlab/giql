@@ -688,29 +688,34 @@ class TestCrossTargetOracleNearest:
             copy+transplant relocates the fallback join, and the finalizer must
             re-locate it by its reserved marker to wrap away the reserved columns.
         Then:
-            Every target should return each nearest gene (``genes.* + distance``),
-            CLUSTER's own ``__giql_is_new_cluster`` helper, and the cluster id, and
-            agree. No reserved ``__giql_x_*`` NEAREST column leaks through the
-            enclosing ``SELECT *`` (formerly a #172 residual) — a leak would surface
-            four extra columns and break the cross-target column-count agreement.
+            Every target should return each nearest gene (``genes.* + distance``) and
+            the cluster id, and agree. CLUSTER's own ``__giql_is_new_cluster`` flag is
+            hidden from the ``SELECT *`` output (#184), and no reserved ``__giql_x_*``
+            NEAREST column leaks either (formerly a #172 residual) — a leak of either
+            would surface extra columns and break the cross-target column agreement.
         """
         # Arrange / Act / Assert
-        # The 5th column is CLUSTER's own ``__giql_is_new_cluster`` flag, which a
-        # ``SELECT *, CLUSTER(...)`` surfaces on every target — a separate known
-        # leak family (#161-related), orthogonal to #172. The #172 point is that no
-        # ``__giql_x_*`` reserved NEAREST column joins it and the targets agree.
+        # A top-level ``SELECT *, CLUSTER(...)`` now hides its synthesized
+        # ``__giql_is_new_cluster`` flag with ``* EXCEPT`` / ``EXCLUDE`` (#184), so the
+        # output is (genes.*, distance, cid). Only datafusion + duckdb are exercised:
+        # the generic target's portable SQL for this composition combines a real
+        # correlated LATERAL (which DataFusion cannot plan) with the flag-hiding
+        # ``* EXCEPT`` (which DuckDB does not accept — it spells exclusion
+        # ``EXCLUDE``), so neither available engine can run the generic arm. datafusion
+        # (decorrelated fallback) and duckdb (real LATERAL) still agree, which is the
+        # #172 point.
         cross_target_oracle(
             "SELECT *, CLUSTER(interval) AS cid FROM ("
             "SELECT b.* FROM peaks a "
             "CROSS JOIN LATERAL NEAREST(genes, reference := a.interval, k := 1) b"
             ") sub",
+            targets=["datafusion", "duckdb"],
             peaks=[("chr1", 200, 300), ("chr1", 1000, 1100)],
             genes=[("chr1", 280, 290), ("chr1", 1050, 1060)],
             expected=[
-                ("chr1", 280, 290, 0, 1, 1),
-                ("chr1", 1050, 1060, 0, 1, 2),
+                ("chr1", 280, 290, 0, 1),
+                ("chr1", 1050, 1060, 0, 2),
             ],
-            engines={"generic": "duckdb"},
         )
 
     def test_two_correlated_nearest_star_agrees_across_targets(
@@ -1031,6 +1036,62 @@ class TestCrossTargetOracleCluster:
                 ("chr1", 10, 20, 1),
                 ("chr1", 15, 30, 1),
             ],
+        )
+
+    def test_cluster_star_hides_flag_agrees_across_targets(self, cross_target_oracle):
+        """Test a star-projected CLUSTER hides its flag identically per target (#184).
+
+        Given:
+            Two overlapping intervals and one isolated interval on chr1, projected
+            with a bare SELECT * alongside CLUSTER.
+        When:
+            The star-projected CLUSTER runs on every target.
+        Then:
+            Every target should hide the synthesized __giql_is_new_cluster flag —
+            emitting DuckDB's EXCLUDE and DataFusion's / generic's EXCEPT spelling —
+            so the output is exactly the interval columns plus the cluster id, and all
+            targets agree.
+        """
+        # Arrange / Act / Assert
+        cross_target_oracle(
+            "SELECT *, CLUSTER(interval) AS cid FROM peaks",
+            peaks=[
+                ("chr1", 100, 200),
+                ("chr1", 150, 300),
+                ("chr1", 5000, 6000),
+            ],
+            expected=[
+                ("chr1", 100, 200, 1),
+                ("chr1", 150, 300, 1),
+                ("chr1", 5000, 6000, 2),
+            ],
+        )
+
+    def test_cluster_distinct_star_dedups_agrees_across_targets(
+        self, cross_target_oracle
+    ):
+        """Test DISTINCT over a star CLUSTER dedups identically per target (#184/#181).
+
+        Given:
+            Three byte-identical intervals projected with DISTINCT over a bare star
+            alongside CLUSTER.
+        When:
+            The DISTINCT star-projected CLUSTER runs on every target.
+        Then:
+            Every target should hide the flag and dedup to the single distinct row —
+            rather than splitting on the now-hidden __giql_is_new_cluster flag — and
+            agree, proving the star-leak fix resolves the #181 DISTINCT confound on
+            DataFusion as well as DuckDB.
+        """
+        # Arrange / Act / Assert
+        cross_target_oracle(
+            "SELECT DISTINCT *, CLUSTER(interval) AS cid FROM peaks",
+            peaks=[
+                ("chr1", 10, 20),
+                ("chr1", 10, 20),
+                ("chr1", 10, 20),
+            ],
+            expected=[("chr1", 10, 20, 1)],
         )
 
 

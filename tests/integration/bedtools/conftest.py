@@ -51,7 +51,11 @@ def giql_query(duckdb_connection):
                 name,
                 [i.to_tuple() for i in intervals],
             )
-        sql = transpile(query, tables=tables)
+        # Transpile for DuckDB: this helper always executes on the DuckDB
+        # connection, and some operators (e.g. a star-projected CLUSTER, #184) emit
+        # DuckDB-specific spellings such as ``* EXCLUDE`` that the portable generic
+        # ``* EXCEPT`` form does not share.
+        sql = transpile(query, tables=tables, dialect="duckdb")
         return duckdb_connection.execute(sql).fetchall()
 
     return _run
