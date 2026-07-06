@@ -975,6 +975,35 @@ class TestCrossTargetOracleCluster:
             expected=[],
         )
 
+    def test_cluster_over_cte_from_agrees_across_targets(self, cross_target_oracle):
+        """Test CLUSTER over a CTE FROM agrees across targets (#174).
+
+        Given:
+            Two overlapping intervals and one isolated interval on chr1, wrapped in
+            a pass-through CTE that the CLUSTER runs over.
+        When:
+            A CLUSTER projection over the CTE runs on every target.
+        Then:
+            Every target should preserve the enclosing WITH — keeping the emitted
+            SQL executable — and assign identical cluster ids, in agreement, proving
+            the CTE-scoping fix holds on DataFusion as well as DuckDB.
+        """
+        # Arrange / Act / Assert
+        cross_target_oracle(
+            "WITH sub AS (SELECT * FROM peaks) "
+            'SELECT chrom, start, "end", CLUSTER(interval) AS cid FROM sub',
+            peaks=[
+                ("chr1", 100, 200),
+                ("chr1", 150, 300),
+                ("chr1", 5000, 6000),
+            ],
+            expected=[
+                ("chr1", 100, 200, 1),
+                ("chr1", 150, 300, 1),
+                ("chr1", 5000, 6000, 2),
+            ],
+        )
+
 
 class TestCrossTargetOracleMerge:
     """MERGE identity across all targets (T2)."""
@@ -1019,6 +1048,32 @@ class TestCrossTargetOracleMerge:
             tables=[Table("peaks")],
             peaks=[],
             expected=[],
+        )
+
+    def test_merge_over_cte_from_agrees_across_targets(self, cross_target_oracle):
+        """Test MERGE over a CTE FROM agrees across targets (#174).
+
+        Given:
+            Two overlapping intervals and one isolated interval on chr1, wrapped in
+            a pass-through CTE that the MERGE runs over.
+        When:
+            A MERGE query over the CTE runs on every target.
+        Then:
+            Every target should preserve the enclosing WITH — keeping the emitted
+            SQL executable — and return the merged span and the isolated interval,
+            in agreement, proving the CTE-scoping fix holds on DataFusion as well as
+            DuckDB.
+        """
+        # Arrange / Act / Assert
+        cross_target_oracle(
+            "WITH sub AS (SELECT * FROM peaks) SELECT MERGE(interval) FROM sub",
+            tables=[Table("peaks")],
+            peaks=[
+                ("chr1", 100, 200),
+                ("chr1", 150, 300),
+                ("chr1", 5000, 6000),
+            ],
+            expected=[("chr1", 100, 300), ("chr1", 5000, 6000)],
         )
 
 

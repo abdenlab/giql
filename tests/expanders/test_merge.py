@@ -359,3 +359,131 @@ class TestMergeExpander:
 
         # Assert
         assert rows == [("chr1", 1, 8), ("chr1", 20, 25)]
+
+    @pytest.mark.parametrize(
+        "query, expected_with",
+        [
+            (
+                "WITH sub AS (SELECT * FROM peaks) SELECT MERGE(interval) FROM sub",
+                "WITH sub AS (SELECT * FROM peaks)",
+            ),
+            (
+                "WITH a AS (SELECT * FROM peaks), sub AS (SELECT * FROM a) "
+                "SELECT MERGE(interval) FROM sub",
+                "WITH a AS (SELECT * FROM peaks), sub AS (SELECT * FROM a)",
+            ),
+        ],
+        ids=["single_cte", "chained_ctes"],
+    )
+    def test_transpile_should_preserve_with_clause_when_merge_over_cte(
+        self, query, expected_with
+    ):
+        """Test that MERGE over a CTE FROM keeps the enclosing WITH clause.
+
+        Given:
+            A MERGE whose FROM references a CTE — a single CTE, and a chain of two
+            CTEs where the driving relation is defined in terms of the first.
+        When:
+            Transpiling the query.
+        Then:
+            The emitted SQL should retain the enclosing WITH clause verbatim so the
+            rewritten __giql_clustered subquery's ``FROM sub`` reference still
+            resolves, rather than dropping the WITH and dangling an undefined CTE
+            reference — the pre-#174 transplant defect.
+        """
+        # Act
+        sql = transpile(query, tables=["peaks"])
+
+        # Assert
+        assert sql.startswith(expected_with)
+        assert "AS __giql_clustered" in sql
+        assert "FROM sub) AS __giql_lag_calc" in sql
+
+    def test_transpile_should_execute_when_merge_over_cte(self):
+        """Test that MERGE over a CTE FROM emits executable SQL.
+
+        Given:
+            A MERGE whose FROM references a pass-through CTE over a seeded table.
+        When:
+            Transpiling the query and executing it on DuckDB.
+        Then:
+            The query should execute (the preserved WITH keeps the CTE reference
+            resolvable) and collapse overlapping intervals into merged rows,
+            proving the #174 fix emits runnable SQL rather than referencing a
+            dropped CTE.
+        """
+        # Arrange
+        duckdb = pytest.importorskip("duckdb")
+        conn = duckdb.connect(":memory:")
+        conn.execute(
+            'CREATE TABLE peaks (chrom VARCHAR, "start" INTEGER, "end" INTEGER)'
+        )
+        conn.executemany(
+            "INSERT INTO peaks VALUES (?, ?, ?)",
+            [
+                ("chr1", 1, 5),  # overlaps the next -> one merged row
+                ("chr1", 3, 8),
+                ("chr1", 20, 25),  # separate -> its own row
+            ],
+        )
+        query = "WITH sub AS (SELECT * FROM peaks) SELECT MERGE(interval) FROM sub"
+
+        # Act
+        sql = transpile(query, tables=["peaks"])
+        rows = conn.execute(sql).fetchall()
+
+        # Assert
+        assert rows == [("chr1", 1, 8), ("chr1", 20, 25)]
+
+    def test_transpile_should_not_hoist_outer_with_when_merge_nested_in_cte_body(self):
+        """Test that a MERGE inside a CTE body keeps the outer WITH at the root.
+
+        Given:
+            A MERGE nested inside a CTE body, under a root SELECT that carries the
+            enclosing WITH.
+        When:
+            Transpiling the query and executing it on DuckDB.
+        Then:
+            The enclosing WITH should stay at the root, the MERGE should expand into
+            the __giql_clustered form inside the CTE body, and the query should
+            execute — the inner transplant reads only its own SELECT's (absent) WITH,
+            so it does not hoist the ancestor WITH.
+        """
+        # Arrange
+        duckdb = pytest.importorskip("duckdb")
+        conn = duckdb.connect(":memory:")
+        conn.execute(
+            'CREATE TABLE peaks (chrom VARCHAR, "start" INTEGER, "end" INTEGER)'
+        )
+        conn.executemany(
+            "INSERT INTO peaks VALUES (?, ?, ?)",
+            [("chr1", 1, 5), ("chr1", 3, 8), ("chr1", 20, 25)],
+        )
+        query = "WITH sub AS (SELECT MERGE(interval) FROM peaks) SELECT * FROM sub"
+
+        # Act
+        sql = transpile(query, tables=["peaks"])
+        rows = conn.execute(sql).fetchall()
+
+        # Assert
+        assert sql.startswith("WITH sub AS (")
+        assert "AS __giql_clustered" in sql
+        assert sql.rstrip().endswith("SELECT * FROM sub")
+        assert rows == [("chr1", 1, 8), ("chr1", 20, 25)]
+
+    def test_transpile_should_not_emit_with_when_merge_over_bare_table(self):
+        """Test that a MERGE over a bare table grows no spurious WITH.
+
+        Given:
+            A MERGE over a bare registered table with no enclosing WITH.
+        When:
+            Transpiling the query.
+        Then:
+            The emitted SQL should not begin with a WITH clause — the transplant
+            WITH-preservation branch is a no-op on the common, CTE-free path (#174).
+        """
+        # Act
+        sql = transpile("SELECT MERGE(interval) FROM peaks", tables=["peaks"])
+
+        # Assert
+        assert not sql.lstrip().upper().startswith("WITH")
