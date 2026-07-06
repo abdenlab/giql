@@ -10,12 +10,15 @@ expansion restructures the enclosing query into a two-level form::
 
 becomes::
 
-    SELECT *, SUM(is_new_cluster) OVER (PARTITION BY chrom ORDER BY start) AS cluster_id
+    SELECT *,
+           SUM(__giql_is_new_cluster) OVER (PARTITION BY chrom ORDER BY start)
+               AS cluster_id
     FROM (
         SELECT *,
-               CASE WHEN LAG(end) OVER (...) >= start THEN 0 ELSE 1 END AS is_new_cluster
+               CASE WHEN LAG(end) OVER (...) >= start THEN 0 ELSE 1 END
+                    AS __giql_is_new_cluster
         FROM features
-    ) AS lag_calc
+    ) AS __giql_lag_calc
 
 (The ``becomes::`` form is simplified for readability; the emitted SQL quotes
 identifiers and appends ``NULLS LAST`` to the window ORDER BY.)
@@ -50,6 +53,7 @@ from __future__ import annotations
 
 from sqlglot import exp
 
+from giql.constants import CLUSTER_FLAG_COL
 from giql.expander import ExpansionContext
 from giql.expander import expand_operators
 from giql.expander import register
@@ -72,7 +76,7 @@ def expand_cluster(node: GIQLCluster, ctx: ExpansionContext) -> exp.Expression:
     to it through the registry's generic chain (CLUSTER emits identical SQL across
     targets). Locates the enclosing :class:`~sqlglot.expressions.Select`, derives
     the genomic columns from the FROM table, and rewrites that SELECT in place into
-    the two-level ``lag_calc`` form. Returns the original CLUSTER node (now
+    the two-level ``__giql_lag_calc`` form. Returns the original CLUSTER node (now
     unreachable from the rewritten root SELECT) so the pass's ``node.replace`` is a
     no-op.
 
@@ -115,7 +119,7 @@ def expand_cluster(node: GIQLCluster, ctx: ExpansionContext) -> exp.Expression:
         return node
     transplant(select, transformed)
     # copy()+transplant duplicated the enclosing WHERE / HAVING into the new
-    # lag_calc subquery; the originals the pass collected are now unreachable, so
+    # __giql_lag_calc subquery; the originals the pass collected are now unreachable, so
     # re-run the pass over the restructured SELECT to expand any sibling pass-3
     # operators (spatial predicates, DISTANCE) carried into it. Safe from
     # recursion: the CLUSTER node is already replaced by its SUM window. (#144 B1)
@@ -142,7 +146,7 @@ def expand_cluster_query(
     """Restructure *query* for every CLUSTER in its projection; ``None`` if none.
 
     Finds CLUSTER expressions in *query*'s SELECT list and rewrites the query into
-    the two-level ``lag_calc`` form once per CLUSTER (chaining, as the legacy
+    the two-level ``__giql_lag_calc`` form once per CLUSTER (chaining, as the legacy
     transformer did). Operates on *query* directly and returns the rewritten
     query. Returns ``None`` when *query* projects no CLUSTER, so callers can treat
     that as a no-op.
@@ -154,9 +158,10 @@ def expand_cluster_query(
     if not cluster_exprs:
         return None
     if len(cluster_exprs) > 1:
-        # Chaining the rewrite per CLUSTER yields a duplicate ``lag_calc`` alias
-        # and an ``is_new_cluster`` binder error — non-executable SQL. Fail loudly,
-        # mirroring the multiple-MERGE guard, rather than emitting it (#144 A15).
+        # Chaining the rewrite per CLUSTER yields a duplicate ``__giql_lag_calc``
+        # alias and an ``__giql_is_new_cluster`` binder error — non-executable SQL.
+        # Fail loudly, mirroring the multiple-MERGE guard, rather than emitting the
+        # broken SQL (#144 A15).
         raise ValueError("Multiple CLUSTER expressions not yet supported")
     for cluster_expr in cluster_exprs:
         query = _transform_for_cluster(query, cluster_expr, columns)
@@ -166,14 +171,14 @@ def expand_cluster_query(
 def _transform_for_cluster(
     query: exp.Select, cluster_expr: GIQLCluster, columns: GenomicColumns
 ) -> exp.Select:
-    """Rewrite *query* into the two-level ``lag_calc`` form for one CLUSTER.
+    """Rewrite *query* into the two-level ``__giql_lag_calc`` form for one CLUSTER.
 
     A byte-for-byte port of the legacy
     ``ClusterTransformer._transform_for_cluster``, with the genomic columns passed
     in (the legacy method re-derived them from the FROM table) rather than read off
-    ``self``. Builds an inner ``lag_calc`` subquery that materializes an
-    ``is_new_cluster`` flag from a ``LAG`` window, then an outer query whose
-    ``SUM(is_new_cluster) OVER (...)`` window replaces the CLUSTER projection.
+    ``self``. Builds an inner ``__giql_lag_calc`` subquery that materializes an
+    ``__giql_is_new_cluster`` flag from a ``LAG`` window, then an outer query whose
+    ``SUM(__giql_is_new_cluster) OVER (...)`` window replaces the CLUSTER projection.
     """
     chrom_col, start_col, end_col, strand_col = columns
 
@@ -243,7 +248,7 @@ def _transform_for_cluster(
     else:
         keep_together = adjacency
 
-    # Create CASE expression for is_new_cluster
+    # Create CASE expression for __giql_is_new_cluster
     case_expr = exp.Case(
         ifs=[
             exp.If(
@@ -254,7 +259,8 @@ def _transform_for_cluster(
         default=exp.Literal.number(1),
     )
 
-    # Build CTE SELECT expressions (all original except CLUSTER, plus is_new_cluster)
+    # Build CTE SELECT expressions (all original except CLUSTER, plus
+    # __giql_is_new_cluster)
     cte_expressions = []
     for expression in query.expressions:
         # Skip CLUSTER expressions
@@ -272,7 +278,7 @@ def _transform_for_cluster(
     if stranded:
         required_cols.add(strand_col)
 
-    # The predicate is evaluated inside the lag_calc CTE, so every column
+    # The predicate is evaluated inside the __giql_lag_calc CTE, so every column
     # it references (current-row columns and PREV() arguments alike) must
     # be projected into that CTE. Folding them into required_cols makes the
     # scope dependency explicit and keeps the columns available even when a
@@ -300,9 +306,9 @@ def _transform_for_cluster(
     for col in sorted(required_cols - selected_cols):
         cte_expressions.append(exp.column(col, quoted=True))
 
-    # Add is_new_cluster calculation
-    # NOTE: synthesized name; the missing __giql_ reserved prefix is left to #161.
-    cte_expressions.append(exp.alias_(case_expr, "is_new_cluster", quoted=False))
+    # Add __giql_is_new_cluster calculation. The reserved __giql_ prefix keeps the
+    # synthesized flag from colliding with a user column of the same name (#161).
+    cte_expressions.append(exp.alias_(case_expr, CLUSTER_FLAG_COL, quoted=False))
 
     # Build CTE query
     cte_select = exp.Select()
@@ -320,9 +326,9 @@ def _transform_for_cluster(
     if query.args.get("having"):
         cte_select.set("having", query.args["having"].copy())
 
-    # Create outer query with SUM over is_new_cluster
+    # Create outer query with SUM over __giql_is_new_cluster
     sum_window = exp.Window(
-        this=exp.Sum(this=exp.column("is_new_cluster")),
+        this=exp.Sum(this=exp.column(CLUSTER_FLAG_COL)),
         partition_by=partition_cols,
         order=exp.Order(expressions=order_by),
     )
@@ -346,11 +352,13 @@ def _transform_for_cluster(
     new_query = exp.Select()
     new_query.select(*new_expressions, copy=False)
 
-    # Wrap CTE in subquery and set as FROM clause
-    # NOTE: synthesized name; the missing __giql_ reserved prefix is left to #161.
+    # Wrap CTE in subquery and set as FROM clause. The alias carries the reserved
+    # __giql_ prefix for namespace consistency with the other synthesized names
+    # (#161); a derived-table alias never actually collides with a user relation
+    # (it lives in the enclosing query's scope), so this is hygiene, not a fix.
     subquery = exp.Subquery(
         this=cte_select,
-        alias=exp.TableAlias(this=exp.Identifier(this="lag_calc")),
+        alias=exp.TableAlias(this=exp.Identifier(this="__giql_lag_calc")),
     )
     new_query.from_(subquery, copy=False)
 

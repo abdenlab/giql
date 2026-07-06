@@ -9,13 +9,14 @@ a cluster id, then aggregate ``MIN(start)`` / ``MAX(end)`` per cluster::
 becomes::
 
     SELECT chrom, MIN(start) AS start, MAX(end) AS end
-    FROM (SELECT *, CLUSTER(interval) AS __giql_cluster_id FROM features) AS clustered
+    FROM (SELECT *, CLUSTER(interval) AS __giql_cluster_id FROM features)
+        AS __giql_clustered
     GROUP BY chrom, __giql_cluster_id
     ORDER BY chrom, start
 
 (The ``becomes::`` form is simplified for readability; the emitted SQL quotes
 identifiers, appends ``NULLS LAST``, and the inner ``CLUSTER(...)`` is itself
-expanded into the two-level ``lag_calc`` form.)
+expanded into the two-level ``__giql_lag_calc`` form.)
 
 This module is the AST-expansion replacement for the legacy
 :class:`giql.transformer.MergeTransformer`; it produces the same SQL (the existing
@@ -33,6 +34,7 @@ from __future__ import annotations
 
 from sqlglot import exp
 
+from giql.constants import CLUSTER_ID_COL
 from giql.expander import ExpansionContext
 from giql.expander import expand_operators
 from giql.expander import register
@@ -97,7 +99,7 @@ def expand_merge(node: GIQLMerge, ctx: ExpansionContext) -> exp.Expression:
         # in-projection-expression case; this guards the out-of-projection case.
         return node
     transplant(select, transformed)
-    # copy()+transplant duplicated the enclosing WHERE into the new clustered
+    # copy()+transplant duplicated the enclosing WHERE into the new __giql_clustered
     # subquery; the originals the pass collected are now unreachable, so re-run the
     # pass over the restructured SELECT to expand any sibling pass-3 operators
     # carried into it. Safe from recursion: the MERGE is already gone. (#144 B1)
@@ -143,8 +145,8 @@ def _transform_for_merge(
     with the genomic columns passed in and the intermediate clustered query
     restructured through CLUSTER's shared
     :func:`giql.expanders.cluster.expand_cluster_query` (the legacy method called
-    ``ClusterTransformer.transform``). Builds an inner ``clustered`` subquery that
-    appends ``__giql_cluster_id``, then an outer query that aggregates
+    ``ClusterTransformer.transform``). Builds an inner ``__giql_clustered`` subquery
+    that appends ``__giql_cluster_id``, then an outer query that aggregates
     ``MIN(start)`` / ``MAX(end)`` per cluster.
     """
     chrom_col, start_col, end_col, strand_col = columns
@@ -169,10 +171,10 @@ def _transform_for_merge(
     # Start with original query's FROM/WHERE/etc
     cluster_query = exp.Select()
     cluster_query.select(exp.Star(), copy=False)
-    # NOTE: __giql_cluster_id carries the reserved prefix; the un-prefixed
-    # `clustered` / `lag_calc` / `is_new_cluster` siblings are left to #161.
+    # __giql_cluster_id and its ``__giql_clustered`` / ``__giql_lag_calc`` /
+    # ``__giql_is_new_cluster`` siblings all carry the reserved prefix (#161).
     cluster_query.select(
-        exp.alias_(cluster_expr, "__giql_cluster_id", quoted=False),
+        exp.alias_(cluster_expr, CLUSTER_ID_COL, quoted=False),
         append=True,
         copy=False,
     )
@@ -200,7 +202,7 @@ def _transform_for_merge(
     if stranded:
         group_by_cols.append(exp.column(strand_col, quoted=True))
 
-    group_by_cols.append(exp.column("__giql_cluster_id"))
+    group_by_cols.append(exp.column(CLUSTER_ID_COL))
 
     # Build SELECT expressions for merged intervals
     select_exprs = []
@@ -237,10 +239,13 @@ def _transform_for_merge(
     final_query = exp.Select()
     final_query.select(*select_exprs, copy=False)
 
-    # FROM the clustered subquery
+    # FROM the clustered subquery. The alias carries the reserved __giql_ prefix for
+    # namespace consistency with the other synthesized names (#161); a derived-table
+    # alias never actually collides with a user relation (it lives in the enclosing
+    # query's scope), so this is hygiene, not a fix.
     subquery = exp.Subquery(
         this=cluster_query,
-        alias=exp.TableAlias(this=exp.Identifier(this="clustered")),
+        alias=exp.TableAlias(this=exp.Identifier(this="__giql_clustered")),
     )
     final_query.from_(subquery, copy=False)
 
