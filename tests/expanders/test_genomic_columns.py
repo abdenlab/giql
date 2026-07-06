@@ -154,10 +154,11 @@ class TestGenomicColumnResolution:
         When:
             Transpiling the query.
         Then:
-            It should resolve through the CTE to the custom columns. (The rewrite
-            drops the enclosing WITH clause — a pre-existing transplant limitation
-            tracked by #174, orthogonal to this column resolution — so only the
-            resolved columns are asserted, not executability.)
+            It should resolve through the CTE to the custom columns, and the
+            enclosing WITH clause is preserved so the rewritten SQL stays
+            executable (#174 — WITH preservation is pinned in the CLUSTER/MERGE
+            expander suites; asserted here to confirm resolution and preservation
+            compose).
         """
         # Arrange
         query = (
@@ -171,6 +172,7 @@ class TestGenomicColumnResolution:
         # Assert
         assert 'PARTITION BY "ch" ORDER BY "s" NULLS LAST' in sql
         assert '"chrom"' not in sql
+        assert sql.startswith("WITH sub AS (SELECT * FROM regions)")
 
     def test_transpile_should_resolve_custom_columns_when_from_is_nested_derived_table(
         self, custom

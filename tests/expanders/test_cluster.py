@@ -441,3 +441,135 @@ class TestClusterExpander:
         # Assert
         assert [r["cluster_id"] for r in rows] == [1, 1, 2]
         assert [r["is_new_cluster"] for r in rows] == [7, 7, 7]
+
+    @pytest.mark.parametrize(
+        "query, expected_with",
+        [
+            (
+                "WITH sub AS (SELECT * FROM peaks) "
+                "SELECT *, CLUSTER(interval) AS cid FROM sub",
+                "WITH sub AS (SELECT * FROM peaks)",
+            ),
+            (
+                "WITH a AS (SELECT * FROM peaks), sub AS (SELECT * FROM a) "
+                "SELECT *, CLUSTER(interval) AS cid FROM sub",
+                "WITH a AS (SELECT * FROM peaks), sub AS (SELECT * FROM a)",
+            ),
+        ],
+        ids=["single_cte", "chained_ctes"],
+    )
+    def test_transpile_should_preserve_with_clause_when_cluster_over_cte(
+        self, query, expected_with
+    ):
+        """Test that CLUSTER over a CTE FROM keeps the enclosing WITH clause.
+
+        Given:
+            A CLUSTER whose FROM references a CTE — a single CTE, and a chain of
+            two CTEs where the driving relation is defined in terms of the first.
+        When:
+            Transpiling the query.
+        Then:
+            The emitted SQL should retain the enclosing WITH clause verbatim so the
+            rewritten __giql_lag_calc subquery's ``FROM sub`` reference still
+            resolves, rather than dropping the WITH and dangling an undefined CTE
+            reference — the pre-#174 transplant defect.
+        """
+        # Act
+        sql = transpile(query, tables=["peaks"])
+
+        # Assert
+        assert sql.startswith(expected_with)
+        assert "AS __giql_lag_calc" in sql
+        assert "FROM sub) AS __giql_lag_calc" in sql
+
+    def test_transpile_should_execute_when_cluster_over_cte(self):
+        """Test that CLUSTER over a CTE FROM emits executable SQL.
+
+        Given:
+            A CLUSTER whose FROM references a pass-through CTE over a seeded table.
+        When:
+            Transpiling the query and executing it on DuckDB.
+        Then:
+            The query should execute (the preserved WITH keeps the CTE reference
+            resolvable) and return the correct per-partition cluster ids, proving
+            the #174 fix emits runnable SQL rather than referencing a dropped CTE.
+        """
+        # Arrange
+        duckdb = pytest.importorskip("duckdb")
+        conn = duckdb.connect(":memory:")
+        conn.execute(
+            'CREATE TABLE peaks (chrom VARCHAR, "start" INTEGER, "end" INTEGER)'
+        )
+        conn.executemany(
+            "INSERT INTO peaks VALUES (?, ?, ?)",
+            [
+                ("chr1", 100, 200),  # i1
+                ("chr1", 150, 250),  # overlaps i1 -> same cluster
+                ("chr1", 400, 500),  # separate -> new cluster
+            ],
+        )
+        query = (
+            "WITH sub AS (SELECT * FROM peaks) "
+            "SELECT *, CLUSTER(interval) AS cid FROM sub"
+        )
+
+        # Act
+        sql = transpile(query, tables=["peaks"])
+        cursor = conn.execute(sql)
+        columns = [desc[0] for desc in cursor.description]
+        rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+        # Assert
+        # Sorted: the emitted CLUSTER query carries no outer ORDER BY, so assert the
+        # cluster-id multiset rather than an insertion-order-dependent sequence.
+        assert sorted(r["cid"] for r in rows) == [1, 1, 2]
+
+    def test_transpile_should_not_hoist_outer_with_when_cluster_nested_in_cte_body(
+        self,
+    ):
+        """Test that a CLUSTER inside a CTE body keeps the outer WITH at the root.
+
+        Given:
+            A CLUSTER nested inside the body of one CTE whose driving relation is a
+            sibling CTE, under a root SELECT that carries the enclosing WITH.
+        When:
+            Transpiling the query.
+        Then:
+            The enclosing WITH should stay at the root and the rewritten
+            __giql_lag_calc subquery should still reference the sibling CTE ``a`` —
+            the inner transplant reads only its own SELECT's (absent) WITH, so it
+            neither hoists the ancestor WITH nor drops the sibling CTE reference.
+        """
+        # Arrange
+        query = (
+            "WITH a AS (SELECT * FROM peaks), "
+            "sub AS (SELECT *, CLUSTER(interval) AS cid FROM a) "
+            "SELECT * FROM sub"
+        )
+
+        # Act
+        sql = transpile(query, tables=["peaks"])
+
+        # Assert
+        assert sql.startswith("WITH a AS (SELECT * FROM peaks), sub AS (")
+        assert "FROM a) AS __giql_lag_calc" in sql
+        assert sql.rstrip().endswith("SELECT * FROM sub")
+
+    def test_transpile_should_not_emit_with_when_cluster_over_bare_table(self):
+        """Test that a CLUSTER over a bare table grows no spurious WITH.
+
+        Given:
+            A CLUSTER over a bare registered table with no enclosing WITH.
+        When:
+            Transpiling the query.
+        Then:
+            The emitted SQL should not begin with a WITH clause — the transplant
+            WITH-preservation branch is a no-op on the common, CTE-free path (#174).
+        """
+        # Act
+        sql = transpile(
+            "SELECT *, CLUSTER(interval) AS cid FROM peaks", tables=["peaks"]
+        )
+
+        # Assert
+        assert not sql.lstrip().upper().startswith("WITH")
