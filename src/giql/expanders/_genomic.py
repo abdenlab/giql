@@ -316,7 +316,8 @@ def reject_cluster_merge_mix(select: exp.Select) -> None:
 
 
 def transplant(select: exp.Select, new: exp.Select) -> None:
-    """Replace *select*'s contents with *new*'s, preserving *select*'s identity.
+    """Replace *select*'s contents with *new*'s (preserving *select*'s enclosing
+    ``WITH``, see below), keeping *select*'s identity.
 
     Part of the shared CLUSTER/MERGE expansion toolkit. Clears every argument of
     *select* and re-installs *new*'s, so *select* keeps its position in the
@@ -328,8 +329,30 @@ def transplant(select: exp.Select, new: exp.Select) -> None:
     ``exp.Select``, as the ``_transform_for_*`` helpers return. Its children are
     re-parented onto *select*, so passing a node still attached elsewhere would
     corrupt that other tree.
+
+    The enclosing ``WITH`` clause is preserved: the ``_transform_for_*`` helpers
+    build *new* from the original's FROM / WHERE / GROUP / HAVING / ORDER but never
+    its top-level ``WITH``, so a CLUSTER/MERGE over a CTE FROM would otherwise drop
+    the enclosing ``WITH`` and dangle the now-undefined CTE reference. That
+    reference is named by the rewritten ``__giql_lag_calc`` subquery (nested, for
+    MERGE, inside its ``__giql_clustered`` aggregation wrapper). Re-attaching
+    *select*'s original ``WITH`` keeps the emitted SQL executable — a CTE is in
+    scope for the entire query, including that nested subquery (#174).
     """
     assert new.parent is None, "transplant() requires a detached `new` subtree"
+    preserved_with = select.args.get("with_")
     select.args.clear()
     for key, value in list(new.args.items()):
         select.set(key, value)
+    # The _transform_for_* helpers populate `new` with only
+    # select/from/where/group/having/order and never a top-level WITH, so
+    # re-attaching the preserved WITH can never clobber one `new` supplies. Assert
+    # that invariant rather than silently dropping the user's CTEs if a future
+    # rewrite ever violates it — the correct behavior there would be to *merge* the
+    # two WITH clauses, not pick one and drop the other.
+    assert new.args.get("with_") is None, (
+        "transplant() cannot reconcile a WITH from `new` with the preserved outer "
+        "WITH; a rewrite that emits its own WITH must merge them explicitly."
+    )
+    if preserved_with is not None:
+        select.set("with_", preserved_with)
