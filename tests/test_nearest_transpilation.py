@@ -449,18 +449,33 @@ class TestNearestFallbackDetachContract:
         assert "ROW_NUMBER(" in output.upper()
 
 
-#: The reserved rank/key columns the decorrelated fallback exposes on its join and
-#: that the statement finalizer must project away from a surfacing star (#160).
-_RESERVED_FALLBACK_COLUMNS = (
-    "__giql_x_rk_chrom",
-    "__giql_x_rk_start",
-    "__giql_x_rk_end",
-    "__giql_x_rn",
-)
+#: Matches a single reserved rank/key column the decorrelated fallback synthesizes.
+#: The names are minted per fallback from a run alias (``__giql_x_<n>``), so the
+#: discriminating ``<n>`` is not known ahead of time (#172); tests extract the
+#: actual names from the emitted SQL rather than hardcoding them, which also keeps
+#: them robust to alias-sequence shifts.
+_RESERVED_COLUMN = r"__giql_x_\d+_r(?:k_(?:chrom|start|end|strand)|n)"
+_RESERVED_COLUMN_RE = re.compile(rf"{_RESERVED_COLUMN}\b")
 
-#: The extra reserved key the fallback exposes in the stranded case (strand joins
-#: the partition/reference key), on top of ``_RESERVED_FALLBACK_COLUMNS``.
-_STRAND_RESERVED_COLUMN = "__giql_x_rk_strand"
+#: Matches only the reserved columns the ranked subquery *defines* via ``AS
+#: "..."`` — the join's own projection, where each reserved column originates.
+#: This is independent of the ``* EXCEPT`` wrapper (whose names are bare, not
+#: ``AS``-aliased), so asserting the wrapper's except-set equals this defined set is
+#: a bidirectional check: it catches both a wrapper that misses a surfaced column
+#: (the #172 leak) and a wrapper that excepts a spurious name the join never defines.
+_RESERVED_COLUMN_DEF_RE = re.compile(rf'AS "({_RESERVED_COLUMN})"')
+
+
+def _reserved_columns_defined(output: str) -> set[str]:
+    """Return the reserved rank/key column names the fallback's join *defines*.
+
+    Extracts the per-fallback ``__giql_x_<n>_rk_*`` / ``__giql_x_<n>_rn`` names from
+    the ranked subquery's ``AS "..."`` definitions — the columns the decorrelated
+    join actually exposes — independent of the ``* EXCEPT`` wrapper. A test can then
+    assert the wrapper excepts *exactly* this set (not merely a superset), without
+    depending on the run-dependent per-fallback tag.
+    """
+    return set(_RESERVED_COLUMN_DEF_RE.findall(output))
 
 
 def _wrapper_except_names(output: str) -> set[str] | None:
@@ -519,7 +534,7 @@ class TestNearestFallbackReservedColumnProjection:
         )
 
         # Assert
-        assert _wrapper_except_names(output) == set(_RESERVED_FALLBACK_COLUMNS)
+        assert _wrapper_except_names(output) == _reserved_columns_defined(output)
 
     def test_expand_nearest_should_wrap_star_except_reserved_when_unqualified_star_on_datafusion(  # noqa: E501
         self, tables_with_peaks_and_genes
@@ -548,7 +563,7 @@ class TestNearestFallbackReservedColumnProjection:
         )
 
         # Assert
-        assert _wrapper_except_names(output) == set(_RESERVED_FALLBACK_COLUMNS)
+        assert _wrapper_except_names(output) == _reserved_columns_defined(output)
 
     def test_expand_nearest_should_not_wrap_when_projection_is_explicit_on_datafusion(
         self, tables_with_peaks_and_genes
@@ -636,7 +651,7 @@ class TestNearestFallbackReservedColumnProjection:
         # Assert
         assert not output.startswith("SELECT * EXCEPT (")
         inner = output[output.index("SELECT * EXCEPT (") :]
-        assert _wrapper_except_names(inner) == set(_RESERVED_FALLBACK_COLUMNS)
+        assert _wrapper_except_names(inner) == _reserved_columns_defined(output)
 
     def test_expand_nearest_should_not_wrap_on_lateral_capable_target(
         self, tables_with_peaks_and_genes
@@ -674,12 +689,13 @@ class TestNearestFallbackReservedColumnProjection:
         Given:
             A **stranded** correlated NEAREST projected as ``SELECT b.*`` on the
             DataFusion target — the fallback's reference key includes strand, so it
-            exposes an extra reserved ``__giql_x_rk_strand`` column on the join.
+            exposes an extra reserved ``…_rk_strand`` column on the join.
         When:
             Transpiling.
         Then:
-            The ``* EXCEPT`` wrapper's name-set should equal the base reserved
-            columns plus ``__giql_x_rk_strand`` — the strand key is hidden too.
+            The ``* EXCEPT`` wrapper's name-set should equal every reserved column
+            the fallback emits, including the extra ``…_rk_strand`` key — the strand
+            key is hidden too.
         """
         # Arrange
         sql = (
@@ -694,9 +710,9 @@ class TestNearestFallbackReservedColumnProjection:
         )
 
         # Assert
-        assert _wrapper_except_names(output) == set(_RESERVED_FALLBACK_COLUMNS) | {
-            _STRAND_RESERVED_COLUMN
-        }
+        excepted = _wrapper_except_names(output)
+        assert excepted == _reserved_columns_defined(output)
+        assert any(name.endswith("_rk_strand") for name in excepted)
 
     def test_expand_nearest_should_not_wrap_when_projection_is_outer_relation_star_on_datafusion(  # noqa: E501
         self, tables_with_peaks_and_genes
@@ -735,6 +751,9 @@ class TestNearestFallbackReservedColumnProjection:
         Given:
             A correlated NEAREST whose user projection is already
             ``SELECT * EXCEPT (<all reserved columns>)`` on the DataFusion target.
+            The reserved names are minted per fallback, so they are discovered from
+            a plain ``SELECT *`` transpile of the same join (whose alias sequence is
+            identical) before being written into the already-excepting query.
         When:
             Transpiling.
         Then:
@@ -743,11 +762,16 @@ class TestNearestFallbackReservedColumnProjection:
             surfacing (exactly one ``EXCEPT`` clause in the output).
         """
         # Arrange
-        excepted = ", ".join(f'"{name}"' for name in _RESERVED_FALLBACK_COLUMNS)
-        sql = (
-            f"SELECT * EXCEPT ({excepted}) FROM peaks a "
+        join = (
+            "FROM peaks a "
             "CROSS JOIN LATERAL NEAREST(genes, reference := a.interval, k := 1) b"
         )
+        discovered = _generate_for_target(
+            f"SELECT * {join}", tables_with_peaks_and_genes, DataFusionTarget()
+        )
+        reserved = _reserved_columns_defined(discovered)
+        excepted = ", ".join(f'"{name}"' for name in sorted(reserved))
+        sql = f"SELECT * EXCEPT ({excepted}) {join}"
 
         # Act
         output = _generate_for_target(
@@ -756,7 +780,7 @@ class TestNearestFallbackReservedColumnProjection:
 
         # Assert
         assert output.count("EXCEPT") == 1
-        assert _wrapper_except_names(output) == set(_RESERVED_FALLBACK_COLUMNS)
+        assert _wrapper_except_names(output) == reserved
 
     def test_expand_nearest_should_wrap_when_b_star_qualifier_is_mixed_case_on_datafusion(  # noqa: E501
         self, tables_with_peaks_and_genes
@@ -787,7 +811,7 @@ class TestNearestFallbackReservedColumnProjection:
         )
 
         # Assert
-        assert _wrapper_except_names(output) == set(_RESERVED_FALLBACK_COLUMNS)
+        assert _wrapper_except_names(output) == _reserved_columns_defined(output)
 
     def test_expand_nearest_should_not_mint_wrapper_alias_when_no_wrap_on_datafusion(
         self, tables_with_peaks_and_genes
@@ -827,24 +851,23 @@ class TestNearestFallbackReservedColumnProjection:
         assert explicit_aliases < wrapped_aliases
         assert len(wrapped_aliases) - len(explicit_aliases) == 1
 
-    def test_expand_cluster_over_nearest_should_not_crash_and_leaks_as_documented_residual_on_datafusion(  # noqa: E501
+    def test_expand_cluster_over_nearest_should_wrap_reserved_when_transplanted_on_datafusion(  # noqa: E501
         self, tables_with_peaks_and_genes
     ):
-        """Test a ``SELECT *`` CLUSTER wrapping a correlated NEAREST is a documented leak.
+        """Test a ``SELECT *`` CLUSTER wrapping a correlated NEAREST hides reserved cols.
 
         Given:
             A correlated NEAREST fallback nested under a ``SELECT *``-projecting
-            CLUSTER on the DataFusion target. The CLUSTER's copy+transplant detaches
-            the join the finalizer captured (``parent_select`` becomes ``None``), so
-            the finalizer no-ops and the outer ``SELECT *`` re-surfaces the reserved
-            columns.
+            CLUSTER on the DataFusion target. The CLUSTER's copy+transplant rebuilds
+            the enclosing query from a copy, relocating the fallback's join, so a
+            finalizer that captured the original join would no-op.
         When:
             Transpiling.
         Then:
-            It should transpile without error and leak the reserved columns — the
-            documented, unwrapped residual tracked by #172 — exercising the
-            finalizer's detached-join (``select is None``) no-op branch. This pins
-            the residual so a future change that alters it is caught.
+            The finalizer should re-locate the transplanted join by its reserved
+            ``meta`` tag and wrap the enclosing SELECT in ``SELECT * EXCEPT (...)``,
+            so no reserved column reaches the output — the former #172 residual is
+            fixed.
         """
         # Arrange
         sql = (
@@ -860,5 +883,95 @@ class TestNearestFallbackReservedColumnProjection:
         )
 
         # Assert
-        assert "EXCEPT" not in output
-        assert "__giql_x_rk_chrom" in output  # residual leak (#172), not wrapped
+        emitted = _reserved_columns_defined(output)
+        assert emitted  # the fallback did synthesize reserved columns
+        # The single reserved wrapper excepts exactly the emitted reserved set.
+        assert output.count("SELECT * EXCEPT (") == 1
+        wrap_start = output.index("SELECT * EXCEPT (")
+        excepted = _wrapper_except_names(output[wrap_start:])
+        assert excepted == emitted
+        # No reserved column survives to the top-level CLUSTER projection.
+        assert not _RESERVED_COLUMN_RE.search(output[:wrap_start])
+
+    def test_expand_two_correlated_nearest_should_wrap_each_reserved_set_on_datafusion(
+        self, tables_with_peaks_and_genes
+    ):
+        """Test two correlated NEAREST fallbacks each get their reserved cols hidden.
+
+        Given:
+            A query with two correlated NEAREST fallbacks (``b`` and ``c``) both
+            projected via star (``SELECT b.*, c.*``) on the DataFusion target. Each
+            fallback exposes its own reserved rank/key columns on its join.
+        When:
+            Transpiling.
+        Then:
+            The two fallbacks should mint distinct per-run reserved column names, and
+            two nested ``* EXCEPT`` wrappers should together strip both sets, so no
+            reserved column reaches the output — the former #172 two-fallback residual
+            is fixed.
+        """
+        # Arrange
+        sql = (
+            "SELECT b.*, c.* FROM peaks a "
+            "CROSS JOIN LATERAL NEAREST(genes, reference := a.interval, k := 1) b "
+            "CROSS JOIN LATERAL NEAREST(genes, reference := a.interval, k := 1) c"
+        )
+
+        # Act
+        output = _generate_for_target(
+            sql, tables_with_peaks_and_genes, DataFusionTarget()
+        )
+
+        # Assert
+        emitted = _reserved_columns_defined(output)
+        # Two fallbacks => two distinct per-run tags => two distinct rank columns.
+        rank_cols = {name for name in emitted if name.endswith("_rn")}
+        assert len(rank_cols) == 2
+        # Two nested wrappers together except exactly the full reserved set.
+        assert output.count("SELECT * EXCEPT (") == 2
+        wrapper_excepted: set[str] = set()
+        for match in re.finditer(r"EXCEPT \(([^)]*)\)", output):
+            wrapper_excepted |= {
+                name.strip().strip('"') for name in match.group(1).split(",")
+            }
+        assert wrapper_excepted == emitted
+
+    def test_expand_merge_over_nearest_should_not_leak_reserved_on_datafusion(
+        self, tables_with_peaks_and_genes
+    ):
+        """Test a MERGE wrapping a correlated NEAREST hides the reserved columns.
+
+        Given:
+            A correlated NEAREST fallback nested under a MERGE on the DataFusion
+            target. MERGE, like CLUSTER, rebuilds the enclosing query via
+            ``copy()`` + ``transplant``, relocating the fallback's join.
+        When:
+            Transpiling.
+        Then:
+            The finalizer should re-locate the transplanted join by its reserved
+            ``meta`` tag and wrap the reserved columns away below MERGE's explicit
+            projection, so no reserved ``__giql_x_*`` column reaches the MERGE
+            output — pinning the MERGE half of the transplant-survival claim (#172).
+        """
+        # Arrange
+        sql = (
+            "SELECT MERGE(interval) FROM ("
+            "SELECT b.* FROM peaks a "
+            "CROSS JOIN LATERAL NEAREST(genes, reference := a.interval, k := 1) b"
+            ") sub"
+        )
+
+        # Act
+        output = _generate_for_target(
+            sql, tables_with_peaks_and_genes, DataFusionTarget()
+        )
+
+        # Assert
+        # The fallback did synthesize reserved columns, and the finalizer excepts
+        # exactly the set the join defines (it relocates through MERGE's transplant).
+        assert _wrapper_except_names(output[output.index("SELECT * EXCEPT (") :]) == (
+            _reserved_columns_defined(output)
+        )
+        # No reserved column survives to MERGE's top-level projection.
+        top_level = output[: output.index("SELECT * EXCEPT (")]
+        assert not _RESERVED_COLUMN_RE.search(top_level)
