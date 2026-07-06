@@ -1546,6 +1546,7 @@ class TestStatementFinalizer:
             It should raise TypeError rather than silently returning the
             non-Expression, mirroring the node-local expander return guard.
         """
+
         # Arrange
         def expander(node, ctx):
             ctx.add_statement_finalizer(lambda root: None)
@@ -1691,9 +1692,9 @@ class TestClusterMergeExpansion:
             Running the ExpandOperators pass.
         Then:
             It should consume the CLUSTER node in place (returning the same root
-            object), wrap the source in a ``lag_calc`` derived table with a LAG
-            window and an ``is_new_cluster`` CASE, project an outer SUM window, and
-            mint no expander alias.
+            object), wrap the source in a ``__giql_lag_calc`` derived table with a
+            LAG window and an ``__giql_is_new_cluster`` CASE, project an outer SUM
+            window, and mint no expander alias.
         """
         # Arrange
         ast, tables = _prepare_operator(GIQLCluster)
@@ -1705,7 +1706,7 @@ class TestClusterMergeExpansion:
         assert result is ast  # whole-query rewrite mutates the root in place
         assert not list(result.find_all(GIQLCluster))
         aliases = {sub.alias for sub in result.find_all(exp.Subquery) if sub.alias}
-        assert "lag_calc" in aliases
+        assert "__giql_lag_calc" in aliases
         windows = list(result.find_all(exp.Window))
         assert any(isinstance(w.this, exp.Sum) for w in windows)  # outer cluster id
         assert any(
@@ -1713,7 +1714,7 @@ class TestClusterMergeExpansion:
             for w in windows
         )  # inner adjacency LAG
         assert any(
-            isinstance(a, exp.Alias) and a.alias == "is_new_cluster"
+            isinstance(a, exp.Alias) and a.alias == "__giql_is_new_cluster"
             for a in result.find_all(exp.Alias)
         )
         assert EXPAND_ALIAS_PREFIX not in result.sql(dialect=GIQLDialect)
@@ -1728,9 +1729,10 @@ class TestClusterMergeExpansion:
             Running the ExpandOperators pass.
         Then:
             It should consume the MERGE node in place (returning the same root
-            object), wrap a ``clustered`` subquery (itself wrapping a ``lag_calc``)
-            under a GROUP BY that includes the synthesized ``__giql_cluster_id``,
-            project MIN/MAX bounds, and mint no expander alias.
+            object), wrap a ``__giql_clustered`` subquery (itself wrapping a
+            ``__giql_lag_calc``) under a GROUP BY that includes the synthesized
+            ``__giql_cluster_id``, project MIN/MAX bounds, and mint no expander
+            alias.
         """
         # Arrange
         ast, tables = _prepare_operator(GIQLMerge)
@@ -1742,8 +1744,8 @@ class TestClusterMergeExpansion:
         assert result is ast  # whole-query rewrite mutates the root in place
         assert not list(result.find_all(GIQLMerge))
         aliases = {sub.alias for sub in result.find_all(exp.Subquery) if sub.alias}
-        assert "clustered" in aliases  # MERGE wraps the clustered subquery
-        assert "lag_calc" in aliases  # built on CLUSTER
+        assert "__giql_clustered" in aliases  # MERGE wraps the clustered subquery
+        assert "__giql_lag_calc" in aliases  # built on CLUSTER
         group = result.find(exp.Group)
         assert group is not None
         assert any(
@@ -1758,9 +1760,7 @@ class TestClusterMergeExpansion:
 class TestMigratedOperatorsRegistered:
     """Every operator resolves a built-in expander in the process REGISTRY."""
 
-    @pytest.mark.parametrize(
-        "operator", _OPERATOR_CLASSES, ids=lambda c: c.__name__
-    )
+    @pytest.mark.parametrize("operator", _OPERATOR_CLASSES, ids=lambda c: c.__name__)
     def test_migrated_operator_resolves_in_process_registry(self, operator):
         """Test that each operator resolves an expander in REGISTRY.
 

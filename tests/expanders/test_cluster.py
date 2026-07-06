@@ -43,8 +43,8 @@ class TestClusterExpander:
 
         # Assert
         assert "G_I_Q_L" not in sql
-        assert "AS lag_calc" in sql
-        assert "is_new_cluster" in sql
+        assert "AS __giql_lag_calc" in sql
+        assert "__giql_is_new_cluster" in sql
 
     def test_transpile_should_raise_when_multiple_cluster_in_one_select(self):
         """Test that two CLUSTER expressions in one SELECT are rejected.
@@ -56,7 +56,7 @@ class TestClusterExpander:
         Then:
             It should raise ValueError naming the unsupported multiple-CLUSTER
             case, rather than chaining the rewrite into non-executable SQL (a
-            duplicate lag_calc alias / is_new_cluster binder error).
+            duplicate __giql_lag_calc alias / __giql_is_new_cluster binder error).
         """
         # Arrange
         query = (
@@ -134,7 +134,7 @@ class TestClusterExpander:
         # Assert
         window = 'OVER (PARTITION BY "chrom" ORDER BY "start" NULLS LAST)'
         assert f'LAG("end") {window} >= "start"' in sql
-        assert f'{window} + ' not in sql
+        assert f"{window} + " not in sql
 
     def test_transpile_should_split_clauses_between_lag_calc_and_outer_query(self):
         """Test that CLUSTER places clauses at the correct query level.
@@ -158,9 +158,10 @@ class TestClusterExpander:
 
         # Assert
         assert (
-            "WHERE chrom = 'chr1' GROUP BY chrom HAVING COUNT(*) > 1) AS lag_calc" in sql
+            "WHERE chrom = 'chr1' GROUP BY chrom HAVING COUNT(*) > 1) AS __giql_lag_calc"
+            in sql
         )
-        assert ") AS lag_calc ORDER BY chrom" in sql
+        assert ") AS __giql_lag_calc ORDER BY chrom" in sql
 
     def test_transpile_should_expand_bare_cluster_without_alias(self):
         """Test that an un-aliased CLUSTER expands to a bare SUM window.
@@ -181,7 +182,7 @@ class TestClusterExpander:
 
         # Assert
         assert "G_I_Q_L" not in sql
-        assert "SUM(is_new_cluster) OVER" in sql
+        assert "SUM(__giql_is_new_cluster) OVER" in sql
 
     def test_transpile_should_keep_explicit_projection_columns_in_lag_calc(self):
         """Test that explicit (non-star) projection columns flow into lag_calc.
@@ -202,7 +203,7 @@ class TestClusterExpander:
 
         # Assert
         assert "SELECT chrom, start," in sql
-        assert "AS lag_calc" in sql
+        assert "AS __giql_lag_calc" in sql
         assert "G_I_Q_L" not in sql
 
     # Note: CLUSTER combined with an INTERSECTS *join* in the same SELECT is not
@@ -259,7 +260,7 @@ class TestClusterExpander:
 
         # Assert
         assert "G_I_Q_L" not in sql
-        assert sql.count("AS lag_calc") == 2
+        assert sql.count("AS __giql_lag_calc") == 2
 
     @pytest.mark.parametrize("predicate_op", ["INTERSECTS", "CONTAINS", "WITHIN"])
     @pytest.mark.parametrize(
@@ -294,7 +295,7 @@ class TestClusterExpander:
 
         # Assert
         assert "G_I_Q_L" not in sql
-        assert "AS lag_calc" in sql
+        assert "AS __giql_lag_calc" in sql
 
     @pytest.mark.parametrize(
         "query",
@@ -342,7 +343,7 @@ class TestClusterExpander:
         code = (
             "from giql.transpile import transpile; "
             "print(transpile("
-            "\"SELECT chrom, CLUSTER(interval, stranded := true, "
+            '"SELECT chrom, CLUSTER(interval, stranded := true, '
             "predicate := name = PREV(score)) AS c FROM peaks\", tables=['peaks']))"
         )
         base_env = {
@@ -368,3 +369,75 @@ class TestClusterExpander:
         # Assert
         assert out_a == out_b
         assert "G_I_Q_L" not in out_a
+
+    def test_transpile_should_namespace_synthesized_cluster_identifiers(self):
+        """Test that CLUSTER's synthesized identifiers carry the reserved prefix.
+
+        Given:
+            A plain CLUSTER query.
+        When:
+            Transpiling the query.
+        Then:
+            The emitted SQL should alias the synthesized helpers as the reserved
+            __giql_lag_calc and __giql_is_new_cluster identifiers and never emit the
+            bare forms, guarding #161 against a partial revert that would re-collide
+            with a user column named is_new_cluster.
+        """
+        # Arrange
+        query = "SELECT *, CLUSTER(interval) AS cid FROM peaks"
+
+        # Act
+        sql = transpile(query, tables=["peaks"])
+
+        # Assert
+        assert "AS __giql_lag_calc" in sql
+        assert "AS __giql_is_new_cluster" in sql
+        assert "AS lag_calc" not in sql
+        assert "AS is_new_cluster" not in sql
+
+    def test_transpile_should_disambiguate_cluster_when_source_has_is_new_cluster_column(
+        self,
+    ):
+        """Test that CLUSTER runs correctly beside a user is_new_cluster column.
+
+        Given:
+            A table carrying a user column literally named is_new_cluster, seeded
+            with a poison value that would corrupt the cumulative SUM if the outer
+            window bound to it instead of CLUSTER's synthesized flag (the pre-#161
+            collision, which executed silently and returned wrong ids).
+        When:
+            Transpiling a star-projected CLUSTER and executing it on DuckDB.
+        Then:
+            The query should execute and return the correct per-partition cluster
+            ids, proving the synthesized flag now lives in the reserved __giql_
+            namespace and no longer collides with the user column, which itself
+            survives unchanged in the output.
+        """
+        # Arrange
+        duckdb = pytest.importorskip("duckdb")
+        conn = duckdb.connect(":memory:")
+        conn.execute(
+            "CREATE TABLE intervals ("
+            'chrom VARCHAR, "start" INTEGER, "end" INTEGER, is_new_cluster INTEGER)'
+        )
+        conn.executemany(
+            "INSERT INTO intervals VALUES (?, ?, ?, ?)",
+            [
+                ("chr1", 100, 200, 7),  # i1
+                ("chr1", 150, 250, 7),  # overlaps i1 -> same cluster
+                ("chr1", 400, 500, 7),  # separate -> new cluster
+            ],
+        )
+
+        # Act
+        sql = transpile(
+            "SELECT *, CLUSTER(interval) AS cluster_id FROM intervals",
+            tables=["intervals"],
+        )
+        cursor = conn.execute(sql)
+        columns = [desc[0] for desc in cursor.description]
+        rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+        # Assert
+        assert [r["cluster_id"] for r in rows] == [1, 1, 2]
+        assert [r["is_new_cluster"] for r in rows] == [7, 7, 7]

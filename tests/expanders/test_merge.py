@@ -136,7 +136,7 @@ class TestMergeExpander:
 
         # Assert
         assert "G_I_Q_L" not in sql
-        assert "AS clustered" in sql
+        assert "AS __giql_clustered" in sql
         assert "__giql_cluster_id" in sql
 
     def test_transpile_should_carry_where_into_clustered_subquery(self):
@@ -158,7 +158,7 @@ class TestMergeExpander:
 
         # Assert
         assert "WHERE chrom = 'chr1'" in sql
-        assert "AS clustered" in sql
+        assert "AS __giql_clustered" in sql
 
     @pytest.mark.parametrize(
         "predicate, message",
@@ -206,7 +206,7 @@ class TestMergeExpander:
 
         # Assert
         assert "G_I_Q_L" not in sql
-        assert "AS clustered" in sql
+        assert "AS __giql_clustered" in sql
         assert "__giql_cluster_id" in sql
 
     @pytest.mark.parametrize("predicate_op", ["INTERSECTS", "CONTAINS", "WITHIN"])
@@ -242,7 +242,7 @@ class TestMergeExpander:
 
         # Assert
         assert "G_I_Q_L" not in sql
-        assert "AS clustered" in sql
+        assert "AS __giql_clustered" in sql
 
     @pytest.mark.parametrize(
         "query",
@@ -290,3 +290,72 @@ class TestMergeExpander:
         # Assert
         assert 'GROUP BY "order"' in sql
         assert "GROUP BY order" not in sql
+
+    def test_transpile_should_namespace_synthesized_merge_identifiers(self):
+        """Test that MERGE's synthesized identifiers carry the reserved prefix.
+
+        Given:
+            A plain MERGE query.
+        When:
+            Transpiling the query.
+        Then:
+            The emitted SQL should alias the synthesized helpers as the reserved
+            __giql_clustered, __giql_lag_calc, and __giql_is_new_cluster identifiers
+            (the latter two composed from CLUSTER) and never emit the bare forms,
+            guarding #161 against a partial revert that would re-collide with user
+            columns named clustered / lag_calc / is_new_cluster.
+        """
+        # Arrange
+        query = "SELECT MERGE(interval) FROM peaks"
+
+        # Act
+        sql = transpile(query, tables=["peaks"])
+
+        # Assert
+        assert "AS __giql_clustered" in sql
+        assert "AS __giql_lag_calc" in sql
+        assert "AS __giql_is_new_cluster" in sql
+        assert "AS clustered" not in sql
+        assert "AS lag_calc" not in sql
+        assert "AS is_new_cluster" not in sql
+
+    def test_transpile_should_disambiguate_merge_when_source_has_is_new_cluster_column(
+        self,
+    ):
+        """Test that MERGE merges correctly beside a user is_new_cluster column.
+
+        Given:
+            A table carrying a user column literally named is_new_cluster, seeded
+            with a poison value. MERGE always composes CLUSTER over ``SELECT *``, so
+            pre-#161 the outer SUM bound to the user column and produced wrong
+            cluster ids, silently splitting rows that should merge.
+        When:
+            Transpiling the MERGE and executing it on DuckDB.
+        Then:
+            Overlapping intervals should collapse into one merged row and the
+            separate interval into another, proving the synthesized flag now lives
+            in the reserved __giql_ namespace and no longer collides.
+        """
+        # Arrange
+        duckdb = pytest.importorskip("duckdb")
+        conn = duckdb.connect(":memory:")
+        conn.execute(
+            "CREATE TABLE intervals ("
+            'chrom VARCHAR, "start" INTEGER, "end" INTEGER, is_new_cluster INTEGER)'
+        )
+        conn.executemany(
+            "INSERT INTO intervals VALUES (?, ?, ?, ?)",
+            [
+                ("chr1", 1, 5, 7),  # overlaps the next -> one cluster
+                ("chr1", 3, 8, 7),
+                ("chr1", 20, 25, 7),  # separate -> its own cluster
+            ],
+        )
+
+        # Act
+        sql = transpile("SELECT MERGE(interval) FROM intervals", tables=["intervals"])
+        cursor = conn.execute(sql)
+        rows = cursor.fetchall()
+
+        # Assert
+        assert rows == [("chr1", 1, 8), ("chr1", 20, 25)]
