@@ -315,9 +315,30 @@ def reject_cluster_merge_mix(select: exp.Select) -> None:
         )
 
 
+# Top-level ``exp.Select`` args the ``_transform_for_*`` helpers rebuild onto their
+# freshly-built ``new`` query (the SELECT list, the FROM/WHERE/GROUP/HAVING that
+# move into the inner subquery, and the ORDER that stays outer). ``joins`` is
+# rejected upstream in :func:`genomic_columns` before any transplant runs. See
+# :func:`transplant` for how everything outside this set and
+# :data:`_PRESERVED_ROOT_ARGS` is handled.
+_REBUILT_ROOT_ARGS = frozenset(
+    {"expressions", "from_", "where", "group", "having", "order", "joins"}
+)
+
+# Outer clauses the ``_transform_for_*`` helpers do NOT rebuild onto ``new`` but
+# that belong on the outer/final query the rewrite produces, so :func:`transplant`
+# re-attaches each (see it for why dropping any corrupts the result). These are
+# sqlglot ``exp.Select`` arg names — only ``with_`` carries a trailing underscore.
+# (A named ``WINDOW`` clause is deliberately NOT here: CLUSTER duplicates the
+# window-referencing projection into the inner subquery too, so an outer-only
+# re-attach would still dangle; :func:`transplant` rejects it loudly instead.)
+_PRESERVED_ROOT_ARGS = ("with_", "limit", "offset", "distinct", "qualify")
+
+
 def transplant(select: exp.Select, new: exp.Select) -> None:
-    """Replace *select*'s contents with *new*'s (preserving *select*'s enclosing
-    ``WITH``, see below), keeping *select*'s identity.
+    """Rewrite *select* into *new*, preserving *select*'s outer clauses
+    (:data:`_PRESERVED_ROOT_ARGS`) and failing loud on any it cannot carry, while
+    keeping *select*'s identity.
 
     Part of the shared CLUSTER/MERGE expansion toolkit. Clears every argument of
     *select* and re-installs *new*'s, so *select* keeps its position in the
@@ -330,29 +351,59 @@ def transplant(select: exp.Select, new: exp.Select) -> None:
     re-parented onto *select*, so passing a node still attached elsewhere would
     corrupt that other tree.
 
-    The enclosing ``WITH`` clause is preserved: the ``_transform_for_*`` helpers
-    build *new* from the original's FROM / WHERE / GROUP / HAVING / ORDER but never
-    its top-level ``WITH``, so a CLUSTER/MERGE over a CTE FROM would otherwise drop
-    the enclosing ``WITH`` and dangle the now-undefined CTE reference. That
-    reference is named by the rewritten ``__giql_lag_calc`` subquery (nested, for
-    MERGE, inside its ``__giql_clustered`` aggregation wrapper). Re-attaching
-    *select*'s original ``WITH`` keeps the emitted SQL executable — a CTE is in
-    scope for the entire query, including that nested subquery (#174).
+    The ``_transform_for_*`` helpers build *new* from :data:`_REBUILT_ROOT_ARGS`
+    (the SELECT list plus FROM / WHERE / GROUP / HAVING / ORDER) but never *select*'s
+    other top-level clauses. The clauses in :data:`_PRESERVED_ROOT_ARGS` belong on
+    the outer query the rewrite produces, so dropping them corrupts the result: a
+    CLUSTER/MERGE over a CTE FROM would dangle the ``WITH``'s CTE reference the
+    rewritten ``__giql_lag_calc`` subquery still names (nested, for MERGE, inside
+    its ``__giql_clustered`` wrapper) — non-executable SQL (#174) — while a dropped
+    ``LIMIT`` / ``OFFSET`` / ``DISTINCT`` / ``QUALIFY`` would silently return the
+    wrong rows (#181). ``transplant`` re-attaches each onto the outer query.
+
+    Any *other* top-level clause (e.g. a named ``WINDOW``, ``SELECT … INTO``,
+    ``FOR UPDATE``, ``SORT``/``CLUSTER``/``DISTRIBUTE BY``) is neither rebuilt nor
+    preserved, so rather than silently drop it — the very failure mode #174/#181 were
+    about — this raises :class:`ValueError`. Silent-drop is the worst outcome for a
+    query compiler; a loud error is diagnosable and future-proofs the rewrite against
+    new sqlglot args. (A named ``WINDOW`` referenced by a surviving projection is a
+    genuine gap rather than a nonsensical clause, but preserving it correctly means
+    threading the definition into the inner subquery too — deferred; for now it
+    fails loud rather than emitting a dangling ``OVER w``.)
+
+    :raises ValueError: When *select* carries a top-level clause that is neither
+        rebuilt (:data:`_REBUILT_ROOT_ARGS`) nor preserved
+        (:data:`_PRESERVED_ROOT_ARGS`).
     """
     assert new.parent is None, "transplant() requires a detached `new` subtree"
-    preserved_with = select.args.get("with_")
+    unhandled = sorted(
+        key
+        for key, value in select.args.items()
+        if value is not None
+        and key not in _REBUILT_ROOT_ARGS
+        and key not in _PRESERVED_ROOT_ARGS
+    )
+    if unhandled:
+        raise ValueError(
+            "CLUSTER/MERGE cannot carry these top-level clause(s) through the "
+            f"whole-query rewrite: {unhandled}. They are neither rebuilt nor in the "
+            "preserved set (e.g. SELECT INTO, FOR UPDATE, SORT/CLUSTER/DISTRIBUTE "
+            "BY). Run the operator over a subquery that applies the clause instead."
+        )
+    preserved = {key: select.args.get(key) for key in _PRESERVED_ROOT_ARGS}
     select.args.clear()
     for key, value in list(new.args.items()):
         select.set(key, value)
-    # The _transform_for_* helpers populate `new` with only
-    # select/from/where/group/having/order and never a top-level WITH, so
-    # re-attaching the preserved WITH can never clobber one `new` supplies. Assert
-    # that invariant rather than silently dropping the user's CTEs if a future
-    # rewrite ever violates it — the correct behavior there would be to *merge* the
-    # two WITH clauses, not pick one and drop the other.
-    assert new.args.get("with_") is None, (
-        "transplant() cannot reconcile a WITH from `new` with the preserved outer "
-        "WITH; a rewrite that emits its own WITH must merge them explicitly."
-    )
-    if preserved_with is not None:
-        select.set("with_", preserved_with)
+    for key, value in preserved.items():
+        if value is None:
+            continue
+        # The _transform_for_* helpers never set these clauses on `new`, so
+        # re-attaching a preserved clause can never clobber one `new` supplies.
+        # Assert that invariant rather than silently choosing one — a future
+        # rewrite that emits its own copy must reconcile the two explicitly (for
+        # WITH, by merging the CTE lists rather than dropping either).
+        assert new.args.get(key) is None, (
+            f"transplant() cannot reconcile a {key!r} clause from `new` with the "
+            "preserved outer one; a rewrite that emits its own must merge them."
+        )
+        select.set(key, value)
