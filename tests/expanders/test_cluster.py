@@ -573,3 +573,217 @@ class TestClusterExpander:
 
         # Assert
         assert not sql.lstrip().upper().startswith("WITH")
+
+    @pytest.mark.parametrize(
+        "clause",
+        ["LIMIT 2", "LIMIT 2 OFFSET 1", "QUALIFY cid > 1"],
+        ids=["limit", "offset", "qualify"],
+    )
+    def test_transpile_should_preserve_result_clause_when_cluster(self, clause):
+        """Test that CLUSTER preserves an outer result-shaping clause.
+
+        Given:
+            A CLUSTER query carrying an outer LIMIT / OFFSET / QUALIFY clause.
+        When:
+            Transpiling the query.
+        Then:
+            The full clause should survive verbatim on the rewritten outer query
+            rather than being silently dropped by the whole-query transplant (#181),
+            so the emitted SQL returns the rows the original query asked for.
+        """
+        # Act
+        sql = transpile(
+            f"SELECT *, CLUSTER(interval) AS cid FROM peaks {clause}", tables=["peaks"]
+        )
+
+        # Assert
+        assert clause in sql
+
+    def test_transpile_should_preserve_distinct_when_cluster(self):
+        """Test that CLUSTER preserves an outer DISTINCT.
+
+        Given:
+            A CLUSTER query with a DISTINCT projection.
+        When:
+            Transpiling the query.
+        Then:
+            The rewritten outer query should keep SELECT DISTINCT rather than
+            dropping it in the transplant (#181).
+        """
+        # Act
+        sql = transpile(
+            "SELECT DISTINCT chrom, CLUSTER(interval) AS cid FROM peaks",
+            tables=["peaks"],
+        )
+
+        # Assert
+        assert "SELECT DISTINCT" in sql
+
+    def test_transpile_should_dedup_when_cluster_with_distinct(self):
+        """Test that a preserved DISTINCT dedups the CLUSTER output rows.
+
+        Given:
+            A CLUSTER over rows that collapse to one distinct (chrom, cluster-id)
+            pair, projected with DISTINCT on an explicit column list.
+        When:
+            Transpiling the query and executing it on DuckDB.
+        Then:
+            The preserved DISTINCT should land on the outer query and dedup the final
+            rows to the single distinct pair — proving DISTINCT is re-attached to the
+            outer query, not an inner subquery (#181). An explicit projection is used
+            so the dedup is not confounded by the pre-existing star-column leak (#184).
+        """
+        # Arrange
+        duckdb = pytest.importorskip("duckdb")
+        conn = duckdb.connect(":memory:")
+        conn.execute(
+            'CREATE TABLE peaks (chrom VARCHAR, "start" INTEGER, "end" INTEGER)'
+        )
+        conn.executemany(
+            "INSERT INTO peaks VALUES (?, ?, ?)",
+            [("chr1", 10, 20), ("chr1", 12, 22), ("chr1", 14, 24)],
+        )
+        query = "SELECT DISTINCT chrom, CLUSTER(interval) AS cid FROM peaks"
+
+        # Act
+        sql = transpile(query, tables=["peaks"])
+        rows = conn.execute(sql).fetchall()
+
+        # Assert
+        assert rows == [("chr1", 1)]
+
+    def test_transpile_should_execute_when_cluster_with_limit_and_offset(self):
+        """Test that CLUSTER with LIMIT/OFFSET returns the correct row window.
+
+        Given:
+            A CLUSTER query with an outer ORDER BY, LIMIT, and OFFSET over a seeded
+            table.
+        When:
+            Transpiling the query and executing it on DuckDB.
+        Then:
+            The preserved LIMIT/OFFSET should return exactly the requested ordered
+            window — proving the fix emits the right rows rather than the silently
+            unbounded result the dropped clauses produced (#181).
+        """
+        # Arrange
+        duckdb = pytest.importorskip("duckdb")
+        conn = duckdb.connect(":memory:")
+        conn.execute(
+            'CREATE TABLE peaks (chrom VARCHAR, "start" INTEGER, "end" INTEGER)'
+        )
+        conn.executemany(
+            "INSERT INTO peaks VALUES (?, ?, ?)",
+            [("chr1", 10, 20), ("chr1", 15, 30), ("chr1", 100, 110), ("chr1", 105, 120)],
+        )
+        query = (
+            'SELECT chrom, start, "end", CLUSTER(interval) AS cid '
+            "FROM peaks ORDER BY start LIMIT 2 OFFSET 1"
+        )
+
+        # Act
+        sql = transpile(query, tables=["peaks"])
+        rows = conn.execute(sql).fetchall()
+
+        # Assert
+        assert rows == [("chr1", 15, 30, 1), ("chr1", 100, 110, 2)]
+
+    def test_transpile_should_execute_when_cluster_with_qualify(self):
+        """Test that CLUSTER with QUALIFY filters on the cluster id.
+
+        Given:
+            A CLUSTER query with a QUALIFY predicate over the cluster-id alias.
+        When:
+            Transpiling the query and executing it on DuckDB.
+        Then:
+            The preserved QUALIFY should filter the rewritten outer query on the SUM
+            window result, returning only the rows in clusters past the first (#181).
+        """
+        # Arrange
+        duckdb = pytest.importorskip("duckdb")
+        conn = duckdb.connect(":memory:")
+        conn.execute(
+            'CREATE TABLE peaks (chrom VARCHAR, "start" INTEGER, "end" INTEGER)'
+        )
+        conn.executemany(
+            "INSERT INTO peaks VALUES (?, ?, ?)",
+            [("chr1", 10, 20), ("chr1", 15, 30), ("chr1", 100, 110), ("chr1", 105, 120)],
+        )
+        query = (
+            'SELECT chrom, start, "end", CLUSTER(interval) AS cid '
+            "FROM peaks QUALIFY cid > 1"
+        )
+
+        # Act
+        sql = transpile(query, tables=["peaks"])
+        rows = sorted(conn.execute(sql).fetchall())
+
+        # Assert
+        assert rows == [("chr1", 100, 110, 2), ("chr1", 105, 120, 2)]
+
+    def test_transpile_should_preserve_with_and_limit_when_cluster_over_cte(self):
+        """Test that CLUSTER over a CTE preserves both the WITH and an outer LIMIT.
+
+        Given:
+            A CLUSTER over a CTE FROM that also carries an outer LIMIT — the #174
+            (WITH) and #181 (LIMIT) preservation cases composed in one query.
+        When:
+            Transpiling the query and executing it on DuckDB.
+        Then:
+            Both the enclosing WITH and the LIMIT should survive the transplant, so
+            the query executes and returns exactly the requested ordered window.
+        """
+        # Arrange
+        duckdb = pytest.importorskip("duckdb")
+        conn = duckdb.connect(":memory:")
+        conn.execute(
+            'CREATE TABLE peaks (chrom VARCHAR, "start" INTEGER, "end" INTEGER)'
+        )
+        conn.executemany(
+            "INSERT INTO peaks VALUES (?, ?, ?)",
+            [("chr1", 10, 20), ("chr1", 15, 30), ("chr1", 100, 110)],
+        )
+        query = (
+            "WITH sub AS (SELECT * FROM peaks) "
+            'SELECT chrom, start, "end", CLUSTER(interval) AS cid '
+            "FROM sub ORDER BY start LIMIT 2"
+        )
+
+        # Act
+        sql = transpile(query, tables=["peaks"])
+        rows = conn.execute(sql).fetchall()
+
+        # Assert
+        assert sql.startswith("WITH sub AS (SELECT * FROM peaks)")
+        assert rows == [("chr1", 10, 20, 1), ("chr1", 15, 30, 1)]
+
+    @pytest.mark.parametrize(
+        "clause",
+        [
+            "INTO newtbl FROM peaks",
+            "FROM peaks FOR UPDATE",
+            "FROM peaks SORT BY start",
+            "FROM peaks WINDOW w AS (PARTITION BY chrom)",
+        ],
+        ids=["into", "for_update", "sort_by", "named_window"],
+    )
+    def test_transpile_should_raise_when_cluster_carries_unsupported_root_clause(
+        self, clause
+    ):
+        """Test that an unhandled outer clause fails loud rather than dropping.
+
+        Given:
+            A CLUSTER query carrying a top-level clause the whole-query rewrite
+            neither rebuilds nor preserves — SELECT INTO, FOR UPDATE, SORT BY, or a
+            named WINDOW.
+        When:
+            Transpiling the query.
+        Then:
+            It should raise ValueError naming the unsupported clause rather than
+            silently dropping it (the #174/#181 failure mode) — a loud, diagnosable
+            error for a clause the transplant cannot carry.
+        """
+        # Act & assert
+        with pytest.raises(ValueError, match="cannot carry these top-level clause"):
+            transpile(
+                f"SELECT chrom, CLUSTER(interval) AS cid {clause}", tables=["peaks"]
+            )
