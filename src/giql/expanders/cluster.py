@@ -21,7 +21,9 @@ becomes::
     ) AS __giql_lag_calc
 
 (The ``becomes::`` form is simplified for readability; the emitted SQL quotes
-identifiers and appends ``NULLS LAST`` to the window ORDER BY.)
+identifiers, appends ``NULLS LAST`` to the window ORDER BY, and — for a star
+projection — emits the outer star as ``* EXCEPT (__giql_is_new_cluster)`` to hide the
+synthesized flag from the output (#184).)
 
 This module is the AST-expansion replacement for the legacy
 :class:`giql.transformer.ClusterTransformer`, which ran as a pre-pass transformer
@@ -109,6 +111,11 @@ def expand_cluster(node: GIQLCluster, ctx: ExpansionContext) -> exp.Expression:
     # preserve its identity (and so a root SELECT is rewritten without a parent to
     # replace it through).
     source = select.copy()
+    # Hiding the synthesized __giql_is_new_cluster flag from a surfacing star is the
+    # safe default (#184; MERGE opts out — see expand_cluster_query). This runs for
+    # every CLUSTER the pass expands, root or nested: harmless when the flag would
+    # not surface, and it also stops a nested CLUSTER's flag leaking through an
+    # enclosing star.
     transformed = expand_cluster_query(source, columns)
     if transformed is None:
         # No-op for a CLUSTER that parses outside the SELECT projection (e.g. in
@@ -143,7 +150,7 @@ def expand_cluster(node: GIQLCluster, ctx: ExpansionContext) -> exp.Expression:
 
 
 def expand_cluster_query(
-    query: exp.Select, columns: GenomicColumns
+    query: exp.Select, columns: GenomicColumns, hide_reserved: bool = True
 ) -> exp.Select | None:
     """Restructure *query* for every CLUSTER in its projection; ``None`` if none.
 
@@ -153,8 +160,13 @@ def expand_cluster_query(
     query. Returns ``None`` when *query* projects no CLUSTER, so callers can treat
     that as a no-op.
 
-    Reused by :mod:`giql.expanders.merge`, whose intermediate clustered query is
-    restructured through this same helper.
+    *hide_reserved* (default ``True``) rewrites a star in the outer projection to hide
+    the synthesized ``__giql_is_new_cluster`` flag the star would otherwise surface
+    (#184). Hiding is the default so a caller cannot silently reintroduce the leak by
+    omitting it. MERGE — which reuses this helper to build its intermediate clustered
+    query — is the one caller that opts out (``hide_reserved=False``): its explicit
+    outer projection never surfaces the flag, so hiding it would only add a needless
+    ``* EXCEPT`` to the intermediate ``__giql_clustered`` subquery.
     """
     cluster_exprs = find_projected(query, GIQLCluster)
     if not cluster_exprs:
@@ -166,12 +178,15 @@ def expand_cluster_query(
         # broken SQL (#144 A15).
         raise ValueError("Multiple CLUSTER expressions not yet supported")
     for cluster_expr in cluster_exprs:
-        query = _transform_for_cluster(query, cluster_expr, columns)
+        query = _transform_for_cluster(query, cluster_expr, columns, hide_reserved)
     return query
 
 
 def _transform_for_cluster(
-    query: exp.Select, cluster_expr: GIQLCluster, columns: GenomicColumns
+    query: exp.Select,
+    cluster_expr: GIQLCluster,
+    columns: GenomicColumns,
+    hide_reserved: bool = True,
 ) -> exp.Select:
     """Rewrite *query* into the two-level ``__giql_lag_calc`` form for one CLUSTER.
 
@@ -348,7 +363,17 @@ def _transform_for_cluster(
                 exp.alias_(sum_window, expression.alias, quoted=False)
             )
         else:
-            new_expressions.append(expression)
+            # A star projection expands over the inner __giql_lag_calc subquery,
+            # which carries the synthesized __giql_is_new_cluster flag. When
+            # hide_reserved is set (the default; MERGE opts out — see
+            # expand_cluster_query), rewrite the star to EXCEPT the flag so it never
+            # surfaces; non-star items pass through unchanged (#184).
+            hidden = (
+                _star_excepting_reserved(expression, CLUSTER_FLAG_COL)
+                if hide_reserved
+                else None
+            )
+            new_expressions.append(expression if hidden is None else hidden)
 
     # Build new query
     new_query = exp.Select()
@@ -369,6 +394,44 @@ def _transform_for_cluster(
         new_query.order_by(*query.args["order"].expressions, copy=False)
 
     return new_query
+
+
+def _star_excepting_reserved(
+    expression: exp.Expression, reserved: str
+) -> exp.Star | None:
+    """Return a bare ``* EXCEPT (reserved)`` star, or ``None`` for a non-bare-star.
+
+    The CLUSTER rewrite's outer query selects from the single ``__giql_lag_calc``
+    subquery, whose ``*`` carries the synthesized ``reserved`` flag
+    (``__giql_is_new_cluster``), so a bare ``*`` outer projection would surface it — and,
+    under a preserved DISTINCT, dedup over it. Replacing the outer star with
+    ``* EXCEPT (reserved)`` hides the flag from the output (#184). Any ``EXCEPT`` the
+    user's own star carried is
+    already applied *inside* ``__giql_lag_calc`` (the inner subquery keeps the original
+    projection node), so the outer star only needs to drop the flag, never the user's
+    columns.
+
+    The hiding is applied *eagerly*, at the same projection level as the outer star —
+    NOT via an outer-wrapping statement finalizer like NEAREST's
+    (:func:`giql.expanders.nearest._make_reserved_column_finalizer`). It must be:
+    ``transplant`` re-attaches the user's ``DISTINCT`` onto this outer query, so a
+    finalizer that wrapped it in ``SELECT * EXCEPT (...) FROM (<this>)`` would dedup
+    over the flag *before* stripping it (splitting rows that should collapse). NEAREST
+    can wrap because its reserved columns surface through an arbitrary enclosing SELECT
+    it does not own; CLUSTER owns its outer star at build time and must excise the flag
+    in place. A future consolidation (#187) must preserve this level constraint.
+
+    Only a bare ``*`` (an :class:`~sqlglot.expressions.Star`) is handled; a qualified
+    ``rel.*`` returns ``None`` and passes through unchanged — a separate, pre-existing
+    non-executable shape the rewrite does not resolve (the outer FROM is the renamed
+    ``__giql_lag_calc``, so ``rel.*`` already dangles independent of this hiding; #185).
+    ``* EXCEPT`` is the portable exclusion form GIQL already relies on (the coordinate
+    canonicalizer and the NEAREST fallback finalizer emit it too), so sqlglot renders
+    the target spelling (``EXCLUDE`` for DuckDB) without a capability branch here.
+    """
+    if isinstance(expression, exp.Star):
+        return exp.Star(except_=[exp.column(reserved, quoted=True)])
+    return None
 
 
 def _rewrite_predecessor_refs(

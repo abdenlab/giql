@@ -92,11 +92,15 @@ class GenericTarget(Target):
     every coordinate-canonicalization site over a **non-canonical** target falls
     back to a ``SELECT * EXCEPT (...)`` projection (re-appending the recomputed
     interval columns) — the canonicalizer wrapper CTE and the DISJOIN / NEAREST
-    passthroughs alike. ``* EXCEPT`` is **not** SQL-92 and is **not
-    DuckDB-runnable** — it is a DataFusion-family extension — so the generic
-    target's non-canonical output runs only on an ``* EXCEPT``-capable engine.
-    A canonical (0-based half-open) target passes the row through as a plain,
-    fully portable ``SELECT *``.
+    passthroughs alike. A star-projected CLUSTER is a further ``* EXCEPT`` site
+    (independent of canonicalization): it hides its synthesized
+    ``__giql_is_new_cluster`` flag with ``* EXCEPT`` (#184). ``* EXCEPT`` is **not**
+    SQL-92 and is **not DuckDB-runnable** — it is a DataFusion-family extension — so
+    the generic target's output from any of these sites runs only on an
+    ``* EXCEPT``-capable engine (transpile with ``dialect="duckdb"`` to execute on
+    DuckDB, where it spells the exclusion ``EXCLUDE``). A canonical (0-based
+    half-open) target with no star-projected CLUSTER passes the row through as a
+    plain, fully portable ``SELECT *``.
     """
 
     name: str = "generic"
