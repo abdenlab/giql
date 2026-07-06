@@ -109,9 +109,13 @@ def expand_merge(node: GIQLMerge, ctx: ExpansionContext) -> exp.Expression:
     # than assume in-place mutation, so reinstall a new root in place of `select`.
     # Today the branch is never taken here — the sole finalizer-registering operator
     # (a correlated NEAREST fallback) is already a plain join by this deepest-first
-    # re-walk, and MERGE's final projection is explicit, so a nested NEAREST fallback
-    # never surfaces its reserved columns here anyway — but honoring the contract
-    # keeps the seam future-proof.
+    # re-walk, so this nested run registers no finalizer — but honoring the contract
+    # keeps the seam future-proof. A NEAREST fallback nested under this MERGE
+    # registered its finalizer in the outer expand_operators run; that finalizer
+    # re-locates the transplanted join by its reserved `meta` tag and would wrap a
+    # surfacing star (#172). MERGE's final projection is explicit, so it never
+    # surfaces the reserved columns — they are covered both by that (no-op) wrapper
+    # check and by the explicit projection.
     result = expand_operators(select, ctx.target, ctx.tables, ctx.registry)
     if result is not select:
         select.replace(result)

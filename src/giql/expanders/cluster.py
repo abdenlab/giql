@@ -129,11 +129,13 @@ def expand_cluster(node: GIQLCluster, ctx: ExpansionContext) -> exp.Expression:
     # than assume in-place mutation, so reinstall a new root in place of `select`.
     # Today the branch is never taken here — the sole finalizer-registering operator
     # (a correlated NEAREST fallback) is already a plain join by this deepest-first
-    # re-walk, and its wrapper targets an inner SELECT rather than this re-walk root,
-    # so `result is select` in practice — but honoring the contract keeps the seam
-    # future-proof. A NEAREST fallback whose reserved columns are re-surfaced by this
-    # enclosing CLUSTER `SELECT *` remains a documented residual (#172), not a lost
-    # root.
+    # re-walk, so this nested run registers no finalizer and `result is select` in
+    # practice — but honoring the contract keeps the seam future-proof. A NEAREST
+    # fallback nested under this CLUSTER registered its finalizer in the *outer*
+    # expand_operators run; that finalizer re-locates the transplanted join by its
+    # reserved `meta` tag and wraps its enclosing SELECT after this rewrite, so a
+    # `SELECT *`/`b.*` that would re-surface the fallback's reserved columns is
+    # projected away rather than leaking (#172).
     result = expand_operators(select, ctx.target, ctx.tables, ctx.registry)
     if result is not select:
         select.replace(result)

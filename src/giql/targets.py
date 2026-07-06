@@ -156,17 +156,17 @@ class DataFusionTarget(Target):
     the portable ``* EXCEPT`` form), ``supports_qualify=False``, and the binned
     equi-join range strategy.
 
-    A ``SELECT *`` / ``SELECT b.*`` over a correlated NEAREST used to expose the
-    decorrelated fallback's reserved ``__giql_x_*`` rank/key columns; a statement
-    finalizer now wraps the enclosing ``SELECT`` in ``SELECT * EXCEPT (...)`` on
-    the fallback path (#160), so the cross-target identity claim holds for star
-    projections over a single correlated NEAREST. (Residuals that still leak on
-    DataFusion, tracked by #172: two *correlated* NEAREST fallbacks in one query
-    share the fixed ``__giql_x_rk_*`` / ``__giql_x_rn`` column names — a
-    pre-existing latent collision independent of the projection wrapper; and a
-    correlated NEAREST whose reserved columns are re-surfaced by an enclosing
-    ``SELECT *`` *outside* its own SELECT, e.g. a wrapping ``CLUSTER``, which the
-    finalizer does not reach.)
+    A ``SELECT *`` / ``SELECT b.*`` over a correlated NEAREST would otherwise expose
+    the decorrelated fallback's reserved ``__giql_x_*`` rank/key columns; a statement
+    finalizer wraps the enclosing ``SELECT`` in ``SELECT * EXCEPT (...)`` on the
+    fallback path (#160), so the cross-target identity claim holds for star
+    projections over a correlated NEAREST unconditionally. The finalizer re-locates
+    its target join by a reserved ``meta`` tag and mints its reserved column names
+    per fallback (#172), so the claim now holds through the two former residual
+    compositions too: a correlated NEAREST re-surfaced by an enclosing ``SELECT *``
+    *outside* its own SELECT (e.g. a wrapping ``CLUSTER``, whose ``copy()`` +
+    ``transplant`` the tag survives) and two correlated NEAREST fallbacks in one
+    query (whose now-distinct per-run reserved names each ``* EXCEPT`` independently).
     """
 
     name: str = "datafusion"
