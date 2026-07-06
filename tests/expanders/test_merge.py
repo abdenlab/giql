@@ -617,3 +617,22 @@ class TestMergeExpander:
 
         # Assert
         assert "SELECT DISTINCT" in sql
+
+    def test_transpile_should_not_hide_flag_when_merge(self):
+        """Test that MERGE's composed CLUSTER does not add a flag-hiding star.
+
+        Given:
+            A plain MERGE query.
+        When:
+            Transpiling the query.
+        Then:
+            The emitted SQL should not carry a flag-hiding ``* EXCEPT`` / ``EXCLUDE``
+            wrapper: MERGE composes CLUSTER with hide_reserved disabled because its
+            explicit outer projection never surfaces the __giql_is_new_cluster flag,
+            so no needless exclusion is added to the intermediate subquery (#184).
+        """
+        # Act
+        sql = transpile("SELECT MERGE(interval) FROM peaks", tables=["peaks"])
+
+        # Assert
+        assert 'EXCEPT ("__giql_is_new_cluster")' not in sql

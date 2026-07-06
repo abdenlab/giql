@@ -867,7 +867,9 @@ class TestNearestFallbackReservedColumnProjection:
             The finalizer should re-locate the transplanted join by its reserved
             ``meta`` tag and wrap the enclosing SELECT in ``SELECT * EXCEPT (...)``,
             so no reserved column reaches the output — the former #172 residual is
-            fixed.
+            fixed. The top-level ``SELECT *, CLUSTER(...)`` adds a *second*
+            ``SELECT * EXCEPT (__giql_is_new_cluster)`` to hide its own cluster flag
+            (#184), so the reserved wrapper is the one excepting the NEAREST set.
         """
         # Arrange
         sql = (
@@ -885,13 +887,18 @@ class TestNearestFallbackReservedColumnProjection:
         # Assert
         emitted = _reserved_columns_defined(output)
         assert emitted  # the fallback did synthesize reserved columns
-        # The single reserved wrapper excepts exactly the emitted reserved set.
-        assert output.count("SELECT * EXCEPT (") == 1
-        wrap_start = output.index("SELECT * EXCEPT (")
-        excepted = _wrapper_except_names(output[wrap_start:])
-        assert excepted == emitted
-        # No reserved column survives to the top-level CLUSTER projection.
-        assert not _RESERVED_COLUMN_RE.search(output[:wrap_start])
+        # Locate the wrapper that excepts exactly the reserved NEAREST set (not the
+        # CLUSTER flag wrapper, which excepts __giql_is_new_cluster — #184). Exactly
+        # one wrapper should except that set (uniqueness, as the old count guard held).
+        reserved_wraps = [
+            match.start()
+            for match in re.finditer(re.escape("SELECT * EXCEPT ("), output)
+            if _wrapper_except_names(output[match.start() :]) == emitted
+        ]
+        assert len(reserved_wraps) == 1
+        # No reserved column survives above the NEAREST wrapper into the CLUSTER
+        # projection.
+        assert not _RESERVED_COLUMN_RE.search(output[: reserved_wraps[0]])
 
     def test_expand_two_correlated_nearest_should_wrap_each_reserved_set_on_datafusion(
         self, tables_with_peaks_and_genes

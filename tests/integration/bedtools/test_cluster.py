@@ -40,6 +40,9 @@ def test_cluster_basic(duckdb_connection):
         FROM intervals
         """,
         tables=["intervals"],
+        # dialect="duckdb": a star-projected CLUSTER emits DuckDB's EXCLUDE
+        # flag-hiding spelling (#184); the generic EXCEPT form is not DuckDB-runnable.
+        dialect="duckdb",
     )
     giql_result = duckdb_connection.execute(sql).fetchall()
 
@@ -89,6 +92,9 @@ def test_cluster_separated(duckdb_connection):
         FROM intervals
         """,
         tables=["intervals"],
+        # dialect="duckdb": a star-projected CLUSTER emits DuckDB's EXCLUDE
+        # flag-hiding spelling (#184); the generic EXCEPT form is not DuckDB-runnable.
+        dialect="duckdb",
     )
     giql_result = duckdb_connection.execute(sql).fetchall()
 
@@ -123,6 +129,9 @@ def test_cluster_multiple_chromosomes(duckdb_connection):
         FROM intervals
         """,
         tables=["intervals"],
+        # dialect="duckdb": a star-projected CLUSTER emits DuckDB's EXCLUDE
+        # flag-hiding spelling (#184); the generic EXCEPT form is not DuckDB-runnable.
+        dialect="duckdb",
     )
     giql_result = duckdb_connection.execute(sql).fetchall()
 
@@ -163,6 +172,9 @@ def test_cluster_stranded(duckdb_connection):
         FROM intervals
         """,
         tables=["intervals"],
+        # dialect="duckdb": a star-projected CLUSTER emits DuckDB's EXCLUDE
+        # flag-hiding spelling (#184); the generic EXCEPT form is not DuckDB-runnable.
+        dialect="duckdb",
     )
     giql_result = duckdb_connection.execute(sql).fetchall()
 

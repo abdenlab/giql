@@ -190,8 +190,11 @@ def _transform_for_merge(
     if query.args.get("where"):
         cluster_query.set("where", query.args["where"].copy())
 
-    # Apply CLUSTER transformation to get the CTE-based query
-    clustered = expand_cluster_query(cluster_query, columns)
+    # Apply CLUSTER transformation to get the CTE-based query. hide_reserved=False:
+    # MERGE opts out of CLUSTER's flag-hiding (#184) because its explicit outer
+    # projection (chrom, MIN/MAX) never surfaces __giql_is_new_cluster, so hiding it
+    # would only add a needless ``* EXCEPT`` to this intermediate clustered subquery.
+    clustered = expand_cluster_query(cluster_query, columns, hide_reserved=False)
     assert clustered is not None, "intermediate MERGE cluster query has no CLUSTER"
     cluster_query = clustered
 
