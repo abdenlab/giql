@@ -21,3 +21,17 @@ DEFAULT_BIN_SIZE = 10_000
 #: resolver's reserved-prefix guard and the DISJOIN expander's CTE names and
 #: guard cannot drift apart.
 DJ_PREFIX = "__giql_dj_"
+
+#: The reserved column name for CLUSTER's synthesized per-row "new cluster" flag
+#: (``CASE ... END AS __giql_is_new_cluster``), consumed by the outer
+#: ``SUM(...) OVER (...)`` window that assigns cluster ids. The reserved ``__giql_``
+#: prefix keeps it clear of user columns: a user column named ``is_new_cluster``
+#: coexisting with ``SELECT *`` otherwise mis-binds the SUM (#161). A single source
+#: of truth so the alias and its ``SUM`` consumer cannot drift apart.
+CLUSTER_FLAG_COL = "__giql_is_new_cluster"
+
+#: The reserved column name for the cluster id MERGE synthesizes
+#: (``CLUSTER(...) AS __giql_cluster_id``) and then groups by. Reserved-prefixed for
+#: the same reason as :data:`CLUSTER_FLAG_COL`; a single source of truth so the alias
+#: and its ``GROUP BY`` consumer cannot drift apart.
+CLUSTER_ID_COL = "__giql_cluster_id"
