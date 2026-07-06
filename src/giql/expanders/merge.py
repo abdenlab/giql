@@ -256,12 +256,22 @@ def _transform_for_merge(
     # Add GROUP BY
     final_query.group_by(*group_by_cols, copy=False)
 
-    # Add ORDER BY (chromosome, start)
-    final_query.order_by(
-        exp.Ordered(this=exp.column(chrom_col, quoted=True)), copy=False
-    )
-    final_query.order_by(
-        exp.Ordered(this=exp.column(start_col, quoted=True)), append=True, copy=False
-    )
+    # ORDER BY: honor the user's ORDER BY over the merged output when present,
+    # otherwise default to (chromosome, start) for deterministic output. MERGE
+    # aggregates rows away, so the user's ORDER BY resolves against the merged
+    # columns (e.g. ``ORDER BY "end" DESC`` over ``MAX("end") AS end``). Overriding
+    # it with the fixed default silently returned the wrong rows once an outer LIMIT
+    # was preserved (#181), so the user's ordering takes precedence.
+    if query.args.get("order"):
+        final_query.set("order", query.args["order"].copy())
+    else:
+        final_query.order_by(
+            exp.Ordered(this=exp.column(chrom_col, quoted=True)), copy=False
+        )
+        final_query.order_by(
+            exp.Ordered(this=exp.column(start_col, quoted=True)),
+            append=True,
+            copy=False,
+        )
 
     return final_query

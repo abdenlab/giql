@@ -1004,6 +1004,35 @@ class TestCrossTargetOracleCluster:
             ],
         )
 
+    def test_cluster_with_limit_agrees_across_targets(self, cross_target_oracle):
+        """Test CLUSTER with an outer LIMIT agrees across targets (#181).
+
+        Given:
+            Four intervals forming two clusters on chr1, ordered by start with an
+            outer LIMIT of two rows.
+        When:
+            A CLUSTER projection with ORDER BY / LIMIT runs on every target.
+        Then:
+            Every target should preserve the LIMIT — returning the same two ordered
+            rows rather than the whole table — and agree, proving the result-clause
+            preservation holds on DataFusion as well as DuckDB.
+        """
+        # Arrange / Act / Assert
+        cross_target_oracle(
+            'SELECT chrom, start, "end", CLUSTER(interval) AS cid '
+            "FROM peaks ORDER BY start LIMIT 2",
+            peaks=[
+                ("chr1", 10, 20),
+                ("chr1", 15, 30),
+                ("chr1", 100, 110),
+                ("chr1", 105, 120),
+            ],
+            expected=[
+                ("chr1", 10, 20, 1),
+                ("chr1", 15, 30, 1),
+            ],
+        )
+
 
 class TestCrossTargetOracleMerge:
     """MERGE identity across all targets (T2)."""
@@ -1074,6 +1103,59 @@ class TestCrossTargetOracleMerge:
                 ("chr1", 5000, 6000),
             ],
             expected=[("chr1", 100, 300), ("chr1", 5000, 6000)],
+        )
+
+    def test_merge_with_limit_agrees_across_targets(self, cross_target_oracle):
+        """Test MERGE with an outer LIMIT agrees across targets (#181).
+
+        Given:
+            Two merged runs on chr1 with an outer LIMIT of one row (MERGE already
+            emits ORDER BY chrom, start, so the window is deterministic).
+        When:
+            A MERGE query with a LIMIT runs on every target.
+        Then:
+            Every target should preserve the LIMIT — returning only the first merged
+            span rather than both — and agree, proving the result-clause preservation
+            holds on DataFusion as well as DuckDB.
+        """
+        # Arrange / Act / Assert
+        cross_target_oracle(
+            "SELECT MERGE(interval) FROM peaks LIMIT 1",
+            tables=[Table("peaks")],
+            peaks=[
+                ("chr1", 100, 200),
+                ("chr1", 150, 300),
+                ("chr1", 5000, 6000),
+            ],
+            expected=[("chr1", 100, 300)],
+        )
+
+    def test_merge_with_user_order_by_limit_agrees_across_targets(
+        self, cross_target_oracle
+    ):
+        """Test MERGE honors a user ORDER BY under LIMIT across targets (#181).
+
+        Given:
+            Two merged runs on chr1 with a user ORDER BY on the merged end descending
+            and an outer LIMIT of one row.
+        When:
+            A MERGE query with ORDER BY / LIMIT runs on every target.
+        Then:
+            Every target should order by the user's ORDER BY (not MERGE's fixed
+            chrom, start default) and return the largest-end merged span, in
+            agreement — proving MERGE honors the user ordering so the preserved LIMIT
+            slices the rows the user asked for.
+        """
+        # Arrange / Act / Assert
+        cross_target_oracle(
+            'SELECT MERGE(interval) FROM peaks ORDER BY "end" DESC LIMIT 1',
+            tables=[Table("peaks")],
+            peaks=[
+                ("chr1", 100, 200),
+                ("chr1", 150, 300),
+                ("chr1", 5000, 6000),
+            ],
+            expected=[("chr1", 5000, 6000)],
         )
 
 

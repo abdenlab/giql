@@ -487,3 +487,133 @@ class TestMergeExpander:
 
         # Assert
         assert not sql.lstrip().upper().startswith("WITH")
+
+    @pytest.mark.parametrize(
+        "clause, expected",
+        [
+            ("LIMIT 1", "LIMIT 1"),
+            ("LIMIT 5 OFFSET 1", "OFFSET 1"),
+        ],
+        ids=["limit", "offset"],
+    )
+    def test_transpile_should_preserve_result_clause_when_merge(self, clause, expected):
+        """Test that MERGE preserves an outer result-shaping clause.
+
+        Given:
+            A MERGE query carrying an outer LIMIT / OFFSET clause.
+        When:
+            Transpiling the query.
+        Then:
+            The clause should survive on the rewritten outer aggregation query rather
+            than being silently dropped by the whole-query transplant (#181).
+        """
+        # Act
+        sql = transpile(f"SELECT MERGE(interval) FROM peaks {clause}", tables=["peaks"])
+
+        # Assert
+        assert expected in sql
+
+    def test_transpile_should_execute_when_merge_with_limit_and_offset(self):
+        """Test that MERGE with LIMIT/OFFSET returns the correct merged-row window.
+
+        Given:
+            A MERGE query with an outer LIMIT and OFFSET over a seeded table. MERGE
+            already emits an ORDER BY chrom, start, so the window is deterministic.
+        When:
+            Transpiling the query and executing it on DuckDB.
+        Then:
+            The preserved LIMIT/OFFSET should return exactly the requested slice of
+            the ordered merged rows rather than the silently unbounded result the
+            dropped clauses produced (#181).
+        """
+        # Arrange
+        duckdb = pytest.importorskip("duckdb")
+        conn = duckdb.connect(":memory:")
+        conn.execute(
+            'CREATE TABLE peaks (chrom VARCHAR, "start" INTEGER, "end" INTEGER)'
+        )
+        conn.executemany(
+            "INSERT INTO peaks VALUES (?, ?, ?)",
+            [("chr1", 10, 20), ("chr1", 15, 30), ("chr1", 100, 110), ("chr1", 105, 120)],
+        )
+        query = "SELECT MERGE(interval) FROM peaks LIMIT 5 OFFSET 1"
+
+        # Act
+        sql = transpile(query, tables=["peaks"])
+        rows = conn.execute(sql).fetchall()
+
+        # Assert
+        assert rows == [("chr1", 100, 120)]
+
+    def test_transpile_should_default_order_by_chrom_start_when_merge_unordered(self):
+        """Test that MERGE keeps its chrom, start default ORDER BY without a user one.
+
+        Given:
+            A MERGE query with no user ORDER BY.
+        When:
+            Transpiling the query.
+        Then:
+            The emitted SQL should carry MERGE's default ORDER BY on chromosome then
+            start, so unordered MERGE output stays deterministic.
+        """
+        # Act
+        sql = transpile("SELECT MERGE(interval) FROM peaks", tables=["peaks"])
+
+        # Assert
+        assert 'ORDER BY "chrom" NULLS LAST, "start" NULLS LAST' in sql
+
+    def test_transpile_should_honor_user_order_by_when_merge_with_limit(self):
+        """Test that MERGE honors the user's ORDER BY under an outer LIMIT.
+
+        Given:
+            A MERGE query with a user ORDER BY on the merged end descending and an
+            outer LIMIT of one row, over a seeded table.
+        When:
+            Transpiling the query and executing it on DuckDB.
+        Then:
+            MERGE should order the merged rows by the user's ORDER BY (not its fixed
+            chrom, start default) so the preserved LIMIT returns the largest-end
+            merged row — otherwise the preserved LIMIT would silently return the
+            wrong row over MERGE's forced ordering (#181).
+        """
+        # Arrange
+        duckdb = pytest.importorskip("duckdb")
+        conn = duckdb.connect(":memory:")
+        conn.execute(
+            'CREATE TABLE peaks (chrom VARCHAR, "start" INTEGER, "end" INTEGER)'
+        )
+        conn.executemany(
+            "INSERT INTO peaks VALUES (?, ?, ?)",
+            [("chr1", 10, 20), ("chr1", 100, 110), ("chr1", 5000, 6000)],
+        )
+        query = 'SELECT MERGE(interval) FROM peaks ORDER BY "end" DESC LIMIT 1'
+
+        # Act
+        sql = transpile(query, tables=["peaks"])
+        rows = conn.execute(sql).fetchall()
+
+        # Assert
+        assert rows == [("chr1", 5000, 6000)]
+
+    # DISTINCT/QUALIFY over MERGE: transplant re-attaches every preserved clause
+    # operator-agnostically, so CLUSTER's DISTINCT/QUALIFY tests already exercise the
+    # shared re-attach path. MERGE's outer query is a GROUP BY aggregation, so a
+    # DISTINCT there is redundant-but-valid (asserted below); a non-windowed QUALIFY
+    # is ill-formed over an aggregation and is faithfully passed through to fail at the
+    # engine rather than silently drop — hence no MERGE+QUALIFY executability test.
+    def test_transpile_should_preserve_distinct_when_merge(self):
+        """Test that MERGE preserves an outer DISTINCT.
+
+        Given:
+            A MERGE query with a DISTINCT projection.
+        When:
+            Transpiling the query.
+        Then:
+            The rewritten outer aggregation query should keep SELECT DISTINCT rather
+            than dropping it in the transplant (#181).
+        """
+        # Act
+        sql = transpile("SELECT DISTINCT MERGE(interval) FROM peaks", tables=["peaks"])
+
+        # Assert
+        assert "SELECT DISTINCT" in sql
