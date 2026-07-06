@@ -41,7 +41,6 @@ from sqlglot import parse_one
 from giql.canonical import decanonical_end
 from giql.canonical import decanonical_start
 from giql.dialect import GIQLDialect
-from giql.expander import EXPAND_ALIAS_PREFIX
 from giql.expander import ExpansionContext
 from giql.expander import StatementFinalizer
 from giql.expander import register
@@ -57,13 +56,47 @@ from giql.table import Table
 from giql.targets import Capabilities
 from giql.targets import GenericTarget
 
-#: Reserved column names the window-function fallback synthesizes inside its
-#: ranked subquery. They are derived from the expander's reserved
-#: ``EXPAND_ALIAS_PREFIX`` (``__giql_x_``) — rather than hardcoded — so they stay
-#: clear of user identifiers and track the prefix if it ever changes, mirroring
-#: the other reserved internal prefixes.
-_RANK_COL = f"{EXPAND_ALIAS_PREFIX}rn"
-_REF_KEY_PREFIX = f"{EXPAND_ALIAS_PREFIX}rk_"
+#: Meta key marking the decorrelated fallback's replacement subquery so its
+#: statement finalizer can re-locate it in the live root at apply time (walking the
+#: root, see :func:`_find_fallback_subquery`) rather than capturing the ``join``
+#: object eagerly (#172). The value is the fallback's unique per-run *tag* (see
+#: :func:`_reserved_column_names`). A ``meta`` marker rides ``.copy()`` into the
+#: tree a CLUSTER/MERGE ``copy()`` + ``transplant``
+#: (:func:`giql.expanders._genomic.transplant`) rebuilds, whereas a captured
+#: reference would strand in the discarded original — the same reliance on ``meta``
+#: surviving ``.copy()`` that CLUSTER's re-entrant expansion depends on for the
+#: resolution :data:`giql.resolver.META_KEY`. Derived from
+#: :data:`giql.resolver.META_KEY` so it shares the single greppable ``giql``
+#: metadata namespace.
+_FALLBACK_TAG_META = f"{META_KEY}_nearest_fallback_tag"
+
+
+def _reserved_column_names(tag: str) -> tuple[list[str], str, str]:
+    """Return this fallback's reserved ``(key_names, rank_col, ref_key_prefix)``.
+
+    The decorrelated window-function fallback synthesizes reserved rank/key columns
+    inside its ranked subquery. Their names are minted *per fallback* from *tag* — a
+    fresh :meth:`~giql.expander.ExpansionContext.alias` value (itself reserved by
+    the :data:`giql.expander.EXPAND_ALIAS_PREFIX` ``__giql_x_`` prefix) — rather than
+    fixed module constants, so two correlated NEAREST fallbacks in one query never
+    emit the same physical column name (#172). Identical names would collide in the
+    combined output (the engine disambiguates the second set with a ``…:1`` suffix that a
+    single ``* EXCEPT`` cannot name), leaking the second fallback's reserved
+    columns; distinct per-fallback names let each fallback's finalizer ``* EXCEPT``
+    exactly its own set. The ``rk`` / ``rn`` suffixes and the reserved prefix keep
+    every name clear of user identifiers.
+
+    :param tag:
+        The fallback's unique per-run tag (a minted alias, e.g. ``__giql_x_2``).
+    :return:
+        ``(key_names, rank_col, ref_key_prefix)`` — the ``[chrom, start, end]``
+        reference-key column names, the ``ROW_NUMBER`` rank column name, and the
+        prefix from which the optional stranded ``strand`` key is derived.
+    """
+    ref_key_prefix = f"{tag}_rk_"
+    key_names = [f"{ref_key_prefix}{part}" for part in ("chrom", "start", "end")]
+    rank_col = f"{tag}_rn"
+    return key_names, rank_col, ref_key_prefix
 
 
 def _nearest_output_encoding(
@@ -459,8 +492,29 @@ def _wrap_star_except_reserved(
     )
 
 
+def _find_fallback_subquery(root: exp.Expression, tag: str) -> exp.Expression | None:
+    """Return the *tag*-marked fallback subquery reachable from *root*, or ``None``.
+
+    Walks the live statement root for the decorrelated join's replacement subquery,
+    identified by the :data:`_FALLBACK_TAG_META` marker its expander stamped with
+    this fallback's unique *tag*. Only nodes reachable from the finalized *root* are
+    considered, so a CLUSTER/MERGE ``copy()`` + ``transplant`` that rebuilt the tree
+    leaves exactly the live copy of the marker to find (the discarded originals are
+    unreachable). Returns ``None`` when no marked node reaches *root* — the fallback
+    was detached with nothing re-locating it, so the finalizer no-ops.
+    """
+    for node in root.walk():
+        if node.meta.get(_FALLBACK_TAG_META) == tag:
+            return node
+    # Unreachable through any public transpile: the marker is stamped in
+    # _fallback_form and rides every .copy()/transplant into the live root, so a
+    # tag always resolves. Retained as a graceful-degradation guard (a future
+    # rewrite that genuinely detached a marked node would no-op rather than crash).
+    return None  # pragma: no cover
+
+
 def _make_reserved_column_finalizer(
-    join: exp.Join,
+    tag: str,
     reserved: list[str],
     b_alias: str,
     alias_factory: Callable[[], str],
@@ -474,19 +528,31 @@ def _make_reserved_column_finalizer(
     projection surfaces them, so the DataFusion fallback's output schema matches
     the LATERAL form's on ``SELECT *`` and ``<b>.*``.
 
-    The enclosing SELECT is resolved lazily via ``join.parent_select`` at finalize
-    time (not captured eagerly): if a later CLUSTER/MERGE transplant detached the
-    join, ``parent_select`` is ``None`` and the finalizer is a no-op. Wrapping the
-    *enclosing* SELECT rather than the statement root is load-bearing — a
-    ``SELECT * FROM (SELECT a.start ... NEAREST ... ) sub`` never surfaces the
-    reserved columns, so the outer ``*`` must be left alone. The wrapper alias is
-    likewise minted lazily (*alias_factory* is only called when a wrapper is
-    actually emitted), so the no-wrap path does not advance the run's alias
-    sequence.
+    The enclosing SELECT is resolved at finalize time by re-locating the fallback's
+    *tag*-marked subquery in the live *root* (via :func:`_find_fallback_subquery`)
+    and reading *its* ``parent_select`` — never by capturing the ``join`` object
+    eagerly. Re-locating is what makes the finalizer robust to a later CLUSTER/MERGE
+    ``copy()`` + ``transplant``: an eagerly-captured join ends up in the discarded
+    original tree, so its ``parent_select`` no longer reaches the live root and the
+    wrapper would silently land on dead nodes (#172); the marker rides the ``.copy()``
+    into the rebuilt tree instead. If no marked node reaches *root* (a detach with
+    nothing to re-locate), the finalizer is a no-op. Wrapping the *enclosing* SELECT
+    rather than the statement root is load-bearing — a ``SELECT * FROM (SELECT
+    a.start ... NEAREST ... ) sub`` never surfaces the reserved columns, so the outer
+    ``*`` must be left alone. The wrapper alias is likewise minted lazily
+    (*alias_factory* is only called when a wrapper is actually emitted), so the
+    no-wrap path does not advance the run's alias sequence.
+
+    Independent per fallback: two correlated NEAREST fallbacks in one query register
+    two finalizers, each keyed to its own *tag* and its own (distinct, per-run)
+    reserved names. They wrap the shared enclosing SELECT in turn, nesting one
+    ``* EXCEPT`` inside the other, so each fallback's reserved columns are stripped
+    exactly once.
     """
 
     def finalize(root: exp.Expression) -> exp.Expression:
-        select = join.parent_select
+        marked = _find_fallback_subquery(root, tag)
+        select = marked.parent_select if marked is not None else None
         if select is None or not _projection_surfaces_reserved(
             select, b_alias, reserved
         ):
@@ -586,18 +652,18 @@ def _fallback_form(
     # outer table holds duplicate reference rows.
     # Mint the synthetic relation aliases from the run's collision-safe sequence
     # (rather than hardcoding ``__giql_x_ref`` / ``__giql_x_cand``) so two NEAREST
-    # operators in one query never reuse the same derived-relation name. The
-    # reserved *column* names below stay derived from EXPAND_ALIAS_PREFIX.
+    # operators in one query never reuse the same derived-relation name.
     ref_relation_alias = ctx.alias()
     candidate = ctx.alias()
-    strand_name = f"{_REF_KEY_PREFIX}strand"
+    # Mint this fallback's unique tag from the same sequence and derive the reserved
+    # rank/key *column* names from it, so two correlated NEAREST fallbacks in one
+    # query emit distinct reserved names each finalizer can independently EXCEPT
+    # (#172). The tag also marks the replacement subquery for the finalizer.
+    tag = ctx.alias()
+    key_names, rank_col, ref_key_prefix = _reserved_column_names(tag)
+    strand_name = f"{ref_key_prefix}strand"
     stranded_key = is_stranded and ref.strand is not None
 
-    key_names = [
-        f"{_REF_KEY_PREFIX}chrom",
-        f"{_REF_KEY_PREFIX}start",
-        f"{_REF_KEY_PREFIX}end",
-    ]
     source_frags = [ref.chrom, ref.start, ref.end]
     if stranded_key:
         key_names.append(strand_name)
@@ -659,7 +725,7 @@ def _fallback_form(
         f"ROW_NUMBER() OVER (PARTITION BY {partition} "
         f"ORDER BY ABS({candidate}.distance), "
         f'{candidate}."{target_start_col}", {candidate}."{target_end_col}") '
-        f'AS "{_RANK_COL}" '
+        f'AS "{rank_col}" '
         f"FROM ({inner}) AS {candidate})"
     )
     ranked_subquery = parse_one(ranked, dialect=GIQLDialect)
@@ -670,11 +736,15 @@ def _fallback_form(
     on_parts = [
         f'{alias}."{name}" = {src}' for name, src in zip(key_names, source_frags)
     ]
-    on_parts.append(f'{alias}."{_RANK_COL}" <= {k_value}')
+    on_parts.append(f'{alias}."{rank_col}" <= {k_value}')
     on_sql = " AND ".join(on_parts)
     on_expr = parse_one(on_sql, dialect=GIQLDialect)
 
     subquery = exp.Subquery(this=ranked_subquery.this, alias=alias_node)
+    # Mark the replacement subquery with this fallback's unique tag so its finalizer
+    # re-locates the (possibly transplant-relocated) join by walking the live root,
+    # rather than capturing this node eagerly (#172). The marker rides ``.copy()``.
+    subquery.meta[_FALLBACK_TAG_META] = tag
 
     # Convert ``<outer> CROSS JOIN LATERAL (nearest) AS b`` into
     # ``<outer> JOIN (ranked) AS b ON <ref-key match> AND b.rn <= k``. Swap the
@@ -691,11 +761,12 @@ def _fallback_form(
     # seam) that projects them away from the enclosing SELECT's star, so the
     # DataFusion fallback's ``SELECT *`` / ``b.*`` output matches the LATERAL
     # form's. Explicit projections never surface the reserved columns and are left
-    # untouched (#160).
-    # key_names (the rk_* columns) and _RANK_COL (rn) are distinct by construction.
-    reserved = key_names + [_RANK_COL]
+    # untouched (#160). The finalizer re-locates its target by *tag* (#172), so it
+    # survives a later CLUSTER/MERGE transplant of this join.
+    # key_names (the rk_* columns) and rank_col (rn) are distinct by construction.
+    reserved = key_names + [rank_col]
     ctx.add_statement_finalizer(
-        _make_reserved_column_finalizer(join, reserved, alias, ctx.alias)
+        _make_reserved_column_finalizer(tag, reserved, alias, ctx.alias)
     )
 
     # The LATERAL (and the NEAREST node within it) is now detached; returning the
