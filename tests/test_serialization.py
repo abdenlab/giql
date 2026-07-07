@@ -33,12 +33,12 @@ def _generate_through_passes(sql: str, tables: Tables) -> str:
     ExpandOperators pass (epic #137). Emitter-level tests that pin canonicalized /
     expanded output must therefore run all three passes before generating, exactly
     as :func:`giql.transpile.transpile` does, rather than calling ``generate`` on a
-    bare parsed AST. Operators still on the legacy emitter (DISJOIN) pass through
-    the expansion pass untouched. This helper runs the passes in isolation to pin
-    the expanded emitter output on the generic target directly, without the DuckDB
-    IEJoin pre-pass (the only remaining pre-pass join rewrite — a column-to-column
-    ``INTERSECTS`` join otherwise expands to the naive overlap predicate right here
-    in pass 3, since the binned pre-pass rewrite was dropped in #167).
+    bare parsed AST. This helper runs the passes in isolation to pin the expanded
+    emitter output on the generic target directly. There is no pre-pass join
+    rewrite anymore: a column-to-column ``INTERSECTS`` join expands to the naive
+    overlap predicate right here in pass 3 (the binned pre-pass was dropped in #167,
+    and the DuckDB IEJoin pre-pass was relocated into the ``(DuckDBTarget,
+    Intersects)`` registry override in #169, which only fires on the duckdb target).
     """
     ast = parse_one(sql, dialect=GIQLDialect)
     ast = resolve_operator_refs(ast, tables)

@@ -656,6 +656,78 @@ class TestTranspileDuckDBIEJoinSQLStructure:
         assert rows_dd == rows_default
         assert rows_dd == [(100, 150, 175)]
 
+    def test_query_should_route_to_naive_predicate_plan_and_execute_correctly_when_sibling_contains_present(
+        self, conn
+    ):
+        """Test that a sibling CONTAINS defers an ANTI IEJoin to the naive plan.
+
+        Given:
+            An ANTI JOIN INTERSECTS query whose WHERE carries a sibling CONTAINS
+            predicate, and inputs where inlining that residual into the
+            per-chromosome ANTI ON would invert the anti-join semantics.
+        When:
+            The query is transpiled with ``dialect='duckdb'`` and with
+            ``dialect=None`` and both are executed.
+        Then:
+            The DuckDB path should defer to the naive-predicate plan (no IEJoin
+            SET VARIABLE) and return the same rows as the default plan.
+        """
+        # Arrange
+        _make_table(
+            conn,
+            "peaks",
+            [
+                ("chr1", 50, 250, "p1", 0, "+"),
+                ("chr1", 120, 140, "p2", 0, "+"),
+                ("chr1", 350, 500, "p3", 0, "+"),
+                ("chr1", 10, 500, "p4", 0, "+"),
+            ],
+        )
+        _make_table(conn, "genes", [("chr1", 300, 400, "g1", 0, "+")])
+        query = (
+            "SELECT a.start FROM peaks a "
+            "ANTI JOIN genes b ON a.interval INTERSECTS b.interval "
+            "WHERE a.interval CONTAINS 'chr1:100-200'"
+        )
+        sql_dd = transpile(query, tables=["peaks", "genes"], dialect="duckdb")
+        sql_default = transpile(query, tables=["peaks", "genes"])
+
+        # Act
+        rows_dd = sorted(conn.execute(sql_dd).fetchall())
+        rows_default = sorted(conn.execute(sql_default).fetchall())
+
+        # Assert
+        assert "SET VARIABLE" not in sql_dd.upper()
+        assert rows_dd == rows_default
+        assert rows_dd == [(50,)]
+
+    def test_transpile_should_route_to_naive_predicate_plan_when_residual_intersects_is_literal(
+        self,
+    ):
+        """Test that a sibling literal INTERSECTS defers the join to the naive plan.
+
+        Given:
+            A column-to-column INTERSECTS join whose WHERE carries a sibling
+            literal-range INTERSECTS predicate.
+        When:
+            The query is transpiled with ``dialect='duckdb'``.
+        Then:
+            It should defer to the naive-predicate plan rather than engaging the
+            IEJoin (which cannot see the residual once pass 3 expands it).
+        """
+        # Arrange
+        query = (
+            "SELECT a.start FROM peaks a "
+            "JOIN genes b ON a.interval INTERSECTS b.interval "
+            "WHERE a.interval INTERSECTS 'chr1:100-200'"
+        )
+
+        # Act
+        sql = transpile(query, tables=["peaks", "genes"], dialect="duckdb")
+
+        # Assert
+        assert "SET VARIABLE" not in sql.upper()
+
     def test_transpile_should_route_self_join_to_fallback_plan_when_dialect_is_duckdb(
         self, conn
     ):
