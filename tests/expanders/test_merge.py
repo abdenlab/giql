@@ -59,6 +59,118 @@ class TestMergeExpander:
         with pytest.raises(ValueError, match="CLUSTER and MERGE cannot be combined"):
             transpile(query, tables=["peaks"])
 
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "SELECT *, MERGE(interval) FROM peaks",
+            "SELECT MERGE(interval), * FROM peaks",
+            "SELECT t.*, MERGE(interval) FROM peaks t",
+            "SELECT t.*, MERGE(interval) AS m FROM peaks t",
+            "SELECT db.t.*, MERGE(interval) FROM peaks t",
+            'SELECT * EXCEPT ("start"), MERGE(interval) FROM peaks',
+            "SELECT MERGE(interval, stranded := true), * FROM peaks",
+        ],
+        ids=[
+            "bare-star-after",
+            "bare-star-before",
+            "qualified-star",
+            "qualified-star-aliased-merge",
+            "multipart-qualified-star",
+            "star-except",
+            "star-with-parameterized-merge",
+        ],
+    )
+    def test_transpile_should_raise_when_merge_shares_select_with_star(self, query):
+        """Test that a star projected alongside MERGE is rejected.
+
+        Given:
+            A SELECT projecting both a MERGE and a star — a bare ``*`` (either
+            order), a qualified ``t.*``, a multi-part ``db.t.*``, a ``* EXCEPT``
+            star (still an ``exp.Star``, carrying exclusion args), or a star beside
+            a parameterized MERGE — optionally with the MERGE aliased.
+        When:
+            Transpiling the query.
+        Then:
+            It should raise ValueError naming the unsupported star-with-MERGE
+            combination, rather than emitting non-executable SQL — a bare ``*``
+            re-surfaces non-grouped columns under the synthesized GROUP BY and a
+            qualified ``rel.*`` dangles an alias the aggregation no longer exposes
+            (#189).
+        """
+        # Act & assert
+        with pytest.raises(
+            ValueError, match="MERGE cannot be combined with a star projection"
+        ):
+            transpile(query, tables=["peaks"])
+
+    def test_transpile_should_not_reject_when_merge_shares_select_with_count_star(self):
+        """Test that a COUNT(*) sibling does not trip the star guard.
+
+        Given:
+            A MERGE projected beside ``COUNT(*)`` — whose inner ``*`` is wrapped in
+            an aggregate, not a bare or qualified star projection.
+        When:
+            Transpiling the query.
+        Then:
+            It should not raise the star-with-MERGE error and should expand into the
+            clustered-aggregation form, proving the guard rejects only a bare or
+            qualified star and not an aggregate-wrapped ``*`` (#189).
+        """
+        # Act
+        sql = transpile(
+            "SELECT MERGE(interval), COUNT(*) AS n FROM peaks", tables=["peaks"]
+        )
+
+        # Assert
+        assert "AS __giql_clustered" in sql
+        assert "COUNT(*)" in sql
+        assert "G_I_Q_L" not in sql
+
+    def test_transpile_should_reject_star_in_merge_own_scalar_subquery(self):
+        """Test that the star guard keys on the MERGE's own SELECT scope.
+
+        Given:
+            A MERGE inside a scalar subquery whose own projection carries a star
+            (``SELECT (SELECT *, MERGE(interval) FROM peaks) AS m FROM other``).
+        When:
+            Transpiling the query.
+        Then:
+            It should raise the star-with-MERGE error — the mirror of the
+            FROM-subquery case — proving the guard inspects the MERGE's own
+            enclosing SELECT, not just the outermost query (#189).
+        """
+        # Act & assert
+        with pytest.raises(
+            ValueError, match="MERGE cannot be combined with a star projection"
+        ):
+            transpile(
+                "SELECT (SELECT *, MERGE(interval) FROM peaks) AS m FROM other",
+                tables=["peaks", "other"],
+            )
+
+    def test_transpile_should_not_reject_star_inside_merge_from_subquery(self):
+        """Test that the star guard fires only on the MERGE's own projection.
+
+        Given:
+            A MERGE whose FROM is a pass-through ``SELECT *`` subquery — a star that
+            belongs to the source relation, not the MERGE's projection.
+        When:
+            Transpiling the query.
+        Then:
+            It should not raise the star-with-MERGE error and should expand into the
+            clustered-aggregation form, proving the guard inspects the MERGE's own
+            SELECT list rather than any star anywhere in the tree (#189).
+        """
+        # Arrange
+        query = "SELECT MERGE(interval) FROM (SELECT * FROM peaks) x"
+
+        # Act
+        sql = transpile(query, tables=["peaks"])
+
+        # Assert
+        assert "AS __giql_clustered" in sql
+        assert "G_I_Q_L" not in sql
+
     def test_transpile_should_group_by_strand_when_merge_stranded(self):
         """Test that a stranded MERGE aggregates within strand.
 
@@ -212,7 +324,7 @@ class TestMergeExpander:
     @pytest.mark.parametrize("predicate_op", ["INTERSECTS", "CONTAINS", "WITHIN"])
     @pytest.mark.parametrize(
         "projection",
-        ["*, MERGE(interval) AS m", "MERGE(interval)"],
+        ["MERGE(interval) AS m, COUNT(*) AS n", "MERGE(interval)"],
         ids=["aliased", "bare"],
     )
     def test_transpile_should_expand_spatial_predicate_copied_into_clustered(
@@ -221,8 +333,9 @@ class TestMergeExpander:
         """Test that a spatial WHERE predicate survives the MERGE rewrite.
 
         Given:
-            A MERGE query (aliased or bare) whose WHERE filters on a spatial
-            predicate, which the rewrite copies into the inner clustered subquery.
+            A MERGE query (aliased alongside an extra aggregate, or bare) whose
+            WHERE filters on a spatial predicate, which the rewrite copies into the
+            inner clustered subquery.
         When:
             Transpiling the query.
         Then:
