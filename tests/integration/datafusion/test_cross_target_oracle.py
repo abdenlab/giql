@@ -1094,6 +1094,62 @@ class TestCrossTargetOracleCluster:
             expected=[("chr1", 10, 20, 1)],
         )
 
+    def test_cluster_qualified_star_agrees_across_targets(self, cross_target_oracle):
+        """Test a qualified rel.* CLUSTER runs and agrees across targets (#185).
+
+        Given:
+            Two overlapping intervals and one isolated interval on chr1, projected
+            with a qualified ``p.*`` over an aliased FROM alongside CLUSTER.
+        When:
+            The qualified-star CLUSTER runs on every target.
+        Then:
+            Every target should rewrite the outer ``p.*`` to a bare flag-hiding star
+            that resolves against the renamed subquery — rather than dangling on the
+            missing ``p`` alias or duplicating the required columns — so the output is
+            exactly the interval columns plus the cluster id, and all targets agree.
+        """
+        # Arrange / Act / Assert
+        cross_target_oracle(
+            "SELECT p.*, CLUSTER(interval) AS cid FROM peaks p",
+            peaks=[
+                ("chr1", 100, 200),
+                ("chr1", 150, 300),
+                ("chr1", 5000, 6000),
+            ],
+            expected=[
+                ("chr1", 100, 200, 1),
+                ("chr1", 150, 300, 1),
+                ("chr1", 5000, 6000, 2),
+            ],
+        )
+
+    def test_cluster_distinct_qualified_star_dedups_agrees_across_targets(
+        self, cross_target_oracle
+    ):
+        """Test DISTINCT qualified-star CLUSTER dedups per target (#185/#184/#181).
+
+        Given:
+            Three byte-identical intervals projected with DISTINCT over a qualified
+            ``p.*`` over an aliased FROM alongside CLUSTER.
+        When:
+            The DISTINCT qualified-star CLUSTER runs on every target.
+        Then:
+            Every target should drop the ``p.`` qualifier to a bare flag-hiding star and
+            dedup to the single distinct row — confirming the eager-hiding design holds
+            for the qualified form under a preserved DISTINCT (the documented
+            load-bearing case) — and agree.
+        """
+        # Arrange / Act / Assert
+        cross_target_oracle(
+            "SELECT DISTINCT p.*, CLUSTER(interval) AS cid FROM peaks p",
+            peaks=[
+                ("chr1", 10, 20),
+                ("chr1", 10, 20),
+                ("chr1", 10, 20),
+            ],
+            expected=[("chr1", 10, 20, 1)],
+        )
+
 
 class TestCrossTargetOracleMerge:
     """MERGE identity across all targets (T2)."""

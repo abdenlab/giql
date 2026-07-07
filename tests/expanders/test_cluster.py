@@ -821,6 +821,181 @@ class TestClusterExpander:
         assert "__giql_is_new_cluster" not in columns
         assert columns == ["chrom", "start", "end", "cid"]
 
+    def test_transpile_should_execute_when_cluster_projects_qualified_star(self):
+        """Test that a CLUSTER over a qualified rel.* projection executes.
+
+        Given:
+            A CLUSTER whose projection is a qualified ``t.*`` over an aliased FROM.
+        When:
+            Transpiling for DuckDB and executing it.
+        Then:
+            The query should run rather than raising a binder error for the missing
+            ``t`` alias — the outer FROM is the renamed __giql_lag_calc subquery, so the
+            outer ``t.*`` is rewritten to a bare star that resolves against it — and the
+            cluster ids should be correct (#185).
+        """
+        # Arrange
+        duckdb = pytest.importorskip("duckdb")
+        conn = duckdb.connect(":memory:")
+        conn.execute(
+            'CREATE TABLE peaks (chrom VARCHAR, "start" INTEGER, "end" INTEGER)'
+        )
+        conn.executemany(
+            "INSERT INTO peaks VALUES (?, ?, ?)",
+            [("chr1", 10, 20), ("chr1", 15, 30), ("chr1", 100, 110)],
+        )
+
+        # Act
+        sql = transpile(
+            "SELECT t.*, CLUSTER(interval) AS cid FROM peaks t",
+            tables=["peaks"],
+            dialect="duckdb",
+        )
+        rows = conn.execute(sql).fetchall()
+
+        # Assert
+        assert rows == [("chr1", 10, 20, 1), ("chr1", 15, 30, 1), ("chr1", 100, 110, 2)]
+
+    def test_transpile_should_not_duplicate_columns_when_qualified_star(self):
+        """Test that a qualified rel.* CLUSTER does not duplicate required columns.
+
+        Given:
+            A CLUSTER over a qualified ``t.*`` projection, whose required chrom/start/end
+            columns the flag-building subquery would re-inject if it failed to see the
+            qualified star as a full-column projection.
+        When:
+            Transpiling for DuckDB and executing it.
+        Then:
+            The output columns should be exactly the table's columns plus the cluster id,
+            with no duplicated chrom_1/start_1/end_1 columns and no synthesized flag
+            (#185).
+        """
+        # Arrange
+        duckdb = pytest.importorskip("duckdb")
+        conn = duckdb.connect(":memory:")
+        conn.execute(
+            'CREATE TABLE peaks (chrom VARCHAR, "start" INTEGER, "end" INTEGER)'
+        )
+        conn.executemany(
+            "INSERT INTO peaks VALUES (?, ?, ?)",
+            [("chr1", 10, 20), ("chr1", 15, 30), ("chr1", 100, 110)],
+        )
+
+        # Act
+        sql = transpile(
+            "SELECT t.*, CLUSTER(interval) AS cid FROM peaks t",
+            tables=["peaks"],
+            dialect="duckdb",
+        )
+        columns = [desc[0] for desc in conn.execute(sql).description]
+
+        # Assert
+        assert columns == ["chrom", "start", "end", "cid"]
+
+    def test_transpile_should_hide_flag_when_cluster_projects_qualified_star(self):
+        """Test that a qualified rel.* CLUSTER EXCEPTs the synthesized flag.
+
+        Given:
+            A top-level CLUSTER with a qualified ``t.*`` projection.
+        When:
+            Transpiling the query.
+        Then:
+            The outer star should be rewritten to a bare ``* EXCEPT`` that drops the
+            synthesized __giql_is_new_cluster flag, extending the bare-star flag-hiding
+            (#184) to the qualified form (#185).
+        """
+        # Act
+        sql = transpile(
+            "SELECT t.*, CLUSTER(interval) AS cid FROM peaks t", tables=["peaks"]
+        )
+
+        # Assert
+        assert 'EXCEPT ("__giql_is_new_cluster")' in sql
+
+    def test_transpile_should_not_reinject_columns_in_lag_calc_when_qualified_star(
+        self,
+    ):
+        """Test that a qualified star does not re-inject required columns into lag_calc.
+
+        Given:
+            A CLUSTER over a qualified ``t.*`` projection, whose lag_calc subquery would
+            re-inject the required chrom/start/end columns if it failed to recognize the
+            qualified star as covering all columns.
+        When:
+            Transpiling the query.
+        Then:
+            The inner __giql_lag_calc projection should carry the qualified star directly
+            followed by the synthesized flag, with no re-injected chrom/start/end columns
+            between them — isolating the duplication defect in the emitted SQL,
+            independent of any engine's tolerance for duplicate column names (#185).
+        """
+        # Act
+        sql = transpile(
+            "SELECT t.*, CLUSTER(interval) AS cid FROM peaks t", tables=["peaks"]
+        )
+
+        # Assert
+        assert "t.*, CASE" in sql
+        assert 't.*, "chrom"' not in sql
+
+    def test_transpile_should_drop_qualifier_when_multipart_qualified_star(self):
+        """Test that a multi-part db.t.* projection drops its qualifier at the outer.
+
+        Given:
+            A CLUSTER over a multi-part qualified ``db.t.*`` projection.
+        When:
+            Transpiling the query.
+        Then:
+            The outer projection should be a bare flag-hiding star with the dangling
+            ``db.t`` qualifier dropped (CLUSTER is single-relation), while the inner
+            lag_calc retains the original ``db.t.*`` against the aliased base table
+            (#185).
+        """
+        # Act
+        sql = transpile(
+            "SELECT db.t.*, CLUSTER(interval) AS cid FROM peaks t", tables=["peaks"]
+        )
+
+        # Assert
+        assert 'SELECT * EXCEPT ("__giql_is_new_cluster"), SUM(' in sql
+        assert "db.t.*, CASE" in sql
+
+    def test_transpile_should_apply_user_except_when_qualified_star(self):
+        """Test that a user's EXCEPT on a qualified star survives while the flag hides.
+
+        Given:
+            A qualified ``t.* EXCEPT (score)`` CLUSTER projection over an aliased FROM.
+        When:
+            Transpiling for DuckDB and executing it.
+        Then:
+            The user-excepted column should be dropped (applied inside the lag_calc
+            subquery, which retains the qualified projection) and the synthesized flag
+            should also be absent, leaving the remaining user columns plus the cluster id
+            (#185).
+        """
+        # Arrange
+        duckdb = pytest.importorskip("duckdb")
+        conn = duckdb.connect(":memory:")
+        conn.execute(
+            "CREATE TABLE peaks "
+            '(chrom VARCHAR, "start" INTEGER, "end" INTEGER, score INTEGER)'
+        )
+        conn.executemany(
+            "INSERT INTO peaks VALUES (?, ?, ?, ?)",
+            [("chr1", 10, 20, 5), ("chr1", 15, 30, 6), ("chr1", 100, 110, 9)],
+        )
+
+        # Act
+        sql = transpile(
+            "SELECT t.* EXCEPT (score), CLUSTER(interval) AS cid FROM peaks t",
+            tables=["peaks"],
+            dialect="duckdb",
+        )
+        columns = [desc[0] for desc in conn.execute(sql).description]
+
+        # Assert
+        assert columns == ["chrom", "start", "end", "cid"]
+
     def test_transpile_should_execute_when_cluster_with_limit_and_offset(self):
         """Test that CLUSTER with LIMIT/OFFSET returns the correct row window.
 

@@ -193,7 +193,7 @@ Find regions with multiple overlapping features:
 
 .. note::
 
-   **Synthesized flag hidden under** ``SELECT *``. A ``SELECT *, CLUSTER(...)`` query materializes an internal ``__giql_is_new_cluster`` flag in a subquery, so the outer star is emitted as ``SELECT * EXCEPT (__giql_is_new_cluster)`` to keep that helper column out of the result (#184). ``* EXCEPT`` is a DataFusion-family extension: the generic and ``datafusion`` dialects emit it, while ``duckdb`` spells the exclusion ``EXCLUDE``. Transpile with ``dialect="duckdb"`` to execute on DuckDB — the portable generic ``* EXCEPT`` form is not DuckDB-runnable. An explicitly-projected ``CLUSTER`` (no star) surfaces no helper column and needs no exclusion.
+   **Synthesized flag hidden under** ``SELECT *``. A ``SELECT *, CLUSTER(...)`` query materializes an internal ``__giql_is_new_cluster`` flag in a subquery, so the outer star is emitted as ``SELECT * EXCEPT (__giql_is_new_cluster)`` to keep that helper column out of the result (#184). ``* EXCEPT`` is a DataFusion-family extension: the generic and ``datafusion`` dialects emit it, while ``duckdb`` spells the exclusion ``EXCLUDE``. Transpile with ``dialect="duckdb"`` to execute on DuckDB — the portable generic ``* EXCEPT`` form is not DuckDB-runnable. A qualified ``SELECT t.*, CLUSTER(...)`` receives the same treatment: because ``CLUSTER`` runs over a single relation, the qualifier is dropped and the outer star is emitted as the same bare ``* EXCEPT (__giql_is_new_cluster)`` (#185). An explicitly-projected ``CLUSTER`` (no star) surfaces no helper column and needs no exclusion.
 
 Performance Notes
 ~~~~~~~~~~~~~~~~~

@@ -21,9 +21,9 @@ becomes::
     ) AS __giql_lag_calc
 
 (The ``becomes::`` form is simplified for readability; the emitted SQL quotes
-identifiers, appends ``NULLS LAST`` to the window ORDER BY, and — for a star
-projection — emits the outer star as ``* EXCEPT (__giql_is_new_cluster)`` to hide the
-synthesized flag from the output (#184).)
+identifiers, appends ``NULLS LAST`` to the window ORDER BY, and — for a bare or
+qualified star projection — emits the outer star as ``* EXCEPT (__giql_is_new_cluster)``
+to hide the synthesized flag from the output (#184, #185).)
 
 This module is the AST-expansion replacement for the legacy
 :class:`giql.transformer.ClusterTransformer`, which ran as a pre-pass transformer
@@ -63,6 +63,7 @@ from giql.expanders._genomic import GenomicColumns
 from giql.expanders._genomic import extract_stranded
 from giql.expanders._genomic import find_projected
 from giql.expanders._genomic import genomic_columns
+from giql.expanders._genomic import is_star_projection
 from giql.expanders._genomic import reject_cluster_merge_mix
 from giql.expanders._genomic import require_top_level_projection
 from giql.expanders._genomic import transplant
@@ -306,15 +307,20 @@ def _transform_for_cluster(
     # Check if required columns are already in the select list
     selected_cols = set()
     for expr in cte_expressions:
-        if isinstance(expr, exp.Column):
+        if is_star_projection(expr):
+            # A bare ``*`` or a qualified ``rel.*`` covers every column. A qualified
+            # ``rel.*`` parses as a Column wrapping a Star, so it must be caught here,
+            # before the plain-Column branch below — whose ``.name`` for a star is the
+            # literal ``'*'`` (never a required-column name), so it would leave chrom/
+            # start/end seen as missing and re-inject them as chrom_1/start_1/end_1
+            # duplicates (#185).
+            selected_cols = required_cols  # Assume all are covered
+            break
+        elif isinstance(expr, exp.Column):
             selected_cols.add(expr.name)
         elif isinstance(expr, exp.Alias):
             # Don't count aliases as the source column
             pass
-        elif isinstance(expr, exp.Star):
-            # SELECT * includes all columns
-            selected_cols = required_cols  # Assume all are covered
-            break
 
     # Add missing required columns
     # Sort the residual so the injected-column order is deterministic across runs
@@ -363,17 +369,17 @@ def _transform_for_cluster(
                 exp.alias_(sum_window, expression.alias, quoted=False)
             )
         else:
-            # A star projection expands over the inner __giql_lag_calc subquery,
-            # which carries the synthesized __giql_is_new_cluster flag. When
+            # A star projection (bare ``*`` or qualified ``rel.*``) expands over the
+            # inner __giql_lag_calc subquery. It is always rewritten to a *bare* outer
+            # star (dropping any dangling ``rel.`` qualifier — an executability fix), and
+            # the synthesized __giql_is_new_cluster flag is EXCEPTed from it only when
             # hide_reserved is set (the default; MERGE opts out — see
-            # expand_cluster_query), rewrite the star to EXCEPT the flag so it never
-            # surfaces; non-star items pass through unchanged (#184).
-            hidden = (
-                _star_excepting_reserved(expression, CLUSTER_FLAG_COL)
-                if hide_reserved
-                else None
+            # expand_cluster_query). Non-star items pass through unchanged. See
+            # _outer_star_over_lag_calc for why the two concerns are gated separately.
+            rewritten = _outer_star_over_lag_calc(
+                expression, CLUSTER_FLAG_COL, hide_reserved
             )
-            new_expressions.append(expression if hidden is None else hidden)
+            new_expressions.append(expression if rewritten is None else rewritten)
 
     # Build new query
     new_query = exp.Select()
@@ -396,20 +402,35 @@ def _transform_for_cluster(
     return new_query
 
 
-def _star_excepting_reserved(
-    expression: exp.Expression, reserved: str
+def _outer_star_over_lag_calc(
+    expression: exp.Expression, reserved: str, hide_reserved: bool
 ) -> exp.Star | None:
-    """Return a bare ``* EXCEPT (reserved)`` star, or ``None`` for a non-bare-star.
+    """Rewrite a star projection for the outer query over ``__giql_lag_calc``.
 
-    The CLUSTER rewrite's outer query selects from the single ``__giql_lag_calc``
-    subquery, whose ``*`` carries the synthesized ``reserved`` flag
-    (``__giql_is_new_cluster``), so a bare ``*`` outer projection would surface it — and,
-    under a preserved DISTINCT, dedup over it. Replacing the outer star with
-    ``* EXCEPT (reserved)`` hides the flag from the output (#184). Any ``EXCEPT`` the
-    user's own star carried is
-    already applied *inside* ``__giql_lag_calc`` (the inner subquery keeps the original
-    projection node), so the outer star only needs to drop the flag, never the user's
-    columns.
+    Returns a *bare* :class:`~sqlglot.expressions.Star` for a bare ``*`` or a qualified
+    ``rel.*`` outer projection, or ``None`` for any non-star item (which passes through
+    unchanged). Two independent concerns are handled here, deliberately on separate
+    gates:
+
+    **Normalization to a bare star — always.** The CLUSTER rewrite's outer query selects
+    from the single renamed ``__giql_lag_calc`` subquery, so the user's ``rel.``
+    qualifier no longer resolves there — an un-rewritten ``rel.*`` would dangle
+    (``Binder Error: Referenced table "rel" not found``). CLUSTER runs over a single
+    relation (joins are rejected upstream by
+    :func:`giql.expanders._genomic.genomic_columns`), so every column ``rel.*`` would
+    have named is exactly the subquery's projection, making ``rel.*`` equivalent to
+    ``*``. The qualifier is therefore *always* dropped to a bare star. This is an
+    **executability** fix (without it the query does not bind), so it must NOT be gated
+    on the cosmetic *hide_reserved* flag (#185). Any ``EXCEPT`` the user's own star
+    carried is already applied *inside* ``__giql_lag_calc`` (the inner subquery keeps
+    the original projection node), so the outer bare star never needs to carry it.
+
+    **Flag-hiding — only when *hide_reserved*.** The subquery's ``*`` also carries the
+    synthesized ``reserved`` flag (``__giql_is_new_cluster``), so a bare outer ``*``
+    would surface it — and, under a preserved DISTINCT, dedup over it. When
+    *hide_reserved* is set (the default; MERGE opts out — its explicit projection never
+    surfaces the flag), the bare star is emitted as ``* EXCEPT (reserved)`` to hide it
+    (#184).
 
     The hiding is applied *eagerly*, at the same projection level as the outer star —
     NOT via an outer-wrapping statement finalizer like NEAREST's
@@ -421,17 +442,15 @@ def _star_excepting_reserved(
     it does not own; CLUSTER owns its outer star at build time and must excise the flag
     in place. A future consolidation (#187) must preserve this level constraint.
 
-    Only a bare ``*`` (an :class:`~sqlglot.expressions.Star`) is handled; a qualified
-    ``rel.*`` returns ``None`` and passes through unchanged — a separate, pre-existing
-    non-executable shape the rewrite does not resolve (the outer FROM is the renamed
-    ``__giql_lag_calc``, so ``rel.*`` already dangles independent of this hiding; #185).
     ``* EXCEPT`` is the portable exclusion form GIQL already relies on (the coordinate
     canonicalizer and the NEAREST fallback finalizer emit it too), so sqlglot renders
     the target spelling (``EXCLUDE`` for DuckDB) without a capability branch here.
     """
-    if isinstance(expression, exp.Star):
+    if not is_star_projection(expression):
+        return None
+    if hide_reserved:
         return exp.Star(except_=[exp.column(reserved, quoted=True)])
-    return None
+    return exp.Star()
 
 
 def _rewrite_predecessor_refs(
