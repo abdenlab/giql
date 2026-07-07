@@ -35,3 +35,12 @@ CLUSTER_FLAG_COL = "__giql_is_new_cluster"
 #: the same reason as :data:`CLUSTER_FLAG_COL`; a single source of truth so the alias
 #: and its ``GROUP BY`` consumer cannot drift apart.
 CLUSTER_ID_COL = "__giql_cluster_id"
+
+#: The reserved alias prefix CLUSTER materializes a star's aliased sibling items
+#: under, inside the ``__giql_lag_calc`` subquery, so the outer star can EXCEPT them
+#: (and the outer projection reference them) without colliding with a same-named base
+#: column or another sibling. Reserved-prefixed for the same reason as
+#: :data:`CLUSTER_FLAG_COL`; ``SELECT *, expr AS score`` would otherwise strip the base
+#: ``score`` from the star, and ``SELECT *, 1 AS x, 2 AS x`` would duplicate the EXCEPT
+#: entry (#190).
+CLUSTER_SIBLING_PREFIX = "__giql_sibling_"

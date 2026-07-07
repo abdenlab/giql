@@ -56,6 +56,7 @@ from __future__ import annotations
 from sqlglot import exp
 
 from giql.constants import CLUSTER_FLAG_COL
+from giql.constants import CLUSTER_SIBLING_PREFIX
 from giql.expander import ExpansionContext
 from giql.expander import expand_operators
 from giql.expander import register
@@ -178,6 +179,18 @@ def expand_cluster_query(
         # Fail loudly, mirroring the multiple-MERGE guard, rather than emitting the
         # broken SQL (#144 A15).
         raise ValueError("Multiple CLUSTER expressions not yet supported")
+    if sum(is_star_projection(item) for item in query.expressions) > 1:
+        # The two-level rewrite copies the whole projection into the inner
+        # ``__giql_lag_calc`` subquery and re-expands each star at the outer level, so
+        # N stars multiply the base columns (N inner expansions × N outer), silently
+        # producing the wrong column set. A single star is the supported shape; fail
+        # loudly on multiple, mirroring the multiple-CLUSTER guard above, rather than
+        # emitting a silently multiplied projection (#194). (MERGE reuses this helper
+        # with a synthesized single-star intermediate, so this never fires there.)
+        raise ValueError(
+            "CLUSTER does not support multiple star projections "
+            "(e.g. SELECT *, *, CLUSTER(...)); project a single star"
+        )
     for cluster_expr in cluster_exprs:
         query = _transform_for_cluster(query, cluster_expr, columns, hide_reserved)
     return query
@@ -277,6 +290,37 @@ def _transform_for_cluster(
         default=exp.Literal.number(1),
     )
 
+    # When the projection carries a star, every sibling item (each non-star, non-CLUSTER
+    # projection alongside it) is re-projected at the outer level by *reference* to the
+    # column the inner subquery materializes (see the outer loop below), pinned to its
+    # written position. Referencing it by the user's own name is unsafe: the name can
+    # collide with a base column the star also surfaces (``SELECT *, expr AS score`` —
+    # the outer ``EXCEPT`` would strip the base ``score`` and the reference would bind
+    # ambiguously) or with another sibling's name (``SELECT *, 1 AS x, 2 AS x`` — a
+    # duplicate ``EXCEPT`` entry, a hard parse error). Materialize each sibling in the
+    # inner subquery under a reserved, unique ``__giql_sibling_N`` name instead; the
+    # outer star EXCEPTs those reserved names and the outer projection references them,
+    # aliased back to the name they would carry un-clustered, at their written position —
+    # so base columns are never stripped, the inner window references stay unambiguous,
+    # and both the values *and the column order* match the un-clustered projection.
+    # Materializing *every* sibling — not only aliased ones — is what pins column order:
+    # a non-aliased sibling left to ride the star would always surface at the star's
+    # position, silently reordering it ahead of any aliased sibling written before it
+    # (#190; column-order pinning #192 round 3).
+    outer_has_star = any(is_star_projection(item) for item in query.expressions)
+    sibling_inner_names: dict[int, str] = {}
+    if outer_has_star:
+        for item in query.expressions:
+            if is_star_projection(item):
+                continue
+            if isinstance(item, GIQLCluster):
+                continue
+            if isinstance(item, exp.Alias) and isinstance(item.this, GIQLCluster):
+                continue
+            sibling_inner_names[id(item)] = (
+                f"{CLUSTER_SIBLING_PREFIX}{len(sibling_inner_names)}"
+            )
+
     # Build CTE SELECT expressions (all original except CLUSTER, plus
     # __giql_is_new_cluster)
     cte_expressions = []
@@ -288,6 +332,20 @@ def _transform_for_cluster(
             expression.this, GIQLCluster
         ):
             continue
+        elif id(expression) in sibling_inner_names:
+            # A star's sibling: materialize it under its reserved inner name so the outer
+            # star can EXCEPT it (without stripping a same-named base column) and the
+            # outer projection can re-project it at the user's written slot. Materialize
+            # the aliased item's inner value, or the bare column / unnamed expression
+            # itself when it has no alias.
+            value = expression.this if isinstance(expression, exp.Alias) else expression
+            cte_expressions.append(
+                exp.alias_(
+                    value.copy(),
+                    sibling_inner_names[id(expression)],
+                    quoted=False,
+                )
+            )
         else:
             cte_expressions.append(expression)
 
@@ -356,6 +414,20 @@ def _transform_for_cluster(
         order=exp.Order(expressions=order_by),
     )
 
+    # When the projection carries a star, every sibling was materialized in the inner
+    # __giql_lag_calc subquery under a reserved ``__giql_sibling_N`` name (the CTE loop
+    # above). The outer star EXCEPTs those reserved names so it does not surface them,
+    # and each sibling is re-projected at its written position as a reference to its
+    # reserved column, aliased back to the output name it would carry un-clustered.
+    # Referencing the materialized column rather than re-evaluating the original
+    # expression keeps it correct even when that expression's inputs were EXCEPTed from
+    # the star inside the subquery, and — because the reserved name cannot collide —
+    # keeps it correct for any name. Re-projecting *every* sibling (not only aliased
+    # ones) pins each to the user's column order (#190; column-order pinning #192).
+    #
+    # Without a star nothing re-surfaces the item, so it is always kept as-is.
+    star_hidden_names = list(sibling_inner_names.values())
+
     # Build outer SELECT expressions (replace CLUSTER with SUM)
     new_expressions = []
     for expression in query.expressions:
@@ -368,18 +440,39 @@ def _transform_for_cluster(
             new_expressions.append(
                 exp.alias_(sum_window, expression.alias, quoted=False)
             )
-        else:
+        elif is_star_projection(expression):
             # A star projection (bare ``*`` or qualified ``rel.*``) expands over the
-            # inner __giql_lag_calc subquery. It is always rewritten to a *bare* outer
-            # star (dropping any dangling ``rel.`` qualifier — an executability fix), and
-            # the synthesized __giql_is_new_cluster flag is EXCEPTed from it only when
+            # inner __giql_lag_calc subquery. It is normalized to a *bare* outer star
+            # (dropping any dangling ``rel.`` qualifier — an executability fix), the
+            # synthesized __giql_is_new_cluster flag is EXCEPTed from it when
             # hide_reserved is set (the default; MERGE opts out — see
-            # expand_cluster_query). Non-star items pass through unchanged. See
-            # _outer_star_over_lag_calc for why the two concerns are gated separately.
+            # expand_cluster_query), and each aliased sibling re-projected below is
+            # EXCEPTed too so the star does not double-surface it (#190). See
+            # _outer_star_over_lag_calc for how the concerns are gated.
             rewritten = _outer_star_over_lag_calc(
-                expression, CLUSTER_FLAG_COL, hide_reserved
+                expression, CLUSTER_FLAG_COL, hide_reserved, star_hidden_names
             )
             new_expressions.append(expression if rewritten is None else rewritten)
+        elif not outer_has_star:
+            # A non-star, non-CLUSTER item with no sibling star: keep it unchanged.
+            new_expressions.append(expression)
+        elif id(expression) in sibling_inner_names:
+            # A sibling of a star: re-project the reserved column the CTE materialized it
+            # under, aliased back to the output name it would carry un-clustered, at its
+            # written position — so it surfaces exactly once (its reserved name is
+            # EXCEPTed from the star above), collision-free for any name, in the
+            # user's column order rather than jumping to the star's position. The output
+            # name is the user's alias, a bare column's own name, or — for an unnamed
+            # expression, which carries no output name — its rendered text, so a
+            # positional consumer sees it in the written slot (#190; ordering #192).
+            out_name = expression.output_name or expression.sql()
+            new_expressions.append(
+                exp.alias_(
+                    exp.column(sibling_inner_names[id(expression)], quoted=True),
+                    out_name,
+                    quoted=True,
+                )
+            )
 
     # Build new query
     new_query = exp.Select()
@@ -403,14 +496,18 @@ def _transform_for_cluster(
 
 
 def _outer_star_over_lag_calc(
-    expression: exp.Expression, reserved: str, hide_reserved: bool
+    expression: exp.Expression,
+    reserved: str,
+    hide_reserved: bool,
+    extra_hidden: list[str] | None = None,
 ) -> exp.Star | None:
     """Rewrite a star projection for the outer query over ``__giql_lag_calc``.
 
     Returns a *bare* :class:`~sqlglot.expressions.Star` for a bare ``*`` or a qualified
-    ``rel.*`` outer projection, or ``None`` for any non-star item (which passes through
-    unchanged). Two independent concerns are handled here, deliberately on separate
-    gates:
+    ``rel.*`` outer projection, or ``None`` for any non-star item. (The caller only ever
+    invokes this on the star branch, so the ``None`` return is defensive — non-star
+    items are handled by the caller, not passed here.) Three concerns are handled, on
+    separate gates:
 
     **Normalization to a bare star — always.** The CLUSTER rewrite's outer query selects
     from the single renamed ``__giql_lag_calc`` subquery, so the user's ``rel.``
@@ -442,14 +539,29 @@ def _outer_star_over_lag_calc(
     it does not own; CLUSTER owns its outer star at build time and must excise the flag
     in place. A future consolidation (#187) must preserve this level constraint.
 
+    **Aliased-sibling hiding — when *extra_hidden* is given.** When the projection pairs
+    the star with aliased sibling items (``SELECT *, expr AS name, CLUSTER(...)``), each
+    sibling was materialized in ``__giql_lag_calc`` under a reserved ``__giql_sibling_N``
+    name and would be surfaced a second time by the outer star. The caller re-projects
+    each such sibling (aliased back to the user's name) at its own position and passes
+    the reserved names as *extra_hidden* so they are EXCEPTed from this star too — the
+    star then carries only the base columns, and the sibling surfaces exactly once, in
+    the user's column order. The reserved names are used precisely so this EXCEPT can
+    never strip a same-named base column the star should keep (#190).
+
     ``* EXCEPT`` is the portable exclusion form GIQL already relies on (the coordinate
     canonicalizer and the NEAREST fallback finalizer emit it too), so sqlglot renders
     the target spelling (``EXCLUDE`` for DuckDB) without a capability branch here.
     """
     if not is_star_projection(expression):
         return None
+    hidden = []
     if hide_reserved:
-        return exp.Star(except_=[exp.column(reserved, quoted=True)])
+        hidden.append(exp.column(reserved, quoted=True))
+    if extra_hidden:
+        hidden.extend(exp.column(name, quoted=True) for name in extra_hidden)
+    if hidden:
+        return exp.Star(except_=hidden)
     return exp.Star()
 
 
