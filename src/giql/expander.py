@@ -325,10 +325,10 @@ class ExpanderRegistry:
         A *non-generic* ``(target, operator)`` entry additionally acts as a
         *join-rewrite override* (:meth:`has_override`) for operators with a
         built-in whole-query join rewrite (notably
-        :class:`~giql.expressions.Intersects`, whose binned equi-join / DuckDB
-        IEJoin transformers run before expansion), letting a per-target expander
-        assume responsibility for that rewrite — :func:`giql.transpile.transpile`
-        consults :meth:`has_override` and bypasses the built-in transformers when
+        :class:`~giql.expressions.Intersects`, whose DuckDB IEJoin transformer
+        runs before expansion), letting a per-target expander assume
+        responsibility for that rewrite — :func:`giql.transpile.transpile`
+        consults :meth:`has_override` and bypasses the built-in transformer when
         it holds.
         """
         self._expanders[(target, operator)] = _as_callable(expander)
@@ -379,7 +379,7 @@ class ExpanderRegistry:
         A non-generic exact ``(target, op)`` entry additionally acts as a
         *join-rewrite override* for operators with a built-in whole-query join
         rewrite (notably :class:`~giql.expressions.Intersects`); resolution itself
-        does not bypass the built-in binned / IEJoin transformers —
+        does not bypass the built-in IEJoin transformer —
         :func:`giql.transpile.transpile` does, gated on :meth:`has_override` (see
         :meth:`register` and #141).
         """
@@ -402,10 +402,10 @@ class ExpanderRegistry:
 
         Such an entry marks a target-specific override that supersedes built-in
         handling (e.g. taking responsibility for the whole-query join rewrite the
-        built-in transformers would otherwise perform).
+        built-in transformer would otherwise perform).
         :func:`giql.transpile.transpile` consults this method for
         ``(target, Intersects)`` and, when it holds, bypasses the built-in
-        binned / IEJoin join transformers so the ``Intersects`` node flows to the
+        IEJoin join transformer so the ``Intersects`` node flows to the
         registered expander instead (see #141).
         """
         return target != GenericTarget() and (target, operator) in self._expanders

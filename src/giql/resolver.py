@@ -563,12 +563,16 @@ def _resolve_predicate_columns(
       operand resolves through the alias map — matching ``_generate_column_join``,
       which passes ``None`` as the context for both sides.
 
-    Most column-to-column ``INTERSECTS`` joins never reach here: the
-    :class:`~giql.transformer.IntersectsBinnedJoinTransformer` rewrites them into
-    binned equi-joins before this pass runs, deleting the ``Intersects`` node.
-    Column-to-column ``CONTAINS`` / ``WITHIN`` (which that transformer leaves
-    untouched) and non-join ``INTERSECTS`` shapes still reach the emitter, so the
-    column-join branch is exercised.
+    A column-to-column ``INTERSECTS`` join reaches here on every target but
+    DuckDB: its operands resolve through this pass so the pass-3
+    ``(GenericTarget, Intersects)`` expander can render the naive overlap
+    predicate in place (#167). The DuckDB ``dialect="duckdb"`` IEJoin transformer
+    (:class:`~giql.transformer.IntersectsDuckDBIEJoinTransformer`) is the one path
+    that consumes such a join before this pass runs, deleting the ``Intersects``
+    node — but only for the shapes it accepts; the shapes it declines fall through
+    to this pass too. Column-to-column ``CONTAINS`` / ``WITHIN`` and non-join
+    ``INTERSECTS`` shapes always reach the emitter, so the column-join branch is
+    exercised on every target.
 
     Reuses the shared ``_enclosing_alias_map`` (FROM/JOIN alias derivation) and
     ``_physical_cols`` helpers; the predicate-specific bit lives in

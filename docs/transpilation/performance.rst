@@ -304,15 +304,21 @@ Backend-Specific Tips
 DuckDB IEJoin Dialect
 ~~~~~~~~~~~~~~~~~~~~~
 
+By default (``dialect=None`` / ``"datafusion"``) a column-to-column
+``INTERSECTS`` join emits the **naive overlap predicate** — a plain ``ON
+a.chrom = b.chrom AND a.start < b.end AND b.start < a.end`` condition — and
+lets the engine's own optimizer plan it. On DuckDB and DataFusion this
+becomes a hash join keyed on ``chrom`` with the two position inequalities
+as a residual join filter, correct for both inner and outer joins with no
+special handling. This is the lowest-common-denominator plan: standard SQL
+that every target runs.
+
 For column-to-column ``INTERSECTS`` joins (INNER, SEMI, or ANTI) on
-DuckDB, the ``dialect="duckdb"`` opt-in transpiles the join into a
+DuckDB, the ``dialect="duckdb"`` opt-in instead transpiles the join into a
 per-chromosome dynamic-SQL pattern. Each per-chromosome subquery contains
 only inequality predicates, which DuckDB plans through its range-join
-family (``IE_JOIN`` or ``PIECEWISE_MERGE_JOIN``) — avoiding the
-row-inflation and deduplication cost of the default binned equi-join plan
-(the ``dialect=None`` path, controlled by ``intersects_bin_size``, which
-expands each interval into ``UNNEST``-generated bins and deduplicates
-the resulting matches).
+family (``IE_JOIN`` or ``PIECEWISE_MERGE_JOIN``). Shapes this path declines
+fall through to the naive predicate above.
 
 .. code-block:: python
 
@@ -392,9 +398,9 @@ chromosomes absent from the right table are preserved.
 
 DuckDB plans INNER through the IE_JOIN / PIECEWISE_MERGE_JOIN
 sort-merge family. SEMI and ANTI with inequality predicates plan
-through ``BLOCKWISE_NL_JOIN`` instead — still avoiding the UNNEST
-row-inflation of the binned plan, but not the IE_JOIN sort-merge fast
-path. Expect substantial speedups vs. the binned plan for SEMI / ANTI
+through ``BLOCKWISE_NL_JOIN`` instead — not the IE_JOIN sort-merge fast
+path, but still a per-chromosome plan. Expect speedups vs. the naive
+predicate for SEMI / ANTI
 where the chromosome partition already filters most pairs; INNER gets
 the largest speedup.
 
@@ -430,12 +436,12 @@ decorations:
 - **Star projections (``a.*`` / ``b.*``).** Expanded to the genomic
   columns declared by the corresponding :class:`Table` config (chrom
   / start / end, plus strand when set). This narrows the result schema
-  relative to the binned plan, which delegates star expansion to
+  relative to the naive-predicate plan, which delegates star expansion to
   DuckDB and projects every base-table column. Users with additional
   non-genomic columns should list them explicitly.
 
 The dialect splits unsupported shapes into two buckets. Soft-fallback
-shapes route to the binned plan automatically and return correct
+shapes route to the naive-predicate plan automatically and return correct
 results; within those shapes the ``dialect`` kwarg is safe to set
 without risk of silent incorrectness. Hard-error shapes (enumerated
 further below) raise ``ValueError`` at transpile time — the dialect
@@ -445,7 +451,7 @@ SQL.
 The soft-fallback shapes are:
 
 - **Outer joins.** ``LEFT`` / ``RIGHT`` / ``FULL`` ``JOIN ... ON ...
-  INTERSECTS ...`` falls back to the binned plan. The same applies
+  INTERSECTS ...`` falls back to the naive-predicate plan. The same applies
   when the join keeps its side modifier and the ``INTERSECTS`` lives in
   the top-level ``WHERE`` (e.g. ``LEFT JOIN ... ON TRUE WHERE
   a.interval INTERSECTS b.interval``).
@@ -463,7 +469,7 @@ The soft-fallback shapes are:
 - **INTERSECTS references unrecognized join sides.** A column-to-column
   INTERSECTS whose operands don't reference the FROM table's alias,
   or where the second operand's alias doesn't resolve to a registered
-  JOIN target, falls back to the binned plan.
+  JOIN target, falls back to the naive-predicate plan.
 - **Self-joins.** Joining a table to itself falls back.
 - **OR / NOT / paren-wrapped extra predicates.** See the Extra JOIN /
   WHERE predicates note above.
@@ -476,7 +482,7 @@ The soft-fallback shapes are:
   break the planner or produce semantically wrong results).
 - **Subquery inside GROUP BY / HAVING / ORDER BY.** A modifier clause
   containing a nested subquery (including ``EXISTS (SELECT ...)``)
-  falls back to the binned plan, because the dialect's modifier-ref
+  falls back to the naive-predicate plan, because the dialect's modifier-ref
   rewriter is not scope-aware and would corrupt the subquery's
   column scope. Subqueries hidden inside aggregate arguments in the
   SELECT list fall back for the same reason.
@@ -498,7 +504,7 @@ these rather than silently miscompile):
 - **Expression-form projections.** ``a.start + 1`` and other non-column
   expressions (other than aggregates) raise. Project the underlying
   column and compute in a wrapping query around the dialect's output,
-  or omit ``dialect="duckdb"`` to use the binned plan.
+  or omit ``dialect="duckdb"`` to use the naive-predicate plan.
 - **Unknown table qualifier.** ``c.col`` when the only sides are ``a``
   and ``b``.
 - **Unknown alias in GROUP BY / HAVING / ORDER BY.** A modifier-clause
@@ -530,17 +536,16 @@ these rather than silently miscompile):
 - **Unqualified or unknown-aliased extra predicates.** ``WHERE strand
   = '+'`` (unqualified) or ``WHERE c.score > 0`` (alias outside the
   join's two sides) raise with an actionable message naming the
-  expected aliases. The binned plan would either silently bind the
+  expected aliases. The naive-predicate plan would either silently bind the
   column wrong or defer the error to the downstream engine, so the
   dialect surfaces the user mistake at transpile time instead.
 
-Argument-validation ``ValueError`` raises (these fire before any AST
-inspection and are independent of the query shape):
+The one argument-validation ``ValueError`` raise (it fires before any AST
+inspection and is independent of the query shape):
 
-- **Mutually exclusive with** ``intersects_bin_size``. The two
-  parameters cannot be combined; pass one or the other.
-- **Unknown dialect string.** Anything other than ``"duckdb"`` or
-  ``None`` raises with the offending value echoed.
+- **Unknown dialect string.** A dialect that resolves to neither a built-in
+  target (``None``, ``"duckdb"``, ``"datafusion"``) nor a custom target
+  registered on the plugin hub raises with the offending value echoed.
 
 Literal-range ``INTERSECTS`` (e.g. ``WHERE interval INTERSECTS
 'chr1:1000-2000'``) is single-table and has no column-to-column join

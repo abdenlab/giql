@@ -41,8 +41,9 @@ portable emission choices:
   canonicalization and the DISJOIN / NEAREST passthroughs; the portable
   ``SELECT * EXCEPT (...)`` form is emitted otherwise);
 - ``supports_qualify`` — the ``QUALIFY`` clause;
-- ``range_join_strategy`` — ``"binned"`` or ``"iejoin"`` for column-to-column
-  INTERSECTS joins.
+- ``range_join_strategy`` — ``"naive"`` (emit the naive overlap predicate and let
+  the engine plan the range join) or ``"iejoin"`` (DuckDB's per-chromosome IEJoin
+  pre-pass) for column-to-column INTERSECTS joins.
 
 Define a custom target by subclassing :class:`~giql.targets.Target` as a frozen
 dataclass. Give every field a default so the class is constructible with no
@@ -61,7 +62,7 @@ arguments (the ``@register`` decorator instantiates a target class for you):
            supports_lateral=True,
            supports_star_replace=False,   # -> portable "* EXCEPT" canonicalization
            supports_qualify=True,
-           range_join_strategy="binned",
+           range_join_strategy="naive",
        )
 
 
