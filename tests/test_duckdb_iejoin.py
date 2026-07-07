@@ -357,6 +357,92 @@ class TestTranspileDuckDBIEJoinSQLStructure:
         assert "SET VARIABLE __giql_iejoin_" in sql
         assert rows == [(300,)]
 
+    def test_transpile_should_apply_anti_join_where_residual_as_outer_wrapper_filter(
+        self,
+    ):
+        """Test that an ANTI-join WHERE residual filters outside the per-chrom join.
+
+        Given:
+            An ``ANTI JOIN ... ON a.interval INTERSECTS b.interval`` whose
+            top-level ``WHERE a.start >= 550`` is a post-join filter.
+        When:
+            The query is transpiled with ``dialect='duckdb'``.
+        Then:
+            The residual is applied as a ``WHERE`` on the outer wrapper
+            relation, never inlined into the per-chromosome ANTI ``ON`` (which
+            would invert the anti-join for rows failing the residual, #200).
+        """
+        # Arrange & act
+        sql = transpile(
+            "SELECT a.start FROM peaks a "
+            "ANTI JOIN genes b ON a.interval INTERSECTS b.interval "
+            "WHERE a.start >= 550",
+            tables=["peaks", "genes"],
+            dialect="duckdb",
+        )
+
+        # Assert
+        per_chrom_template, _, outer_select = sql.partition("query(getvariable")
+        assert "SET VARIABLE __giql_iejoin_" in sql
+        assert "ANTI JOIN" in per_chrom_template
+        # The residual predicate sits in the outer wrapper filter, never in the
+        # per-chromosome ANTI ON template that DuckDB expands via string_agg.
+        # Anchor on ``>= 550`` (the rendered comparison) rather than the bare
+        # ``550`` literal: the per-chromosome template embeds the random
+        # ``uuid4`` var-name token, whose hex could coincidentally contain the
+        # substring ``550`` — but never the operator-and-space form.
+        assert "AS __giql_iejoin_wrapper WHERE" in outer_select
+        assert ">= 550" in outer_select
+        assert ">= 550" not in per_chrom_template
+
+    def test_transpile_should_raise_when_anti_join_where_residual_references_right_side(
+        self,
+    ):
+        """Test that an ANTI-join WHERE residual on the right side raises.
+
+        Given:
+            An ``ANTI JOIN`` whose ``WHERE`` references ``b.score`` — a right-
+            side column the left-only outer wrapper filter cannot resolve.
+        When:
+            The query is transpiled with ``dialect='duckdb'``.
+        Then:
+            A ``ValueError`` is raised rather than the residual being silently
+            inlined or mis-bound.
+        """
+        # Arrange & act & assert
+        with pytest.raises(ValueError, match="only projects left-side columns"):
+            transpile(
+                "SELECT a.start FROM peaks a "
+                "ANTI JOIN genes b ON a.interval INTERSECTS b.interval "
+                "WHERE b.score > 5",
+                tables=["peaks", "genes"],
+                dialect="duckdb",
+            )
+
+    def test_transpile_should_raise_when_semi_join_where_residual_references_right_side(
+        self,
+    ):
+        """Test that a SEMI-join WHERE residual on the right side raises.
+
+        Given:
+            A ``SEMI JOIN`` whose ``WHERE`` references ``b.score`` — a right-
+            side column the left-only outer wrapper filter cannot resolve.
+        When:
+            The query is transpiled with ``dialect='duckdb'``.
+        Then:
+            A ``ValueError`` is raised, mirroring the ANTI case (both are
+            left-only outer projections).
+        """
+        # Arrange & act & assert
+        with pytest.raises(ValueError, match="only projects left-side columns"):
+            transpile(
+                "SELECT a.start FROM peaks a "
+                "SEMI JOIN genes b ON a.interval INTERSECTS b.interval "
+                "WHERE b.score > 5",
+                tables=["peaks", "genes"],
+                dialect="duckdb",
+            )
+
     def test_transpile_should_route_to_naive_predicate_plan_when_extra_predicate_uses_or(
         self,
     ):
@@ -5567,6 +5653,413 @@ class TestTranspileDuckDBIEJoinExecution:
 
         # Assert
         assert rows_default == rows_duckdb
+
+    def test_query_should_match_naive_plan_for_anti_join_with_where_residual(self, conn):
+        """Test that an ANTI-join WHERE residual filters without inverting the join.
+
+        Given:
+            Three left rows — two overlap a right row (excluded by the
+            anti-join), one does not — and a top-level ``WHERE a.start >= 550``
+            post-join filter.
+        When:
+            The query is transpiled with ``dialect='duckdb'`` and
+            ``dialect=None`` and executed.
+        Then:
+            Both plans return only the non-overlapping row that also passes
+            the residual, proving the filter is applied after the anti-join
+            rather than folded into its per-chromosome ON (#200); the buggy
+            inlining would resurrect the two overlapping rows below 550.
+        """
+        # Arrange
+        _make_table(
+            conn,
+            "peaks",
+            [
+                ("chr1", 100, 200, "p1", 1, "+"),  # overlaps g1; anti-excluded
+                ("chr1", 500, 600, "p2", 2, "+"),  # overlaps g2; anti-excluded
+                ("chr1", 700, 800, "p3", 3, "+"),  # no overlap; passes residual
+            ],
+        )
+        _make_table(
+            conn,
+            "genes",
+            [
+                ("chr1", 150, 250, "g1", 1, "+"),
+                ("chr1", 500, 600, "g2", 2, "+"),
+            ],
+        )
+        query = (
+            "SELECT a.start FROM peaks a "
+            "ANTI JOIN genes b ON a.interval INTERSECTS b.interval "
+            "WHERE a.start >= 550"
+        )
+        sql_duckdb = transpile(query, tables=["peaks", "genes"], dialect="duckdb")
+        sql_naive = transpile(query, tables=["peaks", "genes"])
+
+        # Act
+        rows_duckdb = sorted(conn.execute(sql_duckdb).fetchall())
+        rows_naive = sorted(conn.execute(sql_naive).fetchall())
+
+        # Assert
+        assert rows_duckdb == [(700,)]
+        assert rows_duckdb == rows_naive
+
+    def test_query_should_filter_anti_join_by_where_residual_column_absent_from_select(
+        self, conn
+    ):
+        """Test that an ANTI-join WHERE residual can filter on an unselected column.
+
+        Given:
+            An ``ANTI JOIN`` selecting only ``a.start`` but filtering on
+            ``a.end`` — a column present only in the ``WHERE`` residual.
+        When:
+            The query is transpiled with ``dialect='duckdb'`` and executed.
+        Then:
+            The wrapper relation still exposes ``a.end`` so the outer filter
+            resolves, and the result matches the naive-predicate plan.
+        """
+        # Arrange
+        _make_table(
+            conn,
+            "peaks",
+            [
+                ("chr1", 100, 200, "p1", 1, "+"),  # overlaps g1; anti-excluded
+                ("chr1", 700, 800, "p3", 3, "+"),  # no overlap; a.end 800 > 750
+            ],
+        )
+        _make_table(conn, "genes", [("chr1", 150, 250, "g1", 1, "+")])
+        query = (
+            "SELECT a.start FROM peaks a "
+            "ANTI JOIN genes b ON a.interval INTERSECTS b.interval "
+            "WHERE a.end > 750"
+        )
+        sql_duckdb = transpile(query, tables=["peaks", "genes"], dialect="duckdb")
+        sql_naive = transpile(query, tables=["peaks", "genes"])
+
+        # Act
+        rows_duckdb = sorted(conn.execute(sql_duckdb).fetchall())
+        rows_naive = sorted(conn.execute(sql_naive).fetchall())
+
+        # Assert
+        assert rows_duckdb == [(700,)]
+        assert rows_duckdb == rows_naive
+
+    def test_query_should_match_naive_plan_for_semi_join_with_where_residual(self, conn):
+        """Test that a SEMI-join WHERE residual filters consistently with the naive plan.
+
+        Given:
+            Two overlapping left rows (kept by the semi-join) and a top-level
+            ``WHERE a.start >= 300`` post-join filter that keeps one of them.
+        When:
+            The query is transpiled with ``dialect='duckdb'`` and
+            ``dialect=None`` and executed.
+        Then:
+            Both plans return only the surviving overlapping row. SEMI's
+            result is identical whether the residual is inlined or applied
+            outside, so this locks the new SEMI outer-filter code path
+            against regressions rather than proving a behavior change (#200).
+        """
+        # Arrange
+        _make_table(
+            conn,
+            "peaks",
+            [
+                ("chr1", 100, 200, "p1", 1, "+"),  # overlaps g1; start < 300
+                ("chr1", 500, 600, "p2", 2, "+"),  # overlaps g2; start >= 300
+                ("chr1", 700, 800, "p3", 3, "+"),  # no overlap; semi-excluded
+            ],
+        )
+        _make_table(
+            conn,
+            "genes",
+            [
+                ("chr1", 150, 250, "g1", 1, "+"),
+                ("chr1", 500, 600, "g2", 2, "+"),
+            ],
+        )
+        query = (
+            "SELECT a.start FROM peaks a "
+            "SEMI JOIN genes b ON a.interval INTERSECTS b.interval "
+            "WHERE a.start >= 300"
+        )
+        sql_duckdb = transpile(query, tables=["peaks", "genes"], dialect="duckdb")
+        sql_naive = transpile(query, tables=["peaks", "genes"])
+
+        # Act
+        rows_duckdb = sorted(conn.execute(sql_duckdb).fetchall())
+        rows_naive = sorted(conn.execute(sql_naive).fetchall())
+
+        # Assert
+        assert rows_duckdb == [(500,)]
+        assert rows_duckdb == rows_naive
+
+    @settings(
+        max_examples=25,
+        deadline=None,
+        suppress_health_check=[HealthCheck.function_scoped_fixture],
+    )
+    @given(
+        peaks=st.lists(
+            st.tuples(
+                st.sampled_from(["chr1", "chr2"]),
+                st.integers(min_value=0, max_value=100),
+                st.integers(min_value=1, max_value=30),
+            ),
+            min_size=0,
+            max_size=6,
+        ),
+        genes=st.lists(
+            st.tuples(
+                st.sampled_from(["chr1", "chr2"]),
+                st.integers(min_value=0, max_value=100),
+                st.integers(min_value=1, max_value=30),
+            ),
+            min_size=0,
+            max_size=6,
+        ),
+    )
+    def test_query_should_match_naive_plan_for_anti_join_where_residual_random_inputs(
+        self, conn, peaks, genes
+    ):
+        """Test ANTI JOIN with a WHERE residual against the naive plan over random inputs.
+
+        Given:
+            A Hypothesis-generated pair of small interval lists.
+        When:
+            An ``ANTI JOIN ... ON INTERSECTS ... WHERE a.start >= 50`` is
+            transpiled with ``dialect=None`` and ``dialect='duckdb'`` and
+            executed.
+        Then:
+            Both plans return the same rows for every input — the WHERE
+            filter never resurrects an anti-excluded row on either side of
+            the 50 threshold (#200).
+        """
+        # Arrange
+        peak_rows = [(c, s, s + length) for (c, s, length) in peaks]
+        gene_rows = [(c, s, s + length) for (c, s, length) in genes]
+        conn.execute("DROP TABLE IF EXISTS peaks")
+        conn.execute("DROP TABLE IF EXISTS genes")
+        conn.execute(
+            'CREATE TABLE peaks (chrom VARCHAR, "start" INTEGER, "end" INTEGER)'
+        )
+        if peak_rows:
+            conn.executemany("INSERT INTO peaks VALUES (?, ?, ?)", peak_rows)
+        conn.execute(
+            'CREATE TABLE genes (chrom VARCHAR, "start" INTEGER, "end" INTEGER)'
+        )
+        if gene_rows:
+            conn.executemany("INSERT INTO genes VALUES (?, ?, ?)", gene_rows)
+        query = (
+            "SELECT a.chrom, a.start, a.end "
+            "FROM peaks a "
+            "ANTI JOIN genes b ON a.interval INTERSECTS b.interval "
+            "WHERE a.start >= 50"
+        )
+        sql_default = transpile(query, tables=["peaks", "genes"])
+        sql_duckdb = transpile(query, tables=["peaks", "genes"], dialect="duckdb")
+
+        # Act
+        rows_default = sorted(set(conn.execute(sql_default).fetchall()))
+        rows_duckdb = sorted(set(conn.execute(sql_duckdb).fetchall()))
+
+        # Assert
+        assert rows_default == rows_duckdb
+
+    def test_query_should_inline_anti_join_on_residual_referencing_right_side(
+        self, conn
+    ):
+        """Test that an ANTI-join ON residual on the right side stays inlined.
+
+        Given:
+            An ``ANTI JOIN ... ON a.interval INTERSECTS b.interval AND
+            b.score > 100`` — a genuine join condition referencing the right
+            side, which no gene satisfies.
+        When:
+            The query is transpiled with ``dialect='duckdb'`` and executed.
+        Then:
+            The residual stays inlined in the per-chromosome ON (it is a join
+            condition, not a post-join filter), so every left row survives the
+            anti-join and the result matches the naive plan. This guards the
+            provenance split from over-correcting the ON path — only WHERE
+            residuals move to the outer filter for the left-only shapes (#200).
+        """
+        # Arrange
+        _make_table(
+            conn,
+            "peaks",
+            [
+                ("chr1", 100, 200, "p1", 1, "+"),
+                ("chr1", 500, 600, "p2", 2, "+"),
+                ("chr1", 700, 800, "p3", 3, "+"),
+            ],
+        )
+        _make_table(
+            conn,
+            "genes",
+            [
+                ("chr1", 150, 250, "g1", 10, "+"),
+                ("chr1", 500, 600, "g2", 50, "+"),
+            ],
+        )
+        query = (
+            "SELECT a.start FROM peaks a "
+            "ANTI JOIN genes b ON a.interval INTERSECTS b.interval "
+            "AND b.score > 100"
+        )
+        sql_duckdb = transpile(query, tables=["peaks", "genes"], dialect="duckdb")
+        sql_naive = transpile(query, tables=["peaks", "genes"])
+
+        # Act
+        rows_duckdb = sorted(conn.execute(sql_duckdb).fetchall())
+        rows_naive = sorted(conn.execute(sql_naive).fetchall())
+
+        # Assert
+        assert rows_duckdb == [(100,), (500,), (700,)]
+        assert rows_duckdb == rows_naive
+
+    def test_query_should_match_naive_plan_for_anti_join_with_compound_where_residual(
+        self, conn
+    ):
+        """Test that a compound ANTI-join WHERE residual renders as one outer filter.
+
+        Given:
+            An ``ANTI JOIN`` with a two-clause post-join filter
+            ``WHERE a.start >= 550 AND a.end < 900`` over two columns.
+        When:
+            The query is transpiled with ``dialect='duckdb'`` and executed.
+        Then:
+            Both clauses are applied on the outer wrapper relation and the
+            result matches the naive plan (#200).
+        """
+        # Arrange
+        _make_table(
+            conn,
+            "peaks",
+            [
+                ("chr1", 100, 200, "p1", 1, "+"),  # overlaps g1; anti-excluded
+                ("chr1", 500, 600, "p2", 2, "+"),  # overlaps g2; anti-excluded
+                ("chr1", 700, 800, "p3", 3, "+"),  # no overlap; passes both clauses
+            ],
+        )
+        _make_table(
+            conn,
+            "genes",
+            [
+                ("chr1", 150, 250, "g1", 1, "+"),
+                ("chr1", 500, 600, "g2", 2, "+"),
+            ],
+        )
+        query = (
+            "SELECT a.start FROM peaks a "
+            "ANTI JOIN genes b ON a.interval INTERSECTS b.interval "
+            "WHERE a.start >= 550 AND a.end < 900"
+        )
+        sql_duckdb = transpile(query, tables=["peaks", "genes"], dialect="duckdb")
+        sql_naive = transpile(query, tables=["peaks", "genes"])
+
+        # Act
+        rows_duckdb = sorted(conn.execute(sql_duckdb).fetchall())
+        rows_naive = sorted(conn.execute(sql_naive).fetchall())
+
+        # Assert
+        assert rows_duckdb == [(700,)]
+        assert rows_duckdb == rows_naive
+
+    def test_query_should_group_anti_join_with_where_residual(self, conn):
+        """Test that an ANTI-join WHERE residual composes with GROUP BY on the wrapper.
+
+        Given:
+            An ``ANTI JOIN`` grouping by ``a.chrom`` with a post-join
+            ``WHERE a.start >= 550`` filter — the outer filter and the
+            aggregation both sit on the wrapper relation.
+        When:
+            The query is transpiled with ``dialect='duckdb'`` and executed.
+        Then:
+            The filter is applied before the aggregation and the grouped
+            counts match the naive plan (#200).
+        """
+        # Arrange
+        _make_table(
+            conn,
+            "peaks",
+            [
+                ("chr1", 100, 200, "p1", 1, "+"),  # overlaps g1; anti-excluded
+                ("chr1", 500, 600, "p2", 2, "+"),  # overlaps g2; anti-excluded
+                ("chr1", 700, 800, "p3", 3, "+"),  # no overlap; passes filter
+            ],
+        )
+        _make_table(
+            conn,
+            "genes",
+            [
+                ("chr1", 150, 250, "g1", 1, "+"),
+                ("chr1", 500, 600, "g2", 2, "+"),
+            ],
+        )
+        query = (
+            "SELECT a.chrom, COUNT(a.start) AS n FROM peaks a "
+            "ANTI JOIN genes b ON a.interval INTERSECTS b.interval "
+            "WHERE a.start >= 550 GROUP BY a.chrom"
+        )
+        sql_duckdb = transpile(query, tables=["peaks", "genes"], dialect="duckdb")
+        sql_naive = transpile(query, tables=["peaks", "genes"])
+
+        # Act
+        rows_duckdb = sorted(conn.execute(sql_duckdb).fetchall())
+        rows_naive = sorted(conn.execute(sql_naive).fetchall())
+
+        # Assert
+        assert rows_duckdb == [("chr1", 1)]
+        assert rows_duckdb == rows_naive
+
+    def test_query_should_order_anti_join_with_where_residual(self, conn):
+        """Test that an ANTI-join WHERE residual composes with ORDER BY on the wrapper.
+
+        Given:
+            An ``ANTI JOIN`` with a post-join ``WHERE a.start >= 550`` filter and
+            an order-sensitive ``ORDER BY a.start DESC`` — both the filter and the
+            sort sit on the wrapper relation.
+        When:
+            The query is transpiled with ``dialect='duckdb'`` and executed.
+        Then:
+            The filtered rows come back in the requested descending order,
+            matching the naive plan (rows compared without re-sorting so the
+            order itself is asserted) (#200).
+        """
+        # Arrange
+        _make_table(
+            conn,
+            "peaks",
+            [
+                ("chr1", 100, 200, "p1", 1, "+"),  # overlaps g1; anti-excluded
+                ("chr1", 500, 600, "p2", 2, "+"),  # overlaps g2; anti-excluded
+                ("chr1", 700, 800, "p3", 3, "+"),  # no overlap; passes filter
+                ("chr1", 900, 1000, "p4", 4, "+"),  # no overlap; passes filter
+            ],
+        )
+        _make_table(
+            conn,
+            "genes",
+            [
+                ("chr1", 150, 250, "g1", 1, "+"),
+                ("chr1", 500, 600, "g2", 2, "+"),
+            ],
+        )
+        query = (
+            "SELECT a.start FROM peaks a "
+            "ANTI JOIN genes b ON a.interval INTERSECTS b.interval "
+            "WHERE a.start >= 550 ORDER BY a.start DESC"
+        )
+        sql_duckdb = transpile(query, tables=["peaks", "genes"], dialect="duckdb")
+        sql_naive = transpile(query, tables=["peaks", "genes"])
+
+        # Act
+        rows_duckdb = conn.execute(sql_duckdb).fetchall()
+        rows_naive = conn.execute(sql_naive).fetchall()
+
+        # Assert
+        assert rows_duckdb == [(900,), (700,)]
+        assert rows_duckdb == rows_naive
 
 
 class TestTranspileDuckDBIEJoinKwargs:
