@@ -69,6 +69,46 @@ class TestClusterExpander:
         ):
             transpile(query, tables=["peaks"])
 
+    @pytest.mark.parametrize(
+        "query",
+        [
+            pytest.param(
+                "SELECT *, *, CLUSTER(interval) AS cid FROM peaks", id="two-bare-stars"
+            ),
+            pytest.param(
+                "SELECT *, t.* , CLUSTER(interval) AS cid FROM peaks t",
+                id="bare-and-qualified-star",
+            ),
+            pytest.param(
+                "SELECT *, * EXCEPT (score), CLUSTER(interval) AS cid FROM peaks",
+                id="bare-and-except-star",
+            ),
+            pytest.param(
+                "SELECT *, *, 1 AS extra, CLUSTER(interval) AS cid FROM peaks",
+                id="two-stars-with-extra",
+            ),
+        ],
+    )
+    def test_transpile_should_raise_when_multiple_stars_with_cluster(self, query):
+        """Test that two or more star projections alongside a CLUSTER are rejected.
+
+        Given:
+            A SELECT projecting a CLUSTER alongside two or more star projections (bare,
+            qualified, or star-with-EXCEPT).
+        When:
+            Transpiling the query.
+        Then:
+            It should raise ValueError naming the unsupported multiple-star case, rather
+            than silently multiplying the base columns — the two-level rewrite re-expands
+            each star at both the inner and outer level, so N stars yield N-times-N
+            columns (#194).
+        """
+        # Act & assert
+        with pytest.raises(
+            ValueError, match="CLUSTER does not support multiple star projections"
+        ):
+            transpile(query, tables=["peaks"])
+
     def test_transpile_should_use_custom_columns_when_table_declares_them(self):
         """Test that a stranded CLUSTER honors a custom column mapping.
 
@@ -995,6 +1035,490 @@ class TestClusterExpander:
 
         # Assert
         assert columns == ["chrom", "start", "end", "cid"]
+
+    @pytest.mark.parametrize(
+        "query, expected_columns",
+        [
+            pytest.param(
+                "SELECT *, 1 AS extra, CLUSTER(interval) AS cid FROM peaks",
+                ["chrom", "start", "end", "score", "extra", "cid"],
+                id="literal-extra",
+            ),
+            pytest.param(
+                "SELECT *, score AS s, CLUSTER(interval) AS cid FROM peaks",
+                ["chrom", "start", "end", "score", "s", "cid"],
+                id="aliased-column",
+            ),
+            pytest.param(
+                "SELECT *, score * 2 AS doubled, CLUSTER(interval) AS cid FROM peaks",
+                ["chrom", "start", "end", "score", "doubled", "cid"],
+                id="computed-expr",
+            ),
+            pytest.param(
+                "SELECT t.*, 1 AS extra, CLUSTER(interval) AS cid FROM peaks t",
+                ["chrom", "start", "end", "score", "extra", "cid"],
+                id="qualified-star",
+            ),
+            pytest.param(
+                "SELECT 1 AS extra, *, CLUSTER(interval) AS cid FROM peaks",
+                ["extra", "chrom", "start", "end", "score", "cid"],
+                id="extra-before-star",
+            ),
+            pytest.param(
+                "SELECT *, CLUSTER(interval) AS cid, 1 AS extra FROM peaks",
+                ["chrom", "start", "end", "score", "cid", "extra"],
+                id="extra-after-cluster",
+            ),
+            pytest.param(
+                "SELECT *, 1 AS a, CLUSTER(interval) AS cid, 2 AS b FROM peaks",
+                ["chrom", "start", "end", "score", "a", "cid", "b"],
+                id="extra-interleaved-with-cluster",
+            ),
+            pytest.param(
+                "SELECT 1 AS extra, CLUSTER(interval) AS cid, * FROM peaks",
+                ["extra", "cid", "chrom", "start", "end", "score"],
+                id="star-last-after-cluster",
+            ),
+            pytest.param(
+                "SELECT *, 1 AS a, 2 AS b, CLUSTER(interval) AS cid FROM peaks",
+                ["chrom", "start", "end", "score", "a", "b", "cid"],
+                id="multiple-extra",
+            ),
+        ],
+    )
+    def test_transpile_should_not_duplicate_extra_item_when_star_present(
+        self, query, expected_columns
+    ):
+        """Test that a star + extra projection item yields each column exactly once.
+
+        Given:
+            A CLUSTER projected alongside both a star (bare or qualified) and one or more
+            extra explicit items — a literal, an aliased base column, or a computed
+            expression — positioned before, between, or after the star and the CLUSTER.
+        When:
+            Transpiling for DuckDB and executing it.
+        Then:
+            Each output column should appear exactly once and in the user's exact column
+            position, including when the CLUSTER sits between the star and the extra item
+            — the extra item is not duplicated by being both re-surfaced through the
+            outer star and re-projected, nor reordered to the star's position (#190) —
+            and the cluster ids should be correct.
+        """
+        # Arrange
+        duckdb = pytest.importorskip("duckdb")
+        conn = duckdb.connect(":memory:")
+        conn.execute(
+            "CREATE TABLE peaks "
+            '(chrom VARCHAR, "start" INTEGER, "end" INTEGER, score INTEGER)'
+        )
+        conn.executemany(
+            "INSERT INTO peaks VALUES (?, ?, ?, ?)",
+            [("chr1", 10, 20, 5), ("chr1", 15, 30, 5), ("chr1", 100, 110, 9)],
+        )
+
+        # Act
+        sql = transpile(query, tables=["peaks"], dialect="duckdb")
+        cursor = conn.execute(sql)
+        columns = [desc[0] for desc in cursor.description]
+        rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+        # Assert
+        assert columns == expected_columns
+        assert sorted(r["cid"] for r in rows) == [1, 1, 2]
+
+    def test_transpile_should_keep_explicit_item_when_no_star(self):
+        """Test that a fully explicit projection keeps its extra item exactly once.
+
+        Given:
+            A CLUSTER over a fully explicit projection (no star) carrying an extra
+            literal item.
+        When:
+            Transpiling for DuckDB and executing it.
+        Then:
+            The extra item should be projected once — the #190 outer-drop only applies
+            when a sibling star would otherwise re-surface the item, so with no star the
+            explicit item must be preserved.
+        """
+        # Arrange
+        duckdb = pytest.importorskip("duckdb")
+        conn = duckdb.connect(":memory:")
+        conn.execute(
+            'CREATE TABLE peaks (chrom VARCHAR, "start" INTEGER, "end" INTEGER)'
+        )
+        conn.executemany(
+            "INSERT INTO peaks VALUES (?, ?, ?)",
+            [("chr1", 10, 20), ("chr1", 15, 30), ("chr1", 100, 110)],
+        )
+
+        # Act
+        sql = transpile(
+            'SELECT chrom, "start", "end", 1 AS extra, CLUSTER(interval) AS cid '
+            "FROM peaks",
+            tables=["peaks"],
+            dialect="duckdb",
+        )
+        columns = [desc[0] for desc in conn.execute(sql).description]
+
+        # Assert
+        assert columns == ["chrom", "start", "end", "extra", "cid"]
+
+    def test_transpile_should_reference_reserved_sibling_and_except_it_from_star(self):
+        """Test the emitted shape that keeps an extra item once and in position.
+
+        Given:
+            A star-projected CLUSTER carrying an extra ``1 AS extra`` item.
+        When:
+            Transpiling the query.
+        Then:
+            The literal should be materialized once in the inner lag_calc subquery under
+            a reserved ``__giql_sibling_0`` name; the outer star should EXCEPT both the
+            synthesized flag and that reserved name so it does not re-surface it; and the
+            outer projection should reference the reserved column, aliased back to
+            ``extra``, at its position — using a reserved name so the EXCEPT can never
+            strip a same-named base column (#190).
+        """
+        # Act
+        sql = transpile(
+            "SELECT *, 1 AS extra, CLUSTER(interval) AS cid FROM peaks",
+            tables=["peaks"],
+        )
+
+        # Assert
+        assert sql.count("1 AS __giql_sibling_0") == 1
+        assert "1 AS extra" not in sql
+        assert (
+            'SELECT * EXCEPT ("__giql_is_new_cluster", "__giql_sibling_0"), '
+            '"__giql_sibling_0" AS "extra", SUM(' in sql
+        )
+
+    def test_transpile_should_surface_correct_values_when_star_with_extra_items(self):
+        """Test that aliased and computed extra items carry the right values.
+
+        Given:
+            A star-projected CLUSTER carrying an aliased base column and a computed
+            expression alongside the star, over a seeded table.
+        When:
+            Transpiling for DuckDB and executing it.
+        Then:
+            Each surfaced extra column should carry its correct per-row value (proving
+            the by-name reference resolves to the inner-materialized column, not a
+            wrong-position column) and the cluster ids should be correct (#190).
+        """
+        # Arrange
+        duckdb = pytest.importorskip("duckdb")
+        conn = duckdb.connect(":memory:")
+        conn.execute(
+            "CREATE TABLE peaks "
+            '(chrom VARCHAR, "start" INTEGER, "end" INTEGER, score INTEGER)'
+        )
+        conn.executemany(
+            "INSERT INTO peaks VALUES (?, ?, ?, ?)",
+            [("chr1", 10, 20, 5), ("chr1", 15, 30, 7), ("chr1", 100, 110, 9)],
+        )
+
+        # Act
+        sql = transpile(
+            "SELECT *, score AS s, score * 2 AS doubled, CLUSTER(interval) AS cid "
+            "FROM peaks",
+            tables=["peaks"],
+            dialect="duckdb",
+        )
+        cursor = conn.execute(sql)
+        columns = [desc[0] for desc in cursor.description]
+        rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+        # Assert
+        assert columns == ["chrom", "start", "end", "score", "s", "doubled", "cid"]
+        pairs = sorted((r["s"], r["doubled"]) for r in rows)
+        assert pairs == [(5, 10), (7, 14), (9, 18)]
+        assert sorted(r["cid"] for r in rows) == [1, 1, 2]
+
+    def test_transpile_should_dedup_star_with_extra_when_cluster_distinct(self):
+        """Test that DISTINCT over a star + extra item dedups without the flag.
+
+        Given:
+            A CLUSTER over rows that collapse to one distinct interval, projected with
+            DISTINCT over a bare star plus an extra literal item.
+        When:
+            Transpiling for DuckDB and executing it.
+        Then:
+            The output should dedup to the single distinct row (the synthesized flag is
+            hidden so it cannot split the dedup) with the extra surfaced once (#190).
+        """
+        # Arrange
+        duckdb = pytest.importorskip("duckdb")
+        conn = duckdb.connect(":memory:")
+        conn.execute(
+            'CREATE TABLE peaks (chrom VARCHAR, "start" INTEGER, "end" INTEGER)'
+        )
+        conn.executemany(
+            "INSERT INTO peaks VALUES (?, ?, ?)",
+            [("chr1", 10, 20), ("chr1", 10, 20), ("chr1", 10, 20)],
+        )
+
+        # Act
+        sql = transpile(
+            "SELECT DISTINCT *, 1 AS extra, CLUSTER(interval) AS cid FROM peaks",
+            tables=["peaks"],
+            dialect="duckdb",
+        )
+        cursor = conn.execute(sql)
+        columns = [desc[0] for desc in cursor.description]
+        rows = cursor.fetchall()
+
+        # Assert
+        assert columns == ["chrom", "start", "end", "extra", "cid"]
+        assert rows == [("chr1", 10, 20, 1, 1)]
+
+    def test_transpile_should_surface_extra_referencing_user_excepted_column(self):
+        """Test that an extra aliasing a user-EXCEPTed column still resolves correctly.
+
+        Given:
+            A star-projected CLUSTER whose star EXCEPTs ``score`` while an extra item
+            re-projects ``score AS s`` alongside it.
+        When:
+            Transpiling for DuckDB and executing it.
+        Then:
+            The excepted ``score`` should be absent from the star while ``s`` still
+            surfaces with the correct value — proving the outer projection references
+            the inner-materialized ``s`` column rather than re-evaluating ``score``
+            (which the outer star no longer exposes) (#190).
+        """
+        # Arrange
+        duckdb = pytest.importorskip("duckdb")
+        conn = duckdb.connect(":memory:")
+        conn.execute(
+            "CREATE TABLE peaks "
+            '(chrom VARCHAR, "start" INTEGER, "end" INTEGER, score INTEGER)'
+        )
+        conn.executemany(
+            "INSERT INTO peaks VALUES (?, ?, ?, ?)",
+            [("chr1", 10, 20, 5), ("chr1", 15, 30, 7), ("chr1", 100, 110, 9)],
+        )
+
+        # Act
+        sql = transpile(
+            "SELECT * EXCEPT (score), score AS s, CLUSTER(interval) AS cid FROM peaks",
+            tables=["peaks"],
+            dialect="duckdb",
+        )
+        cursor = conn.execute(sql)
+        columns = [desc[0] for desc in cursor.description]
+        rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+        # Assert
+        assert columns == ["chrom", "start", "end", "s", "cid"]
+        assert sorted(r["s"] for r in rows) == [5, 7, 9]
+
+    def test_transpile_should_surface_user_value_when_sibling_alias_shadows_base(self):
+        """Test that a sibling aliased to a base column name carries the user's value.
+
+        Given:
+            A star-projected CLUSTER whose extra item aliases a computed value to a name
+            that collides with a base column the star already surfaces
+            (``SELECT *, score * 10 AS score``).
+        When:
+            Transpiling for DuckDB and executing it.
+        Then:
+            The output should match the un-clustered ``SELECT *, score * 10 AS score``
+            projection — the base ``score`` and the user's computed ``score`` both
+            surface with their correct values, rather than the outer star stripping the
+            base column and the reference binding ambiguously (the reserved inner name
+            keeps them distinct) (#190).
+        """
+        # Arrange
+        duckdb = pytest.importorskip("duckdb")
+        conn = duckdb.connect(":memory:")
+        conn.execute(
+            "CREATE TABLE peaks "
+            '(chrom VARCHAR, "start" INTEGER, "end" INTEGER, score INTEGER)'
+        )
+        conn.executemany(
+            "INSERT INTO peaks VALUES (?, ?, ?, ?)",
+            [("chr1", 10, 20, 5), ("chr1", 15, 30, 7), ("chr1", 100, 110, 9)],
+        )
+
+        # Act
+        sql = transpile(
+            "SELECT *, score * 10 AS score, CLUSTER(interval) AS cid FROM peaks",
+            tables=["peaks"],
+            dialect="duckdb",
+        )
+        cursor = conn.execute(sql)
+        columns = [desc[0] for desc in cursor.description]
+        rows = [tuple(row) for row in cursor.fetchall()]
+
+        # Assert
+        assert columns == ["chrom", "start", "end", "score", "score", "cid"]
+        assert sorted((r[3], r[4]) for r in rows) == [(5, 50), (7, 70), (9, 90)]
+        assert sorted(r[5] for r in rows) == [1, 1, 2]
+
+    def test_transpile_should_keep_clustering_when_sibling_shadows_genomic(self):
+        """Test that a sibling shadowing a genomic column keeps the window unambiguous.
+
+        Given:
+            A star-projected CLUSTER whose extra item aliases a literal to a genomic
+            column name the window references (``SELECT *, 0 AS "end"``).
+        When:
+            Transpiling for DuckDB and executing it.
+        Then:
+            The cluster ids should stay correct — the inner ``LAG("end")`` window must
+            bind to the real ``end`` column, not the shadowing ``0``, because the sibling
+            is materialized under a reserved name rather than ``end`` (#190).
+        """
+        # Arrange
+        duckdb = pytest.importorskip("duckdb")
+        conn = duckdb.connect(":memory:")
+        conn.execute(
+            'CREATE TABLE peaks (chrom VARCHAR, "start" INTEGER, "end" INTEGER)'
+        )
+        conn.executemany(
+            "INSERT INTO peaks VALUES (?, ?, ?)",
+            [("chr1", 10, 20), ("chr1", 15, 30), ("chr1", 100, 110)],
+        )
+
+        # Act
+        sql = transpile(
+            'SELECT *, 0 AS "end", CLUSTER(interval) AS cid FROM peaks',
+            tables=["peaks"],
+            dialect="duckdb",
+        )
+        cursor = conn.execute(sql)
+        columns = [desc[0] for desc in cursor.description]
+        rows = [tuple(row) for row in cursor.fetchall()]
+
+        # Assert
+        assert columns == ["chrom", "start", "end", "end", "cid"]
+        assert sorted((r[2], r[3]) for r in rows) == [(20, 0), (30, 0), (110, 0)]
+        assert sorted(r[4] for r in rows) == [1, 1, 2]
+
+    def test_transpile_should_surface_both_when_duplicate_sibling_aliases(self):
+        """Test that two siblings sharing an alias both surface without a parse error.
+
+        Given:
+            A star-projected CLUSTER carrying two extra items that share an alias
+            (``SELECT *, 1 AS x, 2 AS x``).
+        When:
+            Transpiling for DuckDB and executing it.
+        Then:
+            Both should surface with their own values — matching the un-clustered
+            projection — rather than emitting a duplicated ``EXCLUDE`` entry that DuckDB
+            rejects (each sibling is materialized under a distinct reserved name) (#190).
+        """
+        # Arrange
+        duckdb = pytest.importorskip("duckdb")
+        conn = duckdb.connect(":memory:")
+        conn.execute(
+            'CREATE TABLE peaks (chrom VARCHAR, "start" INTEGER, "end" INTEGER)'
+        )
+        conn.executemany(
+            "INSERT INTO peaks VALUES (?, ?, ?)",
+            [("chr1", 10, 20), ("chr1", 15, 30), ("chr1", 100, 110)],
+        )
+
+        # Act
+        sql = transpile(
+            "SELECT *, 1 AS x, 2 AS x, CLUSTER(interval) AS cid FROM peaks",
+            tables=["peaks"],
+            dialect="duckdb",
+        )
+        cursor = conn.execute(sql)
+        columns = [desc[0] for desc in cursor.description]
+        rows = [tuple(row) for row in cursor.fetchall()]
+
+        # Assert
+        assert columns == ["chrom", "start", "end", "x", "x", "cid"]
+        assert all((r[3], r[4]) == (1, 2) for r in rows)
+        assert sorted(r[5] for r in rows) == [1, 1, 2]
+
+    def test_transpile_should_not_add_duplicate_when_bare_column_sibling_with_star(self):
+        """Test that a bare-column sibling under a star adds no CLUSTER-only duplicate.
+
+        Given:
+            A star-projected CLUSTER carrying a non-aliased bare base column already
+            covered by the star (``SELECT *, score``).
+        When:
+            Transpiling for DuckDB and executing it.
+        Then:
+            The output should carry the four base columns, one duplicate ``score`` (the
+            one the user's own ``SELECT *, score`` projection already carries), and
+            ``cid`` — six columns, not seven: the non-aliased sibling materializes once
+            under a reserved name and re-projected in its written slot (EXCEPTed from the
+            star), so CLUSTER adds no duplicate beyond the user's own (#190).
+        """
+        # Arrange
+        duckdb = pytest.importorskip("duckdb")
+        conn = duckdb.connect(":memory:")
+        conn.execute(
+            "CREATE TABLE peaks "
+            '(chrom VARCHAR, "start" INTEGER, "end" INTEGER, score INTEGER)'
+        )
+        conn.executemany(
+            "INSERT INTO peaks VALUES (?, ?, ?, ?)",
+            [("chr1", 10, 20, 5), ("chr1", 15, 30, 7), ("chr1", 100, 110, 9)],
+        )
+
+        # Act
+        sql = transpile(
+            "SELECT *, score, CLUSTER(interval) AS cid FROM peaks",
+            tables=["peaks"],
+            dialect="duckdb",
+        )
+        rows = [tuple(row) for row in conn.execute(sql).fetchall()]
+
+        # Assert
+        assert all(len(r) == 6 for r in rows)
+        assert all(r[3] == r[4] for r in rows)
+        assert sorted(r[3] for r in rows) == [5, 7, 9]
+        assert sorted(r[5] for r in rows) == [1, 1, 2]
+
+    def test_transpile_should_pin_sibling_order_when_star_mixes_aliased_and_unnamed(
+        self,
+    ):
+        """Test that an aliased sibling keeps its slot ahead of a later unnamed one.
+
+        Given:
+            A star-projected CLUSTER carrying an aliased sibling followed by an unnamed
+            expression sibling (``SELECT *, 100 AS z, "start" + 1000, CLUSTER(...)``)
+            over a seeded table.
+        When:
+            Transpiling for DuckDB and executing it.
+        Then:
+            The aliased ``z`` should surface before the unnamed expression, matching the
+            un-clustered column order — both siblings are materialized under reserved
+            names and re-projected in their written slots, so the unnamed one no longer
+            jumps ahead to the star's position and silently reorders the columns (#190).
+        """
+        # Arrange
+        duckdb = pytest.importorskip("duckdb")
+        conn = duckdb.connect(":memory:")
+        conn.execute(
+            'CREATE TABLE peaks (chrom VARCHAR, "start" INTEGER, "end" INTEGER)'
+        )
+        conn.executemany(
+            "INSERT INTO peaks VALUES (?, ?, ?)",
+            [("chr1", 10, 20), ("chr1", 15, 30), ("chr1", 100, 110)],
+        )
+
+        # Act
+        sql = transpile(
+            'SELECT *, 100 AS z, "start" + 1000, CLUSTER(interval) AS cid FROM peaks',
+            tables=["peaks"],
+            dialect="duckdb",
+        )
+        cursor = conn.execute(sql)
+        columns = [desc[0] for desc in cursor.description]
+        rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+        # Assert
+        expr_col = next(
+            c for c in columns if c not in ("chrom", "start", "end", "z", "cid")
+        )
+        assert columns.index("z") < columns.index(expr_col)
+        assert columns[-1] == "cid"
+        assert all(r["z"] == 100 for r in rows)
+        assert sorted(r[expr_col] for r in rows) == [1010, 1015, 1100]
+        assert sorted(r["cid"] for r in rows) == [1, 1, 2]
 
     def test_transpile_should_execute_when_cluster_with_limit_and_offset(self):
         """Test that CLUSTER with LIMIT/OFFSET returns the correct row window.
