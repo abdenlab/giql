@@ -465,8 +465,7 @@ class TestTranspileDialects:
                 ["peaks"],
             ),
             (
-                "SELECT DISTANCE(a.interval, b.interval) AS d "
-                "FROM peaks a, genes b",
+                "SELECT DISTANCE(a.interval, b.interval) AS d FROM peaks a, genes b",
                 ["peaks", "genes"],
             ),
             ("SELECT * FROM DISJOIN(peaks)", ["peaks"]),
@@ -594,39 +593,6 @@ class TestTranspileDialects:
         # Assert
         assert _strip_nulls(duckdb_sql) == _strip_nulls(generic_sql)
 
-    def test_transpile_datafusion_accepts_intersects_bin_size(self):
-        """Test that datafusion honours the binned-join bin size identically.
-
-        Given:
-            A column-to-column INTERSECTS join with an explicit
-            intersects_bin_size, transpiled with dialect=None and
-            dialect="datafusion".
-        When:
-            Comparing the two outputs.
-        Then:
-            It should produce byte-identical SQL — datafusion takes the same
-            binned-join path and honours the bin size.
-        """
-        # Arrange
-        query = (
-            "SELECT a.chrom, b.chrom FROM peaks a "
-            "JOIN genes b ON a.interval INTERSECTS b.interval"
-        )
-
-        # Act
-        generic_sql = transpile(
-            query, tables=["peaks", "genes"], intersects_bin_size=50000
-        )
-        datafusion_sql = transpile(
-            query,
-            tables=["peaks", "genes"],
-            dialect="datafusion",
-            intersects_bin_size=50000,
-        )
-
-        # Assert
-        assert datafusion_sql == generic_sql
-
     def test_transpile_duckdb_returns_sql_for_column_join(self):
         """Test the duckdb happy path for a column-to-column INTERSECTS join.
 
@@ -650,50 +616,28 @@ class TestTranspileDialects:
         assert "peaks" in sql
         assert "genes" in sql
 
-    def test_transpile_duckdb_rejects_intersects_bin_size(self):
-        """Test that duckdb and intersects_bin_size are mutually exclusive.
+    def test_transpile_rejects_removed_intersects_bin_size(self):
+        """Test that the removed ``intersects_bin_size`` parameter is gone.
 
         Given:
-            dialect="duckdb" combined with an explicit intersects_bin_size.
+            The binned equi-join path and its ``intersects_bin_size`` parameter
+            were removed in #167.
         When:
-            Transpiling.
+            ``transpile`` is called with an ``intersects_bin_size`` keyword.
         Then:
-            It should raise ValueError explaining the IEJoin plan ignores
-            the bin size.
+            It should raise ``TypeError`` for the unexpected keyword argument,
+            and ``DEFAULT_BIN_SIZE`` should no longer be a public export.
         """
         # Act & assert
-        with pytest.raises(
-            ValueError,
-            match=r"intersects_bin_size has no effect.*Pass one or the other, not both\.",
-        ):
+        with pytest.raises(TypeError, match="intersects_bin_size"):
             transpile(
-                "SELECT a.chrom, b.chrom FROM peaks a "
+                "SELECT a.chrom FROM peaks a "
                 "JOIN genes b ON a.interval INTERSECTS b.interval",
                 tables=["peaks", "genes"],
-                dialect="duckdb",
-                intersects_bin_size=50000,  # type: ignore[call-overload]
+                intersects_bin_size=10000,  # type: ignore[call-arg]
             )
-
-    def test_transpile_duckdb_rejects_zero_intersects_bin_size(self):
-        """Test that a falsy-but-set bin size still triggers the duckdb guard.
-
-        Given:
-            dialect="duckdb" combined with intersects_bin_size=0.
-        When:
-            Transpiling.
-        Then:
-            It should raise ValueError — the guard is `is not None`, so 0
-            (falsy) still conflicts with the IEJoin plan.
-        """
-        # Act & assert
-        with pytest.raises(ValueError, match="intersects_bin_size has no effect"):
-            transpile(
-                "SELECT a.chrom, b.chrom FROM peaks a "
-                "JOIN genes b ON a.interval INTERSECTS b.interval",
-                tables=["peaks", "genes"],
-                dialect="duckdb",
-                intersects_bin_size=0,  # type: ignore[call-overload]
-            )
+        assert "DEFAULT_BIN_SIZE" not in giql.__all__
+        assert not hasattr(giql, "DEFAULT_BIN_SIZE")
 
 
 class TestModuleExports:

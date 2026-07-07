@@ -34,10 +34,11 @@ def _generate_through_passes(sql: str, tables: Tables) -> str:
     expanded output must therefore run all three passes before generating, exactly
     as :func:`giql.transpile.transpile` does, rather than calling ``generate`` on a
     bare parsed AST. Operators still on the legacy emitter (DISJOIN) pass through
-    the expansion pass untouched. This helper is used where the full ``transpile``
-    pipeline would otherwise rewrite the node away (a column-to-column
-    ``INTERSECTS`` is turned into a binned equi-join before the predicate expander
-    runs).
+    the expansion pass untouched. This helper runs the passes in isolation to pin
+    the expanded emitter output on the generic target directly, without the DuckDB
+    IEJoin pre-pass (the only remaining pre-pass join rewrite — a column-to-column
+    ``INTERSECTS`` join otherwise expands to the naive overlap predicate right here
+    in pass 3, since the binned pre-pass rewrite was dropped in #167).
     """
     ast = parse_one(sql, dialect=GIQLDialect)
     ast = resolve_operator_refs(ast, tables)
@@ -151,9 +152,9 @@ class TestGeneratedSQL:
             "WHERE a.interval INTERSECTS b.interval"
         )
 
-        # The full transpile pipeline rewrites a column-to-column INTERSECTS into a
-        # binned equi-join before the predicate emitter runs, so run passes 1 and 2
-        # directly to exercise the predicate emitter's column-join branch.
+        # A column-to-column INTERSECTS join expands to the naive overlap predicate
+        # in pass 3; run passes 1-3 directly to pin the predicate expander's
+        # column-join branch in isolation.
         output = _generate_through_passes(sql, tables_with_two_tables)
 
         expected = (
@@ -1272,10 +1273,10 @@ class TestGeneratedSQL:
         )
 
         # Act — column-join operand canonicalization now lives in the
-        # CanonicalizeCoordinates pass (#123). The full transpile pipeline rewrites
-        # a column-to-column INTERSECTS into a binned equi-join before the
-        # predicate emitter runs, so run passes 1 and 2 directly to exercise the
-        # predicate emitter's column-join branch on canonicalized metadata.
+        # CanonicalizeCoordinates pass (#123). A column-to-column INTERSECTS join
+        # expands to the naive overlap predicate in pass 3; run passes 1-3 directly
+        # to pin the predicate expander's column-join branch on canonicalized
+        # metadata.
         output = _generate_through_passes(sql, tables_mixed_conventions)
 
         # Assert
@@ -1309,7 +1310,7 @@ class TestGeneratedSQL:
 
         # Act — column-join operand canonicalization now lives in the
         # CanonicalizeCoordinates pass (#123); transpile runs it. (Column-to-column
-        # CONTAINS is not rewritten into a binned join, so it reaches the emitter.)
+        # CONTAINS expands to a predicate in pass 3, so it reaches the emitter.)
         output = transpile(sql, tables=list(tables_mixed_conventions))
 
         # Assert
@@ -1343,7 +1344,7 @@ class TestGeneratedSQL:
 
         # Act — column-join operand canonicalization now lives in the
         # CanonicalizeCoordinates pass (#123); transpile runs it. (Column-to-column
-        # WITHIN is not rewritten into a binned join, so it reaches the emitter.)
+        # WITHIN expands to a predicate in pass 3, so it reaches the emitter.)
         output = transpile(sql, tables=list(tables_mixed_conventions))
 
         # Assert

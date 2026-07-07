@@ -297,30 +297,30 @@ def isolated_registry():
         REGISTRY.restore(saved)
 
 
-class TestBinnedTargetOverrideDeferral:
-    """A target-specific Intersects override defers the binned join rewrite (#141)."""
+class TestTargetOverrideDeferral:
+    """A target-specific Intersects override supersedes the default rewrite (#141)."""
 
-    def test_transpile_should_skip_binned_rewrite_when_target_override(
+    def test_transpile_should_skip_default_rewrite_when_target_override(
         self, isolated_registry
     ):
-        """Test that a (target, Intersects) override bypasses the binned transformer.
+        """Test that a (target, Intersects) override supersedes the naive predicate.
 
         Given:
-            A column-to-column INTERSECTS join on the generic binned path
+            A column-to-column INTERSECTS join on a naive-predicate target
             (dialect='datafusion') with a (DataFusionTarget, Intersects) override
             registered.
         When:
             Transpiling.
         Then:
-            The override's sentinel reaches the SQL and no binned equi-join
-            artifact is emitted — the override takes over the join rewrite that the
-            built-in binned transformer would otherwise perform.
+            The override's sentinel reaches the SQL and the built-in naive overlap
+            predicate is NOT emitted — the override takes over the join rewrite the
+            default ``(GenericTarget, Intersects)`` expander would otherwise perform.
         """
         # Arrange
         isolated_registry.register(
             DataFusionTarget(),
             Intersects,
-            lambda n, c: exp.column("BINNED_OVERRIDE_SENTINEL"),
+            lambda n, c: exp.column("INTERSECTS_OVERRIDE_SENTINEL"),
         )
         query = (
             "SELECT a.start FROM peaks a "
@@ -331,42 +331,9 @@ class TestBinnedTargetOverrideDeferral:
         sql = transpile(query, tables=["peaks", "genes"], dialect="datafusion")
 
         # Assert
-        assert "BINNED_OVERRIDE_SENTINEL" in sql
-        assert "_bins" not in sql
-
-    def test_transpile_should_reject_bin_size_when_target_override(
-        self, isolated_registry
-    ):
-        """Test that bin size is rejected under a binned-target Intersects override.
-
-        Given:
-            A (DataFusionTarget, Intersects) override registered.
-        When:
-            Transpiling with intersects_bin_size set (which only configures the
-            built-in binned transformer the override supersedes).
-        Then:
-            transpile() raises ValueError rather than silently dropping the bin
-            size, parallel to the iejoin rejection.
-        """
-        # Arrange
-        isolated_registry.register(
-            DataFusionTarget(),
-            Intersects,
-            lambda n, c: exp.column("BINNED_OVERRIDE_SENTINEL"),
-        )
-        query = (
-            "SELECT a.start FROM peaks a "
-            "JOIN genes b ON a.interval INTERSECTS b.interval"
-        )
-
-        # Act & assert
-        with pytest.raises(ValueError, match=r"intersects_bin_size has no effect"):
-            transpile(
-                query,
-                tables=["peaks", "genes"],
-                dialect="datafusion",
-                intersects_bin_size=5000,
-            )
+        assert "INTERSECTS_OVERRIDE_SENTINEL" in sql
+        # The default naive overlap predicate did not fire.
+        assert "<" not in sql
 
 
 class TestSpatialExpanderErrors:

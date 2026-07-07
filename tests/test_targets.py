@@ -40,14 +40,14 @@ class TestCapabilities:
             supports_lateral=True,
             supports_star_replace=False,
             supports_qualify=True,
-            range_join_strategy="binned",
+            range_join_strategy="naive",
         )
 
         # Assert
         assert caps.supports_lateral is True
         assert caps.supports_star_replace is False
         assert caps.supports_qualify is True
-        assert caps.range_join_strategy == "binned"
+        assert caps.range_join_strategy == "naive"
 
     def test___eq___with_identical_values(self):
         """Test value equality of Capabilities.
@@ -97,7 +97,7 @@ class TestCapabilities:
             supports_lateral=True,
             supports_star_replace=True,
             supports_qualify=True,
-            range_join_strategy="binned",
+            range_join_strategy="naive",
         )
 
         # Act & assert
@@ -118,7 +118,7 @@ class TestCapabilities:
             supports_lateral=True,
             supports_star_replace=False,
             supports_qualify=False,
-            range_join_strategy="binned",
+            range_join_strategy="naive",
         )
 
         # Act & assert
@@ -138,7 +138,7 @@ class TestGenericTarget:
             An instance is constructed.
         Then:
             It should carry the portable SQL-92 baseline: no engine dialect,
-            lateral supported, no star-REPLACE, no QUALIFY, binned joins.
+            lateral supported, no star-REPLACE, no QUALIFY, naive-predicate joins.
         """
         # Act
         target = GenericTarget()
@@ -149,7 +149,7 @@ class TestGenericTarget:
         assert target.capabilities.supports_lateral is True
         assert target.capabilities.supports_star_replace is False
         assert target.capabilities.supports_qualify is False
-        assert target.capabilities.range_join_strategy == "binned"
+        assert target.capabilities.range_join_strategy == "naive"
 
 
 class TestDuckDBTarget:
@@ -191,7 +191,7 @@ class TestDataFusionTarget:
         Then:
             It should fall back to generic serialization (no sqlglot
             DataFusion dialect), disable star-REPLACE and QUALIFY, and use
-            the binned join strategy.
+            the naive-predicate join strategy.
         """
         # Act
         target = DataFusionTarget()
@@ -202,7 +202,7 @@ class TestDataFusionTarget:
         assert target.capabilities.supports_lateral is False
         assert target.capabilities.supports_star_replace is False
         assert target.capabilities.supports_qualify is False
-        assert target.capabilities.range_join_strategy == "binned"
+        assert target.capabilities.range_join_strategy == "naive"
 
 
 class TestTarget:
@@ -367,7 +367,7 @@ class _PostgresTarget(Target):
         supports_lateral=True,
         supports_star_replace=False,
         supports_qualify=True,
-        range_join_strategy="binned",
+        range_join_strategy="naive",
     )
 
 
@@ -528,7 +528,7 @@ class TestCustomTargetInjection:
                 supports_lateral=True,
                 supports_star_replace=False,
                 supports_qualify=False,
-                range_join_strategy="binned",
+                range_join_strategy="naive",
             )
 
         REGISTRY.register_target(_ShadowTarget())
@@ -605,7 +605,7 @@ class TestTargetDrivesSerialization:
                 supports_lateral=True,
                 supports_star_replace=False,
                 supports_qualify=False,
-                range_join_strategy="binned",
+                range_join_strategy="naive",
             )
 
         REGISTRY.register_target(_DuckLikeTarget())

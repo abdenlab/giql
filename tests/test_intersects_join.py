@@ -1,8 +1,6 @@
-"""Tests for the INTERSECTS binned equi-join transpilation."""
+"""Tests for the INTERSECTS naive overlap predicate join transpilation."""
 
 import math
-
-import pytest
 
 from giql import Table
 from giql import transpile
@@ -18,15 +16,16 @@ def _is_null(value) -> bool:
         return False
 
 
-class TestTranspileBinnedJoin:
-    """Unit tests for binned join SQL structure."""
+class TestTranspileIntersectsJoin:
+    """Unit tests for the naive overlap predicate SQL structure."""
 
-    def test_basic_binned_join_rewrite(self):
+    def test_inner_join_emits_naive_overlap_predicate(self):
         """
         GIVEN a GIQL query joining two tables with column-to-column INTERSECTS
         WHEN transpiling with default settings
-        THEN should produce CTEs with UNNEST/range, equi-join and overlap in ON,
-             and DISTINCT
+        THEN the INTERSECTS expands in place to the naive overlap predicate
+             (chrom equality plus half-open start/end comparisons) with no
+             CTEs, no UNNEST, no bin columns, and no added DISTINCT
         """
         sql = transpile(
             """
@@ -37,49 +36,25 @@ class TestTranspileBinnedJoin:
             tables=["peaks", "genes"],
         )
 
-        sql_upper = sql.upper()
+        # Naive overlap predicate: chrom equality and half-open comparisons
+        assert '"chrom" = ' in sql
+        assert '"start" <' in sql
+        assert '"end" >' in sql
 
-        # CTEs with UNNEST and range
-        assert "WITH" in sql_upper
-        assert "UNNEST" in sql_upper
-        assert "range" in sql or "RANGE" in sql_upper
-        assert "__giql_bin" in sql
+        # No CTE rewrite machinery
+        assert "WITH" not in sql.upper()
+        assert "UNNEST" not in sql.upper()
+        assert "__giql_bin" not in sql
+        assert "__giql_pairs" not in sql
 
-        # Equi-join on chrom and bin
-        assert '"chrom"' in sql
-        assert "__giql_bin" in sql
-
-        # Overlap filter in ON (not WHERE) for correct outer-join semantics
-        assert "ON" in sql_upper
-        assert '"start"' in sql or '"START"' in sql_upper
-        assert '"end"' in sql or '"END"' in sql_upper
-
-        # DISTINCT to deduplicate across bins
-        assert "DISTINCT" in sql_upper
-
-    def test_custom_bin_size(self):
-        """
-        GIVEN a GIQL query with column-to-column INTERSECTS join
-        WHEN transpiling with intersects_bin_size=100000
-        THEN should use 100000 in the range expressions
-        """
-        sql = transpile(
-            """
-            SELECT a.*, b.*
-            FROM peaks a
-            JOIN genes b ON a.interval INTERSECTS b.interval
-            """,
-            tables=["peaks", "genes"],
-            intersects_bin_size=100000,
-        )
-
-        assert "100000" in sql
+        # No DISTINCT added by the transpiler
+        assert "DISTINCT" not in sql.upper()
 
     def test_custom_column_mappings(self):
         """
         GIVEN two tables with different custom column schemas
-        WHEN transpiling a binned join query
-        THEN should use each table's custom column names in CTEs, ON, and WHERE
+        WHEN transpiling an INTERSECTS join query
+        THEN should use each table's custom column names in the overlap predicate
         """
         sql = transpile(
             """
@@ -120,17 +95,18 @@ class TestTranspileBinnedJoin:
         assert '"start"' not in sql
         assert '"end"' not in sql
 
-    def test_literal_intersects_no_binned_ctes(self):
+    def test_literal_intersects_no_ctes(self):
         """
         GIVEN a GIQL query with a literal-range INTERSECTS in WHERE (not a join)
         WHEN transpiling
-        THEN should NOT produce binned CTEs
+        THEN should NOT produce any CTEs
         """
         sql = transpile(
             "SELECT * FROM peaks WHERE interval INTERSECTS 'chr1:1000-2000'",
             tables=["peaks"],
         )
 
+        assert "WITH" not in sql.upper()
         assert "__giql_bin" not in sql
         assert "UNNEST" not in sql.upper()
 
@@ -138,7 +114,7 @@ class TestTranspileBinnedJoin:
         """
         GIVEN a simple SELECT query with no JOIN
         WHEN transpiling
-        THEN should NOT produce binned CTEs
+        THEN should NOT produce any CTEs or helper columns
         """
         sql = transpile(
             "SELECT * FROM peaks",
@@ -152,8 +128,9 @@ class TestTranspileBinnedJoin:
     def test_existing_where_preserved(self):
         """
         GIVEN a GIQL join query that already has a WHERE clause
-        WHEN transpiling a binned join
-        THEN should preserve the original WHERE condition alongside the overlap filter
+        WHEN transpiling an INTERSECTS join
+        THEN should preserve the original WHERE condition alongside the overlap
+             predicate in the ON clause
         """
         sql = transpile(
             """
@@ -171,45 +148,16 @@ class TestTranspileBinnedJoin:
         assert "100" in sql
         assert "score" in sql.lower()
 
-        # Overlap filter also present
+        # Overlap predicate also present
         assert "WHERE" in sql_upper
-        # Both conditions combined with AND
         assert "AND" in sql_upper
 
-    def test_bin_size_none_defaults_to_10000(self):
-        """
-        GIVEN a GIQL join query
-        WHEN transpiling with intersects_bin_size=None (explicit)
-        THEN should produce the same output as default (10000)
-        """
-        sql_default = transpile(
-            """
-            SELECT a.*, b.*
-            FROM peaks a
-            JOIN genes b ON a.interval INTERSECTS b.interval
-            """,
-            tables=["peaks", "genes"],
-        )
-
-        sql_none = transpile(
-            """
-            SELECT a.*, b.*
-            FROM peaks a
-            JOIN genes b ON a.interval INTERSECTS b.interval
-            """,
-            tables=["peaks", "genes"],
-            intersects_bin_size=None,
-        )
-
-        assert sql_default == sql_none
-        assert "10000" in sql_default
-
-    def test_implicit_cross_join_uses_binned_optimization(self):
+    def test_implicit_cross_join_emits_naive_predicate(self):
         """
         GIVEN a GIQL query with implicit cross-join (FROM a, b WHERE INTERSECTS)
         WHEN transpiling
-        THEN should use the binned equi-join optimization without leaking
-             __giql_bin into SELECT * output columns
+        THEN the INTERSECTS expands in place to the naive overlap predicate in
+             WHERE, with no CTEs and no bin columns leaking into SELECT *
         """
         sql = transpile(
             """
@@ -220,23 +168,26 @@ class TestTranspileBinnedJoin:
             tables=["peaks", "genes"],
         )
 
-        # Binned CTEs are present
-        assert "WITH" in sql.upper()
-        assert "__giql_bin" in sql
-        assert "UNNEST" in sql.upper()
+        # Naive overlap predicate present
+        assert '"chrom" = ' in sql
+        assert '"start" <' in sql
+        assert '"end" >' in sql
 
-        # Original table references preserved — no CTE leak into SELECT *
+        # No CTE rewrite machinery
+        assert "WITH" not in sql.upper()
+        assert "UNNEST" not in sql.upper()
+        assert "__giql_bin" not in sql
+        assert "__giql_pairs" not in sql
+
+        # Original table references preserved
         assert "peaks" in sql
-        assert '"chrom"' in sql
-        assert '"start"' in sql
-        assert '"end"' in sql
 
-    def test_self_join_single_shared_cte(self):
+    def test_self_join_emits_naive_predicate(self):
         """
         GIVEN a self-join query where the same table appears with two aliases
-        WHEN transpiling a binned join
-        THEN should produce one shared key-only CTE for the underlying table,
-             joined twice through distinct connector aliases
+        WHEN transpiling an INTERSECTS join
+        THEN the INTERSECTS expands in place to the naive overlap predicate with
+             no CTEs, keeping the original table in FROM
         """
         sql = transpile(
             """
@@ -247,43 +198,28 @@ class TestTranspileBinnedJoin:
             tables=["peaks"],
         )
 
-        sql_upper = sql.upper()
+        # Naive overlap predicate present
+        assert '"chrom" = ' in sql
+        assert '"start" <' in sql
+        assert '"end" >' in sql
 
-        # One shared CTE keyed on the table name
-        assert "__giql_peaks_bins" in sql
+        # No CTE rewrite machinery
+        assert "WITH" not in sql.upper()
+        assert "UNNEST" not in sql.upper()
+        assert "__giql_bin" not in sql
 
         # Original table preserved in FROM
         assert "peaks" in sql
 
-        # Should still have DISTINCT
-        assert "DISTINCT" in sql_upper
+        # No DISTINCT added by the transpiler
+        assert "DISTINCT" not in sql.upper()
 
-    def test_invalid_bin_size_raises(self):
-        """
-        GIVEN intersects_bin_size=0 or a negative value
-        WHEN calling transpile
-        THEN should raise ValueError
-        """
-        with pytest.raises(ValueError, match="positive"):
-            transpile(
-                "SELECT * FROM a JOIN b ON a.interval INTERSECTS b.interval",
-                tables=["a", "b"],
-                intersects_bin_size=0,
-            )
-
-        with pytest.raises(ValueError, match="positive"):
-            transpile(
-                "SELECT * FROM a JOIN b ON a.interval INTERSECTS b.interval",
-                tables=["a", "b"],
-                intersects_bin_size=-1,
-            )
-
-    def test_multi_join_all_intersects_rewritten(self):
+    def test_multi_join_expands_each_intersects(self):
         """
         GIVEN a three-way join with two INTERSECTS conditions
         WHEN transpiling
-        THEN should create one key-only CTE per underlying table and rewrite
-             each INTERSECTS join as a three-join bridge through those CTEs
+        THEN each INTERSECTS expands in place to its own naive overlap predicate,
+             with no CTEs
         """
         sql = transpile(
             """
@@ -295,20 +231,22 @@ class TestTranspileBinnedJoin:
             tables=["peaks", "genes", "exons"],
         )
 
-        # One CTE per underlying table
-        assert "__giql_peaks_bins" in sql
-        assert "__giql_genes_bins" in sql
-        assert "__giql_exons_bins" in sql
+        # Both INTERSECTS rendered as naive overlap predicates
+        assert sql.count('"chrom" = ') == 2
+        assert sql.count('"start" <') == 2
+        assert sql.count('"end" >') == 2
 
-        # __giql_bin appears in CTE definitions and ON conditions
-        sql_upper = sql.upper()
-        assert sql_upper.count("__GIQL_BIN") >= 4  # at least 2 per INTERSECTS join
+        # No CTE rewrite machinery
+        assert "WITH" not in sql.upper()
+        assert "UNNEST" not in sql.upper()
+        assert "__giql_bin" not in sql
 
-    def test_explicit_columns_uses_pairs_cte(self):
+    def test_explicit_columns_emit_naive_predicate(self):
         """
         GIVEN a join query with only explicit columns in SELECT
         WHEN transpiling
-        THEN should use pairs-CTE approach with key-only bin CTEs
+        THEN the INTERSECTS expands in place to the naive overlap predicate with
+             no CTEs
         """
         sql = transpile(
             """
@@ -319,32 +257,20 @@ class TestTranspileBinnedJoin:
             tables=["peaks", "genes"],
         )
 
-        assert "__giql_peaks_bins" in sql
-        assert "__giql_genes_bins" in sql
-        assert "__giql_pairs_0" in sql
+        # Naive overlap predicate present
+        assert '"chrom" = ' in sql
+        assert '"start" <' in sql
+        assert '"end" >' in sql
 
-    def test_wildcard_select_uses_pairs_cte(self):
-        """
-        GIVEN a join query with wildcard expressions in SELECT
-        WHEN transpiling
-        THEN should use pairs-CTE approach, no __giql_bin in output
-        """
-        sql = transpile(
-            """
-            SELECT a.*, b.*
-            FROM peaks a
-            JOIN genes b ON a.interval INTERSECTS b.interval
-            """,
-            tables=["peaks", "genes"],
-        )
-
-        assert "__giql_peaks_bins" in sql
-        assert "__giql_genes_bins" in sql
-        assert "__giql_pairs_0" in sql
+        # No CTE rewrite machinery
+        assert "WITH" not in sql.upper()
+        assert "UNNEST" not in sql.upper()
+        assert "__giql_bin" not in sql
+        assert "__giql_pairs" not in sql
 
 
-class TestBinnedJoinDataFusion:
-    """End-to-end DataFusion correctness tests for binned INTERSECTS joins."""
+class TestIntersectsJoinDataFusion:
+    """End-to-end DataFusion correctness tests for INTERSECTS joins."""
 
     @staticmethod
     def _make_ctx(peaks_data, genes_data):
@@ -384,7 +310,7 @@ class TestBinnedJoinDataFusion:
     def test_overlapping_intervals_correct_rows_no_duplicates(self):
         """
         GIVEN two tables with overlapping intervals
-        WHEN executing a binned INTERSECTS join via DataFusion
+        WHEN executing an INTERSECTS join via DataFusion
         THEN should return the correct matching rows with no duplicates
         """
         ctx = self._make_ctx(
@@ -414,7 +340,7 @@ class TestBinnedJoinDataFusion:
     def test_non_overlapping_intervals_zero_rows(self):
         """
         GIVEN two tables with no overlapping intervals
-        WHEN executing a binned INTERSECTS join via DataFusion
+        WHEN executing an INTERSECTS join via DataFusion
         THEN should return zero rows
         """
         ctx = self._make_ctx(
@@ -440,7 +366,7 @@ class TestBinnedJoinDataFusion:
     def test_adjacent_intervals_zero_rows_half_open(self):
         """
         GIVEN two tables with adjacent (touching) intervals under half-open coordinates
-        WHEN executing a binned INTERSECTS join via DataFusion
+        WHEN executing an INTERSECTS join via DataFusion
         THEN should return zero rows because [100, 200) and [200, 300) do not overlap
         """
         ctx = self._make_ctx(
@@ -465,8 +391,9 @@ class TestBinnedJoinDataFusion:
 
     def test_different_chromosomes_only_same_chrom(self):
         """
-        GIVEN two tables with intervals on different chromosomes that would overlap positionally
-        WHEN executing a binned INTERSECTS join via DataFusion
+        GIVEN two tables with intervals on different chromosomes that would
+              overlap positionally
+        WHEN executing an INTERSECTS join via DataFusion
         THEN should only return overlaps on the same chromosome
         """
         ctx = self._make_ctx(
@@ -493,11 +420,11 @@ class TestBinnedJoinDataFusion:
         assert df.iloc[0]["chrom"] == "chr1"
         assert df.iloc[0]["b_chrom"] == "chr1"
 
-    def test_intervals_spanning_multiple_bins_no_duplicates(self):
+    def test_large_span_overlap_returned_once(self):
         """
-        GIVEN intervals that span multiple bins
-        WHEN executing a binned INTERSECTS join via DataFusion
-        THEN overlapping pairs should be returned exactly once (DISTINCT dedup)
+        GIVEN two large intervals that overlap over a wide span
+        WHEN executing an INTERSECTS join via DataFusion
+        THEN the overlapping pair should be returned exactly once
         """
         ctx = self._make_ctx(
             peaks_data=[("chr1", 0, 50000)],
@@ -514,12 +441,11 @@ class TestBinnedJoinDataFusion:
                 Table("peaks", chrom_col="chrom", start_col="start", end_col="end"),
                 Table("genes", chrom_col="chrom", start_col="start", end_col="end"),
             ],
-            intersects_bin_size=10000,
         )
 
         df = ctx.sql(sql).to_pandas()
 
-        # Despite sharing multiple bins (2, 3, 4), should appear exactly once
+        # The single overlapping pair should appear exactly once
         assert len(df) == 1
         assert df.iloc[0]["start"] == 0
         assert df.iloc[0]["end"] == 50000
@@ -529,7 +455,7 @@ class TestBinnedJoinDataFusion:
     def test_equivalence_with_naive_cross_join(self):
         """
         GIVEN two tables with a mix of overlapping and non-overlapping intervals
-        WHEN executing a binned INTERSECTS join via DataFusion
+        WHEN executing an INTERSECTS join via DataFusion
         THEN results should match a naive cross-join with overlap filter
         """
         ctx = self._make_ctx(
@@ -558,7 +484,7 @@ class TestBinnedJoinDataFusion:
         """
         naive_df = ctx.sql(naive_sql).to_pandas()
 
-        binned_sql = transpile(
+        intersects_sql = transpile(
             """
             SELECT a.chrom AS a_chrom, a.start AS a_start, a."end" AS a_end,
                    b.chrom AS b_chrom, b.start AS b_start, b."end" AS b_end
@@ -570,22 +496,24 @@ class TestBinnedJoinDataFusion:
                 Table("genes", chrom_col="chrom", start_col="start", end_col="end"),
             ],
         )
-        binned_df = (
-            ctx.sql(binned_sql)
+        intersects_df = (
+            ctx.sql(intersects_sql)
             .to_pandas()
             .sort_values(by=["a_chrom", "a_start", "b_start"])
             .reset_index(drop=True)
         )
         naive_df = naive_df.reset_index(drop=True)
 
-        assert len(binned_df) == len(naive_df)
-        assert binned_df.values.tolist() == naive_df.values.tolist()
+        assert len(intersects_df) == len(naive_df)
+        assert intersects_df.values.tolist() == naive_df.values.tolist()
 
-    def test_implicit_cross_join_correct_rows_no_bin_leak(self):
+    def test_implicit_cross_join_correct_rows_no_column_leak(self):
         """
-        GIVEN two tables with overlapping intervals queried via implicit cross-join syntax
-        WHEN executing a binned INTERSECTS join via DataFusion
-        THEN results should be correct and SELECT a.* should not include __giql_bin
+        GIVEN two tables with overlapping intervals queried via implicit
+              cross-join syntax
+        WHEN executing an INTERSECTS join via DataFusion
+        THEN results should be correct and SELECT a.* should return only the
+             original table columns
         """
         ctx = self._make_ctx(
             peaks_data=[("chr1", 100, 500), ("chr1", 1000, 2000)],
@@ -610,16 +538,16 @@ class TestBinnedJoinDataFusion:
         assert len(df) == 1
         assert df.iloc[0]["start"] == 100
 
-        # SELECT a.* must return exactly the original table columns — no __giql_bin
+        # SELECT a.* must return exactly the original table columns
         assert list(df.columns) == ["chrom", "start", "end"]
 
 
-class TestBinnedJoinOuterJoinSemantics:
-    """Regression tests: outer join kinds must be preserved after rewrite.
+class TestIntersectsJoinOuterJoinSemantics:
+    """Outer join kinds must be preserved when INTERSECTS expands in place.
 
-    Bug: the bridge path only applied the join kind (LEFT, RIGHT, FULL) to
-    join3, while join1 and join2 were always INNER — silently converting
-    outer joins into inner joins.
+    The naive overlap predicate is emitted directly in the ON clause, so
+    LEFT, RIGHT, and FULL OUTER joins keep their outer semantics and return
+    unmatched rows with NULLs on the opposite side.
     """
 
     @staticmethod
@@ -664,10 +592,10 @@ class TestBinnedJoinOuterJoinSemantics:
         )
         return ctx
 
-    def test_left_join_preserves_unmatched_left_rows_full_cte(self):
+    def test_left_join_preserves_unmatched_left_rows_explicit_cols(self):
         """
         GIVEN peaks with one matching and one non-matching interval
-        WHEN a LEFT JOIN with INTERSECTS is transpiled (no wildcards, full-CTE path)
+        WHEN a LEFT JOIN with INTERSECTS is transpiled (explicit columns)
         THEN the SQL must contain LEFT keyword and execution must return all
              left rows including unmatched ones with NULLs on the right
         """
@@ -697,10 +625,10 @@ class TestBinnedJoinOuterJoinSemantics:
         assert df.iloc[1]["start"] == 1000
         assert _is_null(df.iloc[1]["b_start"])
 
-    def test_left_join_preserves_unmatched_left_rows_bridge(self):
+    def test_left_join_preserves_unmatched_left_rows_wildcard(self):
         """
         GIVEN peaks with one matching and one non-matching interval
-        WHEN a LEFT JOIN with INTERSECTS is transpiled (wildcards, bridge path)
+        WHEN a LEFT JOIN with INTERSECTS is transpiled (wildcard SELECT)
         THEN the SQL must contain LEFT keyword and execution must return all
              left rows including unmatched ones with NULLs on the right
         """
@@ -730,10 +658,10 @@ class TestBinnedJoinOuterJoinSemantics:
         assert df.iloc[1]["start"] == 1000
         assert _is_null(df.iloc[1]["b_start"])
 
-    def test_right_join_preserves_unmatched_right_rows_full_cte(self):
+    def test_right_join_preserves_unmatched_right_rows_explicit_cols(self):
         """
         GIVEN genes with one matching and one non-matching interval
-        WHEN a RIGHT JOIN with INTERSECTS is transpiled (no wildcards, full-CTE path)
+        WHEN a RIGHT JOIN with INTERSECTS is transpiled (explicit columns)
         THEN the SQL must contain RIGHT keyword and execution must return all
              right rows including unmatched ones with NULLs on the left
         """
@@ -765,10 +693,10 @@ class TestBinnedJoinOuterJoinSemantics:
         assert len(unmatched) == 1
         assert unmatched.iloc[0]["start"] == 5000
 
-    def test_right_join_preserves_unmatched_right_rows_bridge(self):
+    def test_right_join_preserves_unmatched_right_rows_wildcard(self):
         """
         GIVEN genes with one matching and one non-matching interval
-        WHEN a RIGHT JOIN with INTERSECTS is transpiled (wildcards, bridge path)
+        WHEN a RIGHT JOIN with INTERSECTS is transpiled (wildcard SELECT)
         THEN the SQL must contain RIGHT keyword and execution must return all
              right rows including unmatched ones with NULLs on the left
         """
@@ -800,10 +728,10 @@ class TestBinnedJoinOuterJoinSemantics:
         assert len(unmatched) == 1
         assert unmatched.iloc[0]["start"] == 5000
 
-    def test_full_outer_join_preserves_both_unmatched_full_cte(self):
+    def test_full_outer_join_preserves_both_unmatched_explicit_cols(self):
         """
         GIVEN peaks and genes each with one matching and one non-matching interval
-        WHEN a FULL OUTER JOIN with INTERSECTS is transpiled (no wildcards, full-CTE)
+        WHEN a FULL OUTER JOIN with INTERSECTS is transpiled (explicit columns)
         THEN the SQL must contain FULL keyword and execution must return three
              rows: one matched pair plus one unmatched from each side
         """
@@ -836,10 +764,10 @@ class TestBinnedJoinOuterJoinSemantics:
         assert len(left_only) == 1
         assert len(right_only) == 1
 
-    def test_full_outer_join_preserves_both_unmatched_bridge(self):
+    def test_full_outer_join_preserves_both_unmatched_wildcard(self):
         """
         GIVEN peaks and genes each with one matching and one non-matching interval
-        WHEN a FULL OUTER JOIN with INTERSECTS is transpiled (wildcards, bridge path)
+        WHEN a FULL OUTER JOIN with INTERSECTS is transpiled (wildcard SELECT)
         THEN the SQL must contain FULL keyword and execution must return three
              rows: one matched pair plus one unmatched from each side
         """
@@ -899,17 +827,17 @@ class TestBinnedJoinOuterJoinSemantics:
         assert df["b_start"].isna().all()
 
 
-class TestBinnedJoinAdditionalOnConditions:
-    """Regression tests: non-INTERSECTS conditions in ON must be preserved.
+class TestIntersectsJoinAdditionalOnConditions:
+    """Non-INTERSECTS conditions in ON must be preserved.
 
-    Bug: the rewrite replaces the entire ON clause with the binned equi-join
-    and overlap predicate, silently dropping any additional user conditions
-    like ``AND a.score > b.score``.
+    INTERSECTS expands in place within the ON clause, so any additional user
+    conditions like ``AND a.score > b.score`` remain alongside the naive
+    overlap predicate and continue to filter results.
     """
 
     @staticmethod
     def _make_ctx_with_score():
-        """Create a DataFusion context with peaks and genes tables that include a score column."""
+        """Create a DataFusion context with peaks and genes tables including a score."""
         import pyarrow as pa
         from datafusion import SessionContext
 
@@ -952,7 +880,7 @@ class TestBinnedJoinAdditionalOnConditions:
         )
         return ctx
 
-    def test_additional_on_condition_preserved_full_cte(self):
+    def test_additional_on_condition_preserved_explicit_cols(self):
         """
         GIVEN two overlapping intervals where only one pair satisfies score filter
         WHEN INTERSECTS is combined with a.score > b.score in ON (no wildcards)
@@ -978,7 +906,7 @@ class TestBinnedJoinAdditionalOnConditions:
         assert len(df) == 1
         assert df.iloc[0]["a_score"] == 50
 
-    def test_additional_on_condition_preserved_bridge(self):
+    def test_additional_on_condition_preserved_wildcard(self):
         """
         GIVEN two overlapping intervals where only one pair satisfies score filter
         WHEN INTERSECTS is combined with a.score > b.score in ON (wildcards)
@@ -1085,12 +1013,12 @@ class TestBinnedJoinAdditionalOnConditions:
         assert df.iloc[0]["a_score"] == 50
 
 
-class TestBinnedJoinDistinctSemantics:
-    """Tests that the pairs-CTE approach preserves standard SQL bag semantics.
+class TestIntersectsJoinBagSemantics:
+    """The naive overlap predicate preserves standard SQL bag semantics.
 
-    The pairs CTE deduplicates on key columns internally, so the output
-    query does not need SELECT DISTINCT.  This preserves legitimately
-    duplicated source rows.
+    INTERSECTS expands in place without adding SELECT DISTINCT, so the join
+    behaves like an ordinary range join and legitimately duplicated source
+    rows are preserved in the output.
     """
 
     @staticmethod
@@ -1135,7 +1063,7 @@ class TestBinnedJoinDistinctSemantics:
         )
         return ctx
 
-    def test_duplicate_rows_preserved_full_cte(self):
+    def test_duplicate_rows_preserved_explicit_cols(self):
         """
         GIVEN peaks with two identical rows that both overlap one gene
         WHEN an inner join with INTERSECTS is transpiled (no wildcards)
@@ -1151,7 +1079,7 @@ class TestBinnedJoinDistinctSemantics:
         naive_df = ctx.sql(naive_sql).to_pandas()
         assert len(naive_df) == 2
 
-        binned_sql = transpile(
+        intersects_sql = transpile(
             """
             SELECT a.chrom, a.start, a."end", b.start AS b_start
             FROM peaks a
@@ -1163,10 +1091,10 @@ class TestBinnedJoinDistinctSemantics:
             ],
         )
 
-        binned_df = ctx.sql(binned_sql).to_pandas()
-        assert len(binned_df) == len(naive_df)
+        intersects_df = ctx.sql(intersects_sql).to_pandas()
+        assert len(intersects_df) == len(naive_df)
 
-    def test_duplicate_rows_preserved_bridge(self):
+    def test_duplicate_rows_preserved_wildcard(self):
         """
         GIVEN peaks with two identical rows that both overlap one gene
         WHEN an inner join with INTERSECTS is transpiled (wildcards)
@@ -1182,7 +1110,7 @@ class TestBinnedJoinDistinctSemantics:
         naive_df = ctx.sql(naive_sql).to_pandas()
         assert len(naive_df) == 2
 
-        binned_sql = transpile(
+        intersects_sql = transpile(
             """
             SELECT a.*, b.start AS b_start
             FROM peaks a
@@ -1194,8 +1122,8 @@ class TestBinnedJoinDistinctSemantics:
             ],
         )
 
-        binned_df = ctx.sql(binned_sql).to_pandas()
-        assert len(binned_df) == len(naive_df)
+        intersects_df = ctx.sql(intersects_sql).to_pandas()
+        assert len(intersects_df) == len(naive_df)
 
     def test_non_duplicate_rows_unaffected(self):
         """
@@ -1241,7 +1169,7 @@ class TestBinnedJoinDistinctSemantics:
             ],
         )
 
-        binned_sql = transpile(
+        intersects_sql = transpile(
             """
             SELECT a.chrom, a.start, a."end", b.start AS b_start
             FROM peaks a
@@ -1253,14 +1181,14 @@ class TestBinnedJoinDistinctSemantics:
             ],
         )
 
-        df = ctx.sql(binned_sql).to_pandas()
+        df = ctx.sql(intersects_sql).to_pandas()
         assert len(df) == 2
 
     def test_user_distinct_already_present_still_works(self):
         """
         GIVEN a query that already has SELECT DISTINCT
-        WHEN the binned join rewrite also adds DISTINCT
-        THEN the query must still execute correctly (no double-DISTINCT error)
+        WHEN the INTERSECTS join is transpiled
+        THEN the user's DISTINCT is preserved and the query executes correctly
         """
         import pyarrow as pa
         from datafusion import SessionContext
@@ -1292,7 +1220,7 @@ class TestBinnedJoinDistinctSemantics:
             ],
         )
 
-        binned_sql = transpile(
+        intersects_sql = transpile(
             """
             SELECT DISTINCT a.chrom, a.start, b.start AS b_start
             FROM peaks a
@@ -1304,14 +1232,14 @@ class TestBinnedJoinDistinctSemantics:
             ],
         )
 
-        df = ctx.sql(binned_sql).to_pandas()
+        df = ctx.sql(intersects_sql).to_pandas()
         assert len(df) == 1
 
     def test_count_requires_distinguishing_columns(self):
         """
         GIVEN one interval A overlapping three intervals B
         WHEN the SELECT includes columns that distinguish each B match
-        THEN DISTINCT preserves all three matches and COUNT is correct
+        THEN all three matches are preserved and COUNT is correct
         """
         import duckdb
 
@@ -1357,7 +1285,7 @@ class TestBinnedJoinDistinctSemantics:
         )
 
         # Without distinguishing columns: count is still correct
-        # because the pairs-CTE approach does not add SELECT DISTINCT
+        # because the naive overlap predicate does not add SELECT DISTINCT
         inner_sql_no_dist = transpile(
             """
             SELECT r.chrom, r.start, r.end, r.name, f.chrom AS f_chrom
@@ -1378,13 +1306,12 @@ class TestBinnedJoinDistinctSemantics:
         conn.close()
 
 
-class TestBinnedJoinBinBoundaryRounding:
-    """Regression tests for bin-index calculation rounding errors.
+class TestIntersectsJoinPositionBoundaries:
+    """Overlap correctness at exact and near round-number positions.
 
-    The original formula CAST(start / B AS BIGINT) uses float division
-    followed by a cast.  When the division lands on x.5 the cast rounds
-    to nearest-even instead of flooring, producing the wrong bin index
-    and causing missed matches.
+    These cases probe intervals whose start lands exactly on or adjacent to
+    round-number coordinates, confirming the naive overlap predicate finds
+    the overlap without any off-by-one error.
     """
 
     @staticmethod
@@ -1411,12 +1338,12 @@ class TestBinnedJoinBinBoundaryRounding:
         )
         return ctx
 
-    def test_half_bin_boundary_overlap_not_missed(self):
+    def test_overlap_at_position_boundary_found(self):
         """
-        GIVEN interval A spanning many bins and interval B whose start
-              falls exactly on a .5 division boundary (e.g., 621950/100)
-        WHEN INTERSECTS is evaluated with intersects_bin_size=100 on DuckDB
-        THEN the overlap must be found, not missed due to rounding
+        GIVEN a large interval A and interval B whose start falls on a
+              round-number position boundary (621950)
+        WHEN INTERSECTS is evaluated on DuckDB
+        THEN the overlap must be found
         """
         import duckdb
 
@@ -1441,20 +1368,16 @@ class TestBinnedJoinBinBoundaryRounding:
             JOIN intervals_b b ON a.interval INTERSECTS b.interval
             """,
             tables=["intervals_a", "intervals_b"],
-            intersects_bin_size=100,
         )
         result = conn.execute(sql).fetchall()
         conn.close()
-        assert len(result) == 1, (
-            f"Expected 1 match, got {len(result)} — "
-            f"bin boundary rounding likely dropped the overlap"
-        )
+        assert len(result) == 1, f"Expected 1 match, got {len(result)}"
 
-    def test_exact_bin_boundary_start(self):
+    def test_overlap_at_exact_multiple_found(self):
         """
-        GIVEN interval B starting at an exact multiple of bin_size
+        GIVEN interval B starting at an exact round-number position (1000)
         WHEN INTERSECTS is evaluated on DuckDB
-        THEN the correct bin index is assigned (no off-by-one from rounding)
+        THEN the overlap is found with no off-by-one
         """
         import duckdb
 
@@ -1479,20 +1402,18 @@ class TestBinnedJoinBinBoundaryRounding:
             JOIN intervals_b b ON a.interval INTERSECTS b.interval
             """,
             tables=["intervals_a", "intervals_b"],
-            intersects_bin_size=1000,
         )
         result = conn.execute(sql).fetchall()
         conn.close()
-        assert len(result) == 1, f"Expected 1 match at bin boundary, got {len(result)}"
+        assert len(result) == 1, f"Expected 1 match, got {len(result)}"
 
 
-class TestBinnedJoinOuterJoinMultiBin:
-    """Regression tests for outer join with multi-bin intervals.
+class TestIntersectsJoinOuterJoinNoSpuriousRows:
+    """Outer joins must not emit spurious NULL rows for matched intervals.
 
-    When an interval spans multiple bins, the outer join produces one
-    row per bin.  Bins that don't match the other side create spurious
-    NULL rows.  DISTINCT can't collapse a NULL row with a matched row
-    because they differ in the non-NULL columns.
+    Because INTERSECTS expands to a single naive overlap predicate in the ON
+    clause, an interval that overlaps produces exactly one matched row and no
+    extra NULL-filled row appears on the outer side.
     """
 
     @staticmethod
@@ -1521,10 +1442,10 @@ class TestBinnedJoinOuterJoinMultiBin:
 
     def test_left_join_no_spurious_null_row(self):
         """
-        GIVEN interval A spanning bins 0 and 1 and interval B only in bin 1
+        GIVEN a large interval A overlapping a single interval B
         WHEN LEFT JOIN INTERSECTS is evaluated
         THEN only 1 matched row is returned, not a matched row plus a
-             spurious NULL row from the unmatched bin-0 copy
+             spurious NULL row
         """
         ctx = self._make_ctx(
             {
@@ -1551,8 +1472,7 @@ class TestBinnedJoinOuterJoinMultiBin:
         )
         result = ctx.sql(sql).to_pandas()
         assert len(result) == 1, (
-            f"Expected 1 matched row, got {len(result)} — "
-            f"spurious NULL row from unmatched bin"
+            f"Expected 1 matched row, got {len(result)} — spurious NULL row"
         )
         assert result.iloc[0]["b_name"] == "b0"
 
@@ -1591,10 +1511,10 @@ class TestBinnedJoinOuterJoinMultiBin:
 
     def test_right_join_no_spurious_null_row(self):
         """
-        GIVEN interval B spanning bins 0 and 1 and interval A only in bin 0
+        GIVEN a large interval B overlapping a single interval A
         WHEN RIGHT JOIN INTERSECTS is evaluated
         THEN only 1 matched row is returned, not a matched row plus a
-             spurious NULL row from the unmatched bin-1 copy of B
+             spurious NULL row
         """
         ctx = self._make_ctx(
             {
@@ -1621,14 +1541,13 @@ class TestBinnedJoinOuterJoinMultiBin:
         )
         result = ctx.sql(sql).to_pandas()
         assert len(result) == 1, (
-            f"Expected 1 matched row, got {len(result)} — "
-            f"spurious NULL row from unmatched bin"
+            f"Expected 1 matched row, got {len(result)} — spurious NULL row"
         )
         assert result.iloc[0]["name"] == "a0"
 
     def test_full_outer_join_no_spurious_null_row(self):
         """
-        GIVEN interval A spanning bins 0 and 1, interval B only in bin 1
+        GIVEN a large interval A overlapping a single interval B
         WHEN FULL OUTER JOIN INTERSECTS is evaluated
         THEN only 1 matched row is returned, not a matched row plus a
              spurious NULL row
@@ -1658,6 +1577,5 @@ class TestBinnedJoinOuterJoinMultiBin:
         )
         result = ctx.sql(sql).to_pandas()
         assert len(result) == 1, (
-            f"Expected 1 matched row, got {len(result)} — "
-            f"spurious NULL row from unmatched bin"
+            f"Expected 1 matched row, got {len(result)} — spurious NULL row"
         )
