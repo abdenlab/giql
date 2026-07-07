@@ -193,7 +193,7 @@ Find regions with multiple overlapping features:
 
 .. note::
 
-   **Synthesized flag hidden under** ``SELECT *``. A ``SELECT *, CLUSTER(...)`` query materializes an internal ``__giql_is_new_cluster`` flag in a subquery, so the outer star is emitted as ``SELECT * EXCEPT (__giql_is_new_cluster)`` to keep that helper column out of the result (#184). ``* EXCEPT`` is a DataFusion-family extension: the generic and ``datafusion`` dialects emit it, while ``duckdb`` spells the exclusion ``EXCLUDE``. Transpile with ``dialect="duckdb"`` to execute on DuckDB — the portable generic ``* EXCEPT`` form is not DuckDB-runnable. A qualified ``SELECT t.*, CLUSTER(...)`` receives the same treatment: because ``CLUSTER`` runs over a single relation, the qualifier is dropped and the outer star is emitted as the same bare ``* EXCEPT (__giql_is_new_cluster)`` (#185). An explicitly-projected ``CLUSTER`` (no star) surfaces no helper column and needs no exclusion.
+   **Synthesized flag hidden under** ``SELECT *``. A ``SELECT *, CLUSTER(...)`` query materializes an internal ``__giql_is_new_cluster`` flag in a subquery, so the outer star is emitted as ``SELECT * EXCEPT (__giql_is_new_cluster)`` to keep that helper column out of the result (#184). ``* EXCEPT`` is a DataFusion-family extension: the generic and ``datafusion`` dialects emit it, while ``duckdb`` spells the exclusion ``EXCLUDE``. Transpile with ``dialect="duckdb"`` to execute on DuckDB — the portable generic ``* EXCEPT`` form is not DuckDB-runnable. A qualified ``SELECT t.*, CLUSTER(...)`` receives the same treatment: because ``CLUSTER`` runs over a single relation, the qualifier is dropped and the outer star is emitted as the same bare ``* EXCEPT (__giql_is_new_cluster)`` (#185). An explicitly-projected ``CLUSTER`` (no star) surfaces no helper column and needs no exclusion. A star may also be combined with additional explicit projection items — ``SELECT *, 1 AS extra, CLUSTER(...)`` — and each item surfaces exactly once. An *aliased* sibling (``expr AS name``) is materialized once in the inner subquery under a reserved ``__giql_sibling_N`` name, EXCEPTed from the outer star so it is not re-surfaced, and re-projected — aliased back to ``name`` — at its own position, so its output-column position is preserved even when the ``CLUSTER`` sits between the star and the item (``SELECT *, CLUSTER(...) AS cid, 1 AS extra`` keeps ``cid`` before ``extra``). Using a reserved inner name (rather than the user's alias) keeps the mechanism correct even when ``name`` collides with a base column the star surfaces (``SELECT *, score * 10 AS score`` yields both the base ``score`` and the computed one, matching the un-clustered projection) or with another sibling's alias (``SELECT *, 1 AS x, 2 AS x``). A *non-aliased* sibling (a bare column already covered by the star, or an unnamed expression) is materialized the same way, under its own reserved ``__giql_sibling_N`` name, and re-projected at its written slot — keeping its own column name (a bare column) or its rendered text (an unnamed expression) — so every sibling's output-column position matches the identical projection without ``CLUSTER`` (#190).
 
 Performance Notes
 ~~~~~~~~~~~~~~~~~
@@ -428,6 +428,35 @@ Notes
    columns, which are neither grouped nor aggregated. This is unlike
    :ref:`CLUSTER <cluster-operator>`, a per-row window over which a star *is*
    meaningful and supported.
+
+.. note::
+
+   **Projecting columns alongside** ``MERGE``. ``MERGE`` emits one row per merged
+   region and always projects the grouping keys (``chrom``, and ``strand`` when
+   ``stranded := true``) followed by ``MIN(start)`` / ``MAX(end)``. The other items in
+   a ``SELECT ..., MERGE(...)`` projection are reconciled against that grouping
+   (#192): an explicit grouping-key column (the ``chrom`` of the *Merge by Chromosome*
+   shape above) is emitted once, not duplicated; an aggregate (``COUNT(*)``,
+   ``AVG(score)``, ``STRING_AGG(name, ',')``) is computed per merged region; and an
+   expression over only grouping-key columns (``UPPER(chrom)``) is kept. A raw,
+   non-aggregated column that is neither a grouping key nor derived from one (e.g.
+   ``score``, or ``start`` within ``MAX(score) + start``) has no coherent value per
+   merged region and raises a ``ValueError`` — as does a *window* aggregate over such a
+   column (``SUM(score) OVER (...)``), since a window is evaluated after the grouping and
+   does not collapse it. An item whose output name collides with the ``chrom`` /
+   ``start`` / ``end`` columns ``MERGE`` synthesizes (e.g. ``chrom AS start``) also raises
+   rather than emitting two columns of that name — alias it to a distinct name instead.
+   The collision check folds case (``chrom AS Start`` raises too, since SQL binds the
+   unquoted alias onto ``start``), while an unaliased expression over a grouping key
+   (``CAST(chrom AS VARCHAR)``) is kept — its emitted column name is the expression, not a
+   bare grouping-key name. Likewise, a ``GROUP BY`` may name only the grouping-key columns
+   ``MERGE`` groups by, as a *bare column reference*: ``GROUP BY chrom`` is honored (it is
+   subsumed by the synthesized per-merge grouping), while ``GROUP BY`` over any other
+   column — or an expression (``GROUP BY UPPER(chrom)``) or ordinal (``GROUP BY 1``) that
+   ``MERGE`` cannot map to its grouping — raises a ``ValueError`` rather than being
+   silently discarded. A ``HAVING`` is honored against the per-merge grouping
+   (``HAVING COUNT(*) > 1`` keeps only regions built from more than one input interval)
+   rather than being dropped.
 
 Related Operators
 ~~~~~~~~~~~~~~~~~
