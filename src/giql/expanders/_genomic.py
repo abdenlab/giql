@@ -164,6 +164,23 @@ def _resolve_source(
     return None, True
 
 
+def is_star_projection(expression: exp.Expression) -> bool:
+    """Return ``True`` for a bare ``*`` or a qualified ``rel.*`` projection.
+
+    A bare star parses as an :class:`~sqlglot.expressions.Star`; a qualified ``rel.*``
+    parses as an :class:`~sqlglot.expressions.Column` wrapping a ``Star``, not a bare
+    ``Star``. Both project every column of their source, so any caller that special-cases
+    "this projection surfaces all of the relation's columns" must recognize both shapes
+    identically. Defining the predicate once keeps the CLUSTER required-column dedup, the
+    CLUSTER outer-star rewrite, and this module's derived-table passthrough check from
+    drifting apart — a drift whose failure modes are exactly a dangling ``rel.*`` alias
+    and duplicated required columns (#185).
+    """
+    return isinstance(expression, exp.Star) or (
+        isinstance(expression, exp.Column) and isinstance(expression.this, exp.Star)
+    )
+
+
 def _resolve_query(
     query: exp.Expression, tables: Tables, seen: frozenset[str]
 ) -> tuple[GenomicColumns | None, bool]:
@@ -188,11 +205,7 @@ def _resolve_query(
         return None, True
 
     projections = query.expressions
-    passes_through = any(
-        isinstance(projection, exp.Star)
-        or (isinstance(projection, exp.Column) and isinstance(projection.this, exp.Star))
-        for projection in projections
-    )
+    passes_through = any(is_star_projection(projection) for projection in projections)
     if passes_through:
         return _resolve_from_columns(query, tables, seen)
 
