@@ -14,14 +14,11 @@ from sqlglot import parse_one
 import giql.expanders  # noqa: F401
 from giql.canonicalizer import canonicalize_coordinates
 from giql.dialect import GIQLDialect
-from giql.expander import REGISTRY
 from giql.expander import ExpandOperators
-from giql.expressions import Intersects
 from giql.resolver import resolve_operator_refs
 from giql.table import Table
 from giql.table import Tables
 from giql.targets import resolve_target
-from giql.transformer import IntersectsDuckDBIEJoinTransformer
 
 
 @overload
@@ -163,57 +160,25 @@ def transpile(
         )
     """
     target = resolve_target(dialect)
-    uses_iejoin = target.capabilities.range_join_strategy == "iejoin"
-
-    # The INTERSECTS join-rewrite override.
-    #
-    # A *target-specific* ``(target, Intersects)`` registry entry — the public
-    # extension hook, matched by ``ExpanderRegistry.has_override`` — takes over the
-    # INTERSECTS join rewrite entirely. ``has_override`` deliberately matches only
-    # an *exact non-generic* entry: the built-in ``(GenericTarget(), Intersects)``
-    # predicate expander is NOT a join-strategy override — it renders the naive
-    # overlap predicate that IS the generic join plan, so it must not disable the
-    # IEJoin short-circuit. When an override is present, the DuckDB IEJoin
-    # short-circuit below is skipped (the registry-deferral the IEJoin early-return
-    # used to preclude, #141) so the INTERSECTS node flows untouched into
-    # ExpandOperators, which dispatches it to that expander.
-    target_overrides_intersects = REGISTRY.has_override(target, Intersects)
 
     tables_container = _build_tables(tables)
 
     with _reraise_as_value_error("Parse error", query=giql):
         ast = parse_one(giql, dialect=GIQLDialect)
 
-    # The DuckDB IEJoin plan is the one remaining capability-gated pre-pass
-    # transformer (epic #137, #141): ``range_join_strategy == "iejoin"`` selects
-    # it. It runs on the raw parsed AST (before resolution, which rewrites the
-    # genomic column name) and consumes a column-to-column INTERSECTS *join* so it
-    # never reaches the predicate expander. Every other target — and every shape
-    # the IEJoin path declines — leaves the column-to-column INTERSECTS in place
-    # for pass 3, where the ``(GenericTarget, Intersects)`` expander renders it as
-    # the naive overlap predicate (a plain ``ON`` condition the engine plans as a
-    # range join). Literal-range and residual INTERSECTS predicates flow the same
-    # way. ``target_overrides_intersects`` (computed above) gates whether the
-    # IEJoin path runs — see its definition for the override rationale.
-    #
-    # The IEJoin transformer emits a whole-query string, so when it produces output
-    # it must short-circuit the AST pipeline. This never skips an INTERSECTS that
-    # pass 3 would expand: ``_classify_extras`` declines (returning None here) for
-    # any query carrying a residual INTERSECTS alongside the join, so a query the
-    # IEJoin transformer accepts has no residual INTERSECTS left for the expander.
-    # (A residual CONTAINS/WITHIN/ANY beside an IEJoin is a pre-existing IEJoin
-    # limitation that errors identically on main.)
-    #
-    # CLUSTER and MERGE used to be rewritten as pre-pass transformers too; they are
-    # now expanded in pass 3 (ExpandOperators) by giql.expanders.cluster / .merge
-    # (#144), and the generic binned equi-join was dropped in favor of the naive
-    # predicate (#167).
-    if uses_iejoin and not target_overrides_intersects:
-        duckdb_transformer = IntersectsDuckDBIEJoinTransformer(tables_container)
-        with _reraise_as_value_error("Transformation error"):
-            duckdb_sql = duckdb_transformer.transform_to_sql(ast)
-        if duckdb_sql is not None:
-            return duckdb_sql
+    # Every INTERSECTS join strategy is now registry-driven (epic #137, #169). A
+    # column-to-column INTERSECTS *join* flows untouched through the pipeline into
+    # pass 3, where ``ExpandOperators`` dispatches it to its registered expander:
+    # the ``(GenericTarget, Intersects)`` expander renders the naive overlap
+    # predicate (a plain ``ON`` condition the engine plans as a range join) on
+    # ``None`` / ``"datafusion"``, and the ``(DuckDBTarget, Intersects)`` override
+    # (giql.expanders.intersects_duckdb) rewrites it into the per-chromosome IEJoin
+    # plan on ``"duckdb"``, deferring to that same naive predicate for the shapes it
+    # declines. Literal-range and residual INTERSECTS predicates flow the same way.
+    # There is no capability-gated pre-pass anymore — the former DuckDB IEJoin
+    # pre-pass (and the CLUSTER / MERGE pre-passes, #144) were all relocated into
+    # the operator-expander registry, and the generic binned equi-join was dropped
+    # in favor of the naive predicate (#167).
 
     # Pass 1 of the normalization pipeline (epic #114): attach resolution
     # metadata to every GIQL operator slot ahead of generation. Every migrated
@@ -281,9 +246,10 @@ def _build_tables(tables: list[str | Table] | None) -> Tables:
 def _reraise_as_value_error(prefix: str, query: str | None = None) -> Iterator[None]:
     """Re-raise non-:class:`ValueError` exceptions as :class:`ValueError` with *prefix*.
 
-    Lets user-facing :class:`ValueError`\\s from the parser, transformer chain,
-    expander pass, and stock serializer propagate verbatim (so the dialect's
-    targeted error messages survive the boundary) while wrapping unexpected
+    Lets user-facing :class:`ValueError`\\s from the parser, the resolution /
+    canonicalization / operator-expansion passes, and the stock serializer
+    propagate verbatim (so the dialect's targeted error messages survive the
+    boundary) while wrapping unexpected
     exceptions in a uniform
     :class:`ValueError` prefixed with the stage name. When *query* is supplied,
     the original input is appended to the message so parse errors retain the

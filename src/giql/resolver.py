@@ -1,9 +1,9 @@
 """Pass 1 of the GIQL normalization pipeline: ``ResolveOperatorRefs``.
 
 This module implements the first normalization pass described in epic #114. It
-runs between the transformer chain and the generator and attaches resolution
-metadata to every GIQL operator node so that later epic steps can turn the
-generator into a pure formatter.
+runs ahead of coordinate canonicalization and the operator-expansion pass and
+attaches resolution metadata to every GIQL operator node so the downstream passes
+and the stock serializer can rely on it.
 
 The pass is built on ``sqlglot``'s scope machinery
 (:func:`sqlglot.optimizer.scope.traverse_scope`), which yields scopes
@@ -398,12 +398,13 @@ def resolve_operator_refs(expression: exp.Expression, tables: Tables) -> exp.Exp
     closes with :func:`validate_operator_refs`.
 
     The pass mutates and returns *expression* in place. It is behavior-
-    preserving: the attached metadata is additive and the generator ignores it.
+    preserving: the attached metadata is additive and the stock serializer
+    ignores it.
 
     Parameters
     ----------
     expression : exp.Expression
-        The (post-transformer) AST to annotate.
+        The parsed AST to annotate.
     tables : Tables
         The registered table configurations.
 
@@ -563,14 +564,15 @@ def _resolve_predicate_columns(
       operand resolves through the alias map — matching ``_generate_column_join``,
       which passes ``None`` as the context for both sides.
 
-    A column-to-column ``INTERSECTS`` join reaches here on every target but
-    DuckDB: its operands resolve through this pass so the pass-3
+    A column-to-column ``INTERSECTS`` join reaches here on *every* target,
+    including DuckDB (#169): its operands resolve through this pass so the pass-3
     ``(GenericTarget, Intersects)`` expander can render the naive overlap
-    predicate in place (#167). The DuckDB ``dialect="duckdb"`` IEJoin transformer
-    (:class:`~giql.transformer.IntersectsDuckDBIEJoinTransformer`) is the one path
-    that consumes such a join before this pass runs, deleting the ``Intersects``
-    node — but only for the shapes it accepts; the shapes it declines fall through
-    to this pass too. Column-to-column ``CONTAINS`` / ``WITHIN`` and non-join
+    predicate in place (#167). The DuckDB ``(DuckDBTarget, Intersects)`` IEJoin
+    override (:mod:`giql.expanders.intersects_duckdb`) also runs in pass 3, after
+    this one; it rebuilds the join from the raw AST + table configs (ignoring this
+    resolution metadata), so the resolution here is a harmless no-op for the shapes
+    it rewrites and the load-bearing input for the shapes it declines to the naive
+    predicate. Column-to-column ``CONTAINS`` / ``WITHIN`` and non-join
     ``INTERSECTS`` shapes always reach the emitter, so the column-join branch is
     exercised on every target.
 

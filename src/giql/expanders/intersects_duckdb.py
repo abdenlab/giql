@@ -1,14 +1,27 @@
-"""Query transformers for GIQL operations.
+"""The DuckDB IEJoin column-to-column INTERSECTS join override (epic #137, #169).
 
-This module contains the DuckDB IEJoin pre-pass transformer, which rewrites a
-column-to-column INTERSECTS join into a per-chromosome dynamic-SQL pattern DuckDB
-plans through its range-join family. Every other target — and every shape the
-IEJoin path declines — leaves the INTERSECTS in place for the pass-3
-``(GenericTarget, Intersects)`` expander, which renders the naive overlap
-predicate (a plain ``ON`` condition the engine plans as a range join). The generic
-binned equi-join transformer was dropped in favor of that naive predicate (#167).
-CLUSTER and MERGE were relocated to the operator-expander registry
-(``giql.expanders.cluster`` / ``giql.expanders.merge``) in epic #137 (#144).
+The registered ``(DuckDBTarget, Intersects)`` override expander for DuckDB.
+:class:`IntersectsDuckDBIEJoinTransformer` rewrites a column-to-column INTERSECTS
+*join* into a per-chromosome dynamic-SQL pattern DuckDB plans through its
+range-join family (``IE_JOIN`` / ``PIECEWISE_MERGE_JOIN``);
+:func:`expand_intersects_duckdb` wires it into the operator-expander registry so
+pass 3 (:class:`giql.expander.ExpandOperators`) dispatches DuckDB's ``Intersects``
+nodes here. For the shapes it declines, and for every literal-range or residual
+``Intersects`` predicate, the override defers to the shared naive overlap
+predicate (:func:`giql.expanders.intersects._expand_spatial_op`) that
+``dialect=None`` / ``"datafusion"`` emit on every target — a plain ``ON`` condition
+the engine plans as a range join (#167).
+
+Because the IEJoin rewrite emits a *whole-query* multi-statement string
+(``SET VARIABLE ...; SELECT ... FROM query(getvariable(...))``) rather than a
+node-local expression, :func:`expand_intersects_duckdb` produces it through the
+query-level :meth:`~giql.expander.ExpansionContext.add_statement_finalizer` seam,
+wrapping the built string in an :class:`sqlglot.expressions.Command` so it
+serializes verbatim through the stock per-target serializer. This relocates the
+former capability-gated pre-pass IEJoin transformer into the registry, mirroring
+the CLUSTER / MERGE relocation (#144); INTERSECTS join strategy is now fully
+registry-driven and target-overridable. The generic binned equi-join transformer
+was dropped in favor of the naive predicate earlier (#167).
 """
 
 from dataclasses import dataclass
@@ -23,9 +36,17 @@ from giql.canonical import canonical_start
 from giql.constants import DEFAULT_CHROM_COL
 from giql.constants import DEFAULT_END_COL
 from giql.constants import DEFAULT_START_COL
+from giql.expander import ExpansionContext
+from giql.expander import register
+from giql.expanders.intersects import SPATIAL_PREDICATE_META
+from giql.expanders.intersects import _expand_spatial_op
+from giql.expressions import Contains
 from giql.expressions import Intersects
+from giql.expressions import SpatialSetPredicate
+from giql.expressions import Within
 from giql.table import Table
 from giql.table import Tables
+from giql.targets import DuckDBTarget
 
 
 class _UnqualifiedProjectionError(Exception):
@@ -1204,3 +1225,74 @@ class IntersectsDuckDBIEJoinTransformer:
             inner_projections.append("1 AS __giql_placeholder")
 
         return inner_projections, outer_projections, projection_map
+
+
+def _has_sibling_spatial_predicate(node: Intersects, root: exp.Expression) -> bool:
+    """Return True if *root* holds a spatial predicate other than the join *node*.
+
+    The former pre-pass ran on the raw parsed AST, so a residual GIQL spatial
+    predicate (``CONTAINS`` / ``WITHIN`` / ``ANY`` / ``ALL`` / a second
+    ``INTERSECTS``) sharing the query was always still an un-expanded GIQL node —
+    the transformer detected it and declined its IEJoin rewrite. In pass 3 the
+    ``ExpandOperators`` walk expands nodes deepest-first, so a sibling spatial
+    predicate may already have been rewritten to plain comparison SQL by the time
+    this override runs, which the transformer's ``_classify_extras`` can no longer
+    recognize (it would wrongly inline the residual into a per-chromosome ``ON``,
+    corrupting SEMI/ANTI results — #169). Detect the sibling either way: as an
+    un-expanded GIQL spatial node, or via the :data:`SPATIAL_PREDICATE_META` tag the
+    generic spatial expanders stamp on their output. Either signal means the join
+    must defer to the naive predicate, which composes correctly with any residual.
+    """
+    spatial_types = (Intersects, Contains, Within, SpatialSetPredicate)
+    for candidate in root.walk():
+        if candidate is node:
+            continue
+        if isinstance(candidate, spatial_types):
+            return True
+        if candidate.meta.get(SPATIAL_PREDICATE_META):
+            return True
+    return False
+
+
+@register(DuckDBTarget, Intersects)
+def expand_intersects_duckdb(
+    node: exp.Expression, ctx: ExpansionContext
+) -> exp.Expression:
+    """Expand a DuckDB ``Intersects`` node — IEJoin join rewrite or naive predicate.
+
+    The registered ``(DuckDBTarget, Intersects)`` override. For a column-to-column
+    INTERSECTS *join* whose whole-query shape the IEJoin path supports,
+    :meth:`IntersectsDuckDBIEJoinTransformer.transform_to_sql` builds the
+    per-chromosome ``SET VARIABLE ...; SELECT ... FROM query(getvariable(...))``
+    string; since that is a whole-query multi-statement rewrite, not a node-local
+    expression, this registers a query-level finalizer
+    (:meth:`~giql.expander.ExpansionContext.add_statement_finalizer`) that replaces
+    the statement root with a :class:`~sqlglot.expressions.Command` wrapping the
+    built SQL (which serializes verbatim), and returns the ``Intersects`` node
+    unchanged (mirroring the CLUSTER / MERGE whole-query expanders).
+
+    Every other shape — a join the IEJoin path declines (LEFT/RIGHT/FULL, self-join,
+    multiple INTERSECTS, extra predicates, non-base operands, 3+ tables), a
+    literal-range predicate, or a residual column-to-column predicate — defers to
+    :func:`giql.expanders.intersects._expand_spatial_op`, the same naive overlap
+    predicate the ``(GenericTarget, Intersects)`` expander emits on every target
+    (#167). A query carrying any *sibling* spatial predicate also defers (see
+    :func:`_has_sibling_spatial_predicate`), so the IEJoin never inlines a
+    residual it cannot see. ``transform_to_sql`` then runs on the pass-3 AST, which
+    for the shapes the IEJoin path accepts is structurally identical to the raw
+    parse — those shapes provably carry no other GIQL operator, and pass 1 only
+    attaches resolution metadata while pass 2 synthesizes no CTE for a
+    column-to-column INTERSECTS (its operands are column slots, not reference
+    slots) — so the rewrite reads the same query the former pre-pass did.
+    """
+    if isinstance(node, Intersects) and _is_column_intersects(node):
+        root = node.root()
+        if isinstance(root, exp.Select) and not _has_sibling_spatial_predicate(
+            node, root
+        ):
+            transformer = IntersectsDuckDBIEJoinTransformer(ctx.tables)
+            iejoin_sql = transformer.transform_to_sql(root)
+            if iejoin_sql is not None:
+                ctx.add_statement_finalizer(lambda _root: exp.Command(this=iejoin_sql))
+                return node
+    return _expand_spatial_op(node, ctx, "intersects")

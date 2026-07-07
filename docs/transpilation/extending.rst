@@ -40,10 +40,13 @@ portable emission choices:
 - ``supports_star_replace`` — ``SELECT * REPLACE (...)`` (used for coordinate
   canonicalization and the DISJOIN / NEAREST passthroughs; the portable
   ``SELECT * EXCEPT (...)`` form is emitted otherwise);
-- ``supports_qualify`` — the ``QUALIFY`` clause;
-- ``range_join_strategy`` — ``"naive"`` (emit the naive overlap predicate and let
-  the engine plan the range join) or ``"iejoin"`` (DuckDB's per-chromosome IEJoin
-  pre-pass) for column-to-column INTERSECTS joins.
+- ``supports_qualify`` — the ``QUALIFY`` clause.
+
+The column-to-column INTERSECTS *join* strategy is **not** a capability flag: it is
+selected by the operator-expander registry. Every target emits the naive overlap
+predicate (the ``(GenericTarget, Intersects)`` expander) unless it registers a
+target-specific ``(YourTarget, Intersects)`` override — as DuckDB does for its
+per-chromosome IEJoin plan (:mod:`giql.expanders.intersects_duckdb`).
 
 Define a custom target by subclassing :class:`~giql.targets.Target` as a frozen
 dataclass. Give every field a default so the class is constructible with no
@@ -62,7 +65,6 @@ arguments (the ``@register`` decorator instantiates a target class for you):
            supports_lateral=True,
            supports_star_replace=False,   # -> portable "* EXCEPT" canonicalization
            supports_qualify=True,
-           range_join_strategy="naive",
        )
 
 
@@ -170,9 +172,12 @@ time but fails at engine runtime. The built-in fallback guards this by wrapping
 only when the projection genuinely surfaces the columns it excepts; a custom
 finalizer should apply the same discipline.
 
-The one query-level rewrite that is *not* an expander is a fold that **adds or
-reshapes joins** across relations: the DuckDB IEJoin plan for column-to-column
-INTERSECTS joins stays a capability-gated pre-pass transformer by design.
+A query-level fold that **adds or reshapes joins** across relations uses the same
+finalizer seam. The DuckDB IEJoin plan for column-to-column INTERSECTS joins is
+exactly this: its ``(DuckDBTarget, Intersects)`` override
+(:mod:`giql.expanders.intersects_duckdb`) builds a whole-query per-chromosome
+rewrite and registers a finalizer that replaces the statement root with it, rather
+than replacing a single node in place (#169).
 
 
 Undoing a registration

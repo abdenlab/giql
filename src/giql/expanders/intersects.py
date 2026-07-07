@@ -13,18 +13,22 @@ replaces it in place. For a column-to-column INTERSECTS *join* this in-place
 expansion IS the join plan on every target but DuckDB: the boolean overlap
 predicate is a plain ``ON`` condition the engine plans as a range join (a hash join
 keyed on ``chrom`` with the position inequalities as a residual filter), correct for
-both inner and outer joins. The one whole-query pre-pass rewrite that survives is
-the DuckDB IEJoin transformer in :mod:`giql.transformer`, gated on
-``capabilities.range_join_strategy == "iejoin"``; it consumes a column-to-column
-INTERSECTS *join* before this pass runs for the shapes it supports, and every shape
-it declines falls through to this expander's naive predicate. (The generic binned
-equi-join was dropped in favor of the naive predicate — #167.) A literal-range or
-residual column-to-column INTERSECTS *predicate* (e.g. inside an ``OR``) reaches the
-expander and is rendered the same way.
+both inner and outer joins. (The generic binned equi-join was dropped in favor of
+this naive predicate — #167.)
 
-Only :class:`~giql.targets.GenericTarget` expanders are registered: spatial-predicate
-*emission* is portable SQL-92 and does not vary by engine, so one generic expander
-covers every target via the registry's ``(generic, op)`` fallback.
+DuckDB overrides the column-to-column *join* case with its per-chromosome IEJoin
+plan, registered as the ``(DuckDBTarget, Intersects)`` expander in
+:mod:`giql.expanders.intersects_duckdb` (#169) — a pass-3 override, not a pre-pass.
+That override reuses this module's :func:`_expand_spatial_op` for every shape it
+declines (LEFT/RIGHT/FULL, self-joins, multiple INTERSECTS, …) and for literal-range
+or residual INTERSECTS *predicates*, so the naive predicate here is the universal
+fallback on DuckDB too.
+
+The INTERSECTS / CONTAINS / WITHIN / set-predicate expanders are registered only for
+:class:`~giql.targets.GenericTarget`: spatial-predicate *emission* is portable
+SQL-92 and does not vary by engine, so one generic expander covers every target via
+the registry's ``(generic, op)`` fallback (the DuckDB IEJoin override is the sole
+target-specific INTERSECTS entry, and it delegates back here).
 """
 
 from __future__ import annotations
@@ -166,6 +170,23 @@ def _column_join(
     return exp.paren(cond)
 
 
+#: Meta key marking an AST node as the expansion of a GIQL spatial predicate
+#: (INTERSECTS / CONTAINS / WITHIN / ``ANY`` / ``ALL``). The DuckDB IEJoin override
+#: (:mod:`giql.expanders.intersects_duckdb`) reads it to decline its per-chromosome
+#: rewrite when a *sibling* spatial predicate shares the query. Because pass 3 may
+#: expand that sibling to plain comparison SQL before the join ``INTERSECTS`` node
+#: is visited, the override cannot rely on finding an un-expanded GIQL node — the
+#: tag survives expansion so the sibling stays detectable, preserving the former
+#: pre-pass's "decline when a residual spatial predicate is present" invariant (#169).
+SPATIAL_PREDICATE_META = "__giql_spatial_predicate"
+
+
+def _tag_spatial(expr: exp.Expression) -> exp.Expression:
+    """Mark *expr* as a spatial-predicate expansion (:data:`SPATIAL_PREDICATE_META`)."""
+    expr.meta[SPATIAL_PREDICATE_META] = True
+    return expr
+
+
 def _expand_spatial_op(
     node: exp.Expression, ctx: ExpansionContext, op_type: str
 ) -> exp.Expression:
@@ -176,14 +197,16 @@ def _expand_spatial_op(
     ``ctx.resolution.column("expression")``, the slot pass 1 attaches a
     :class:`ResolvedColumn` to when the right operand is a column reference —
     selects the column-to-column path; its absence means the right operand is a
-    literal range, parsed in place.
+    literal range, parsed in place. The result carries the
+    :data:`SPATIAL_PREDICATE_META` tag so a sibling DuckDB IEJoin join override can
+    still recognize this expansion after the fact (#169).
     """
     resolution = ctx.resolution
     right_column = resolution.column("expression") if resolution is not None else None
     left = _predicate_column(ctx, "this")
 
     if right_column is not None:
-        return _column_join(left, right_column, op_type)
+        return _tag_spatial(_column_join(left, right_column, op_type))
 
     # Literal range string (e.g. interval INTERSECTS 'chr1:1000-2000'). Reproduce
     # the legacy emitter's parse-and-wrap-error behavior verbatim: any parse
@@ -194,7 +217,7 @@ def _expand_spatial_op(
     try:
         range_str = raw.strip("'\"")
         parsed = RangeParser.parse(range_str).to_zero_based_half_open()
-        return _range_predicate(left, parsed, op_type)
+        return _tag_spatial(_range_predicate(left, parsed, op_type))
     except Exception as e:
         raise ValueError(f"Could not parse genomic range: {raw}. Error: {e}") from e
 
@@ -244,4 +267,4 @@ def expand_spatial_set(node: exp.Expression, ctx: ExpansionContext) -> exp.Expre
     else:
         combined = exp.and_(*conditions)
 
-    return exp.paren(combined)
+    return _tag_spatial(exp.paren(combined))

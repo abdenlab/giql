@@ -179,8 +179,9 @@ class ExpansionContext:
         it is an :class:`~sqlglot.expressions.Expression`, it is **not**
         semantically re-validated — so it must not reference columns or relations
         absent from the projection it rewrites: a wrapper over an absent column
-        builds without error but fails at engine runtime. Finalizers registered on a standalone context (one built
-        outside the pass) are collected but never applied.
+        builds without error but fails at engine runtime. Finalizers registered on
+        a standalone context (one built outside the pass) are collected but never
+        applied.
         """
         self._finalizers.append(finalizer)
 
@@ -213,9 +214,10 @@ class OperatorExpander(Protocol):
     for example to project internal helper columns away from a surfacing
     ``SELECT *`` — the expander registers a query-level :data:`StatementFinalizer`
     via :meth:`ExpansionContext.add_statement_finalizer`, applied to the statement
-    after every node-local replacement. The INTERSECTS IEJoin whole-query fold is a
-    separate concern still handled by the pre-pass join transformers, not by an
-    expander.
+    after every node-local replacement. The DuckDB INTERSECTS IEJoin whole-query
+    fold uses exactly this seam: its ``(DuckDBTarget, Intersects)`` expander
+    (:mod:`giql.expanders.intersects_duckdb`, #169) registers a finalizer that
+    replaces the statement root with the per-chromosome dynamic-SQL rewrite.
     """
 
     def expand(self, node: exp.Expression, ctx: ExpansionContext) -> exp.Expression: ...
@@ -322,14 +324,14 @@ class ExpanderRegistry:
         against it — a user overriding one operator need not also declare the
         target separately.
 
-        A *non-generic* ``(target, operator)`` entry additionally acts as a
-        *join-rewrite override* (:meth:`has_override`) for operators with a
-        built-in whole-query join rewrite (notably
-        :class:`~giql.expressions.Intersects`, whose DuckDB IEJoin transformer
-        runs before expansion), letting a per-target expander assume
-        responsibility for that rewrite — :func:`giql.transpile.transpile`
-        consults :meth:`has_override` and bypasses the built-in transformer when
-        it holds.
+        A later registration for the same ``(target, operator)`` key replaces the
+        earlier one (last-write-wins), so a user override of a *built-in*
+        target-specific expander — notably the DuckDB IEJoin
+        ``(DuckDBTarget, Intersects)`` join rewrite
+        (:mod:`giql.expanders.intersects_duckdb`) — simply supersedes it in the
+        registry; the pass then dispatches the operator node to the user's
+        expander instead. (:meth:`has_override` reports whether such an exact
+        non-generic entry exists for introspection.)
         """
         self._expanders[(target, operator)] = _as_callable(expander)
         self.register_target(target)
@@ -376,12 +378,12 @@ class ExpanderRegistry:
         expander is registered; the :class:`ExpandOperators` pass treats that as
         an internal invariant violation and raises (there is no legacy emitter).
 
-        A non-generic exact ``(target, op)`` entry additionally acts as a
-        *join-rewrite override* for operators with a built-in whole-query join
-        rewrite (notably :class:`~giql.expressions.Intersects`); resolution itself
-        does not bypass the built-in IEJoin transformer —
-        :func:`giql.transpile.transpile` does, gated on :meth:`has_override` (see
-        :meth:`register` and #141).
+        Resolution is the single dispatch path for every operator, including the
+        DuckDB IEJoin join rewrite: on ``duckdb`` this returns the built-in
+        ``(DuckDBTarget, Intersects)`` override
+        (:mod:`giql.expanders.intersects_duckdb`), and a user registration for the
+        same key replaces it (last-write-wins) so this returns the user's expander
+        instead (#169). There is no separate pre-pass for INTERSECTS anymore.
         """
         fn = self._expanders.get((target, operator))
         if fn is not None:
@@ -400,13 +402,13 @@ class ExpanderRegistry:
         ``(GenericTarget(), operator)`` fallback is *not* an override and does not
         count here.
 
-        Such an entry marks a target-specific override that supersedes built-in
-        handling (e.g. taking responsibility for the whole-query join rewrite the
-        built-in transformer would otherwise perform).
-        :func:`giql.transpile.transpile` consults this method for
-        ``(target, Intersects)`` and, when it holds, bypasses the built-in
-        IEJoin join transformer so the ``Intersects`` node flows to the
-        registered expander instead (see #141).
+        Such an entry marks a target-specific override that supersedes the
+        ``(GenericTarget, operator)`` fallback — for example the built-in DuckDB
+        IEJoin ``(DuckDBTarget, Intersects)`` join rewrite
+        (:mod:`giql.expanders.intersects_duckdb`), or a plugin's own override of
+        it. This is an introspection helper (the dispatch itself flows through
+        :meth:`resolve`); it is *not* a gate on any pre-pass, since INTERSECTS join
+        strategy is fully registry-driven (#169) with no pre-pass to bypass.
         """
         return target != GenericTarget() and (target, operator) in self._expanders
 
@@ -702,12 +704,12 @@ def _node_depth(node: exp.Expression) -> int:
 
 
 class ExpandOperators:
-    """Callable wrapper for :func:`expand_operators`, parallel to the transformers.
+    """Callable wrapper giving :func:`expand_operators` a uniform pass shape.
 
-    The transpile pipeline composes transformer *objects* bound to their
-    :class:`~giql.table.Tables`; this wrapper gives the expansion pass the same
-    shape — construct it with the active target and tables, then call it on the
-    AST — so it slots into the pipeline uniformly after
+    The transpile pipeline composes each normalization pass as a callable bound
+    to its :class:`~giql.table.Tables`; this wrapper gives the expansion pass the
+    same shape — construct it with the active target and tables, then call it on
+    the AST — so it slots into the pipeline uniformly after
     :class:`giql.canonicalizer.canonicalize_coordinates`.
     """
 

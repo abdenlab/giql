@@ -18,9 +18,10 @@ becomes::
 identifiers, appends ``NULLS LAST``, and the inner ``CLUSTER(...)`` is itself
 expanded into the two-level ``__giql_lag_calc`` form.)
 
-This module is the AST-expansion replacement for the legacy
-:class:`giql.transformer.MergeTransformer`; it produces the same SQL (the existing
-MERGE transpilation and bedtools oracle tests are the migration oracle).
+This module is the AST-expansion replacement for the legacy ``MergeTransformer``
+(in the former ``giql.transformer`` module, removed once every join rewrite became
+registry-driven — #144, #169); it produces the same SQL (the existing MERGE
+transpilation and bedtools oracle tests are the migration oracle).
 
 Like CLUSTER (:mod:`giql.expanders.cluster`), MERGE is a **whole-query rewrite**:
 it navigates to the enclosing :class:`~sqlglot.expressions.Select`, mutates it in
