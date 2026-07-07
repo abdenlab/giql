@@ -171,6 +171,475 @@ class TestMergeExpander:
         assert "AS __giql_clustered" in sql
         assert "G_I_Q_L" not in sql
 
+    def test_transpile_should_dedup_grouping_key_when_merge_by_chromosome(self):
+        """Test that an explicit chrom grouping key is not duplicated by MERGE.
+
+        Given:
+            The documented "merge by chromosome" shape — a MERGE projected beside an
+            explicit ``chrom`` grouping key and a ``COUNT(*)`` aggregate, grouped by
+            chrom — over a seeded table.
+        When:
+            Transpiling for DuckDB and executing it.
+        Then:
+            The output should carry chrom exactly once (MERGE already projects it) with
+            the merged bounds and the per-region feature count, rather than surfacing
+            chrom twice as the verbatim copy did (#192).
+        """
+        # Arrange
+        duckdb = pytest.importorskip("duckdb")
+        conn = duckdb.connect(":memory:")
+        conn.execute(
+            'CREATE TABLE peaks (chrom VARCHAR, "start" INTEGER, "end" INTEGER)'
+        )
+        conn.executemany(
+            "INSERT INTO peaks VALUES (?, ?, ?)",
+            [("chr1", 10, 20), ("chr1", 15, 30), ("chr1", 100, 110), ("chr2", 5, 8)],
+        )
+
+        # Act
+        sql = transpile(
+            "SELECT chrom, MERGE(interval), COUNT(*) AS feature_count "
+            "FROM peaks GROUP BY chrom ORDER BY chrom",
+            tables=["peaks"],
+            dialect="duckdb",
+        )
+        cursor = conn.execute(sql)
+        columns = [desc[0] for desc in cursor.description]
+        rows = cursor.fetchall()
+
+        # Assert
+        assert columns == ["chrom", "start", "end", "feature_count"]
+        assert sorted(rows) == [
+            ("chr1", 10, 30, 2),
+            ("chr1", 100, 110, 1),
+            ("chr2", 5, 8, 1),
+        ]
+
+    def test_transpile_should_dedup_strand_key_when_merge_stranded(self):
+        """Test that a stranded MERGE does not duplicate an explicit strand key.
+
+        Given:
+            A stranded MERGE projected beside explicit ``chrom`` and ``strand`` grouping
+            keys and a ``COUNT(*)`` aggregate, grouped by chrom and strand.
+        When:
+            Transpiling for DuckDB and executing it.
+        Then:
+            Both grouping keys should surface exactly once (the stranded MERGE already
+            projects chrom and strand), with the merged bounds and per-region count
+            (#192).
+        """
+        # Arrange
+        duckdb = pytest.importorskip("duckdb")
+        conn = duckdb.connect(":memory:")
+        conn.execute(
+            "CREATE TABLE peaks "
+            '(chrom VARCHAR, "start" INTEGER, "end" INTEGER, strand VARCHAR)'
+        )
+        conn.executemany(
+            "INSERT INTO peaks VALUES (?, ?, ?, ?)",
+            [("chr1", 10, 20, "+"), ("chr1", 15, 30, "+"), ("chr1", 12, 40, "-")],
+        )
+
+        # Act
+        sql = transpile(
+            "SELECT chrom, strand, MERGE(interval, stranded := true), COUNT(*) AS n "
+            "FROM peaks GROUP BY chrom, strand",
+            tables=["peaks"],
+            dialect="duckdb",
+        )
+        cursor = conn.execute(sql)
+        columns = [desc[0] for desc in cursor.description]
+        rows = cursor.fetchall()
+
+        # Assert
+        assert columns == ["chrom", "strand", "start", "end", "n"]
+        assert sorted(rows) == [("chr1", "+", 10, 30, 2), ("chr1", "-", 12, 40, 1)]
+
+    def test_transpile_should_keep_expression_over_grouping_key_when_merge(self):
+        """Test that a non-aggregate expression over only grouping keys is kept.
+
+        Given:
+            A MERGE projected beside an expression computed purely from the grouping key
+            (``UPPER(chrom) AS label``), grouped by chrom.
+        When:
+            Transpiling for DuckDB and executing it.
+        Then:
+            The expression should surface (it is functionally determined by the
+            grouping, so it is well-formed under the GROUP BY) rather than being
+            rejected as a raw column (#192).
+        """
+        # Arrange
+        duckdb = pytest.importorskip("duckdb")
+        conn = duckdb.connect(":memory:")
+        conn.execute(
+            'CREATE TABLE peaks (chrom VARCHAR, "start" INTEGER, "end" INTEGER)'
+        )
+        conn.executemany(
+            "INSERT INTO peaks VALUES (?, ?, ?)",
+            [("chr1", 10, 20), ("chr1", 15, 30)],
+        )
+
+        # Act
+        sql = transpile(
+            "SELECT UPPER(chrom) AS label, MERGE(interval) FROM peaks GROUP BY chrom",
+            tables=["peaks"],
+            dialect="duckdb",
+        )
+        cursor = conn.execute(sql)
+        columns = [d[0] for d in cursor.description]
+        rows = [dict(zip(columns, r)) for r in cursor.fetchall()]
+
+        # Assert
+        assert rows == [{"chrom": "chr1", "start": 10, "end": 30, "label": "CHR1"}]
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            pytest.param(
+                "SELECT chrom, score, MERGE(interval) FROM peaks GROUP BY chrom",
+                id="raw-column-score",
+            ),
+            pytest.param(
+                'SELECT "start", MERGE(interval) FROM peaks',
+                id="raw-bounds-column",
+            ),
+            pytest.param(
+                "SELECT MERGE(interval), COUNT(*) + score AS bad "
+                "FROM peaks GROUP BY chrom",
+                id="mixed-aggregate-and-raw",
+            ),
+        ],
+    )
+    def test_transpile_should_raise_when_merge_projects_raw_non_key_column(self, query):
+        """Test that a raw non-aggregate, non-grouping-key projection is rejected.
+
+        Given:
+            A MERGE projected beside a column referencing, outside any aggregate, a
+            column that is neither a grouping key nor aggregated — a bare ``score``, a
+            raw interval-bound column, or a mixed ``COUNT(*) + score`` whose ``score``
+            is added outside the aggregate.
+        When:
+            Transpiling the query.
+        Then:
+            It should raise a ValueError naming the non-aggregated column, rather than
+            copying it verbatim into the aggregation where it is neither grouped nor
+            aggregated (a silent duplicate or a raw engine binder error) (#192).
+        """
+        # Act & assert
+        with pytest.raises(
+            ValueError, match="MERGE cannot project the non-aggregated column"
+        ):
+            transpile(query, tables=["peaks"])
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            pytest.param(
+                "SELECT chrom AS start, MERGE(interval) FROM peaks",
+                id="alias-onto-start",
+            ),
+            pytest.param(
+                "SELECT chrom AS end, MERGE(interval) FROM peaks",
+                id="alias-onto-end",
+            ),
+            pytest.param(
+                "SELECT UPPER(chrom) AS chrom, MERGE(interval) "
+                "FROM peaks GROUP BY chrom",
+                id="expr-onto-chrom",
+            ),
+        ],
+    )
+    def test_transpile_should_raise_when_projection_collides_with_synthesized_name(
+        self, query
+    ):
+        """Test that an item aliased onto a synthesized column name is rejected.
+
+        Given:
+            A MERGE projected beside an item whose output name collides with a column
+            MERGE synthesizes — ``chrom AS start`` / ``chrom AS end`` (onto the
+            aggregated bounds) or ``UPPER(chrom) AS chrom`` (a different value onto the
+            grouping key).
+        When:
+            Transpiling the query.
+        Then:
+            It should raise a ValueError naming the collision, rather than emitting two
+            columns of that name — which silently duplicates one and, for ``start`` /
+            ``end``, hijacks the default ``ORDER BY "chrom", "start"`` and returns rows
+            in the wrong order (#192).
+        """
+        # Act & assert
+        with pytest.raises(
+            ValueError, match="collides with the chrom/start/end columns"
+        ):
+            transpile(query, tables=["peaks"])
+
+    def test_transpile_should_dedup_when_grouping_key_self_aliased(self):
+        """Test that a grouping key aliased to its own name is not duplicated.
+
+        Given:
+            A MERGE projected beside a no-op self-aliased grouping key
+            (``chrom AS chrom``).
+        When:
+            Transpiling for DuckDB and executing it.
+        Then:
+            chrom should surface exactly once (MERGE already projects it), proving the
+            dedup catches the aliased form and not only a bare column (#192).
+        """
+        # Arrange
+        duckdb = pytest.importorskip("duckdb")
+        conn = duckdb.connect(":memory:")
+        conn.execute(
+            'CREATE TABLE peaks (chrom VARCHAR, "start" INTEGER, "end" INTEGER)'
+        )
+        conn.executemany(
+            "INSERT INTO peaks VALUES (?, ?, ?)",
+            [("chr1", 10, 20), ("chr1", 15, 30)],
+        )
+
+        # Act
+        sql = transpile(
+            "SELECT chrom AS chrom, MERGE(interval) FROM peaks",
+            tables=["peaks"],
+            dialect="duckdb",
+        )
+        cursor = conn.execute(sql)
+        columns = [desc[0] for desc in cursor.description]
+        rows = cursor.fetchall()
+
+        # Assert
+        assert columns == ["chrom", "start", "end"]
+        assert rows == [("chr1", 10, 30)]
+
+    def test_transpile_should_raise_when_group_by_conflicts_with_merge_grouping(self):
+        """Test that a GROUP BY over a non-grouping-key column is rejected.
+
+        Given:
+            A MERGE whose enclosing query groups by a column MERGE does not group by
+            (``GROUP BY score``).
+        When:
+            Transpiling the query.
+        Then:
+            It should raise a ValueError naming the offending GROUP BY column, rather
+            than silently discarding the user's GROUP BY for MERGE's synthesized one
+            (#192).
+        """
+        # Act & assert
+        with pytest.raises(ValueError, match="MERGE cannot honor GROUP BY score"):
+            transpile(
+                "SELECT MERGE(interval), COUNT(*) FROM peaks GROUP BY score",
+                tables=["peaks"],
+            )
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            pytest.param(
+                "SELECT MERGE(interval), -MAX(start) AS Start FROM peaks",
+                id="aggregate-alias-Start",
+            ),
+            pytest.param(
+                "SELECT 1 AS START, MERGE(interval) FROM peaks",
+                id="literal-alias-START",
+            ),
+            pytest.param(
+                "SELECT chrom AS End, MERGE(interval) FROM peaks",
+                id="grouping-key-alias-End",
+            ),
+        ],
+    )
+    def test_transpile_should_raise_when_case_variant_alias_collides_with_synthesized(
+        self, query
+    ):
+        """Test that a case-variant alias colliding with a synthesized name is rejected.
+
+        Given:
+            A MERGE projected beside an item whose alias differs only in case from a
+            column MERGE synthesizes — ``AS Start`` / ``AS START`` / ``AS End`` against
+            the aggregated ``start`` / ``end`` bounds.
+        When:
+            Transpiling the query.
+        Then:
+            It should raise a ValueError naming the collision: SQL binds unquoted
+            identifiers case-insensitively, so the alias folds onto the synthesized
+            column and would otherwise duplicate it and silently hijack the default
+            ``ORDER BY "chrom", "start"``, returning rows in the wrong order (#192).
+        """
+        # Act & assert
+        with pytest.raises(
+            ValueError, match="collides with the chrom/start/end columns"
+        ):
+            transpile(query, tables=["peaks"])
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            pytest.param(
+                "SELECT UPPER(chrom) AS c, MERGE(interval) FROM peaks "
+                "GROUP BY UPPER(chrom)",
+                id="group-by-expression",
+            ),
+            pytest.param(
+                "SELECT chrom, MERGE(interval) FROM peaks GROUP BY 1",
+                id="group-by-ordinal",
+            ),
+        ],
+    )
+    def test_transpile_should_raise_when_group_by_is_expression_or_ordinal(self, query):
+        """Test that a GROUP BY expression or ordinal is rejected, not silently dropped.
+
+        Given:
+            A MERGE whose enclosing query groups by an expression (``GROUP BY
+            UPPER(chrom)``) or an ordinal (``GROUP BY 1``) rather than a bare
+            grouping-key column.
+        When:
+            Transpiling the query.
+        Then:
+            It should raise a ValueError: MERGE cannot verify a non-column GROUP BY names
+            a grouping key, so honoring it would silently substitute MERGE's synthesized
+            grouping and change the result (a case-folding ``GROUP BY UPPER(chrom)``
+            would no longer merge case-insensitively) (#192).
+        """
+        # Act & assert
+        with pytest.raises(ValueError, match="MERGE cannot honor GROUP BY"):
+            transpile(query, tables=["peaks"])
+
+    def test_transpile_should_accept_case_variant_grouping_key(self):
+        """Test that a grouping key referenced in a different case is honored.
+
+        Given:
+            A MERGE grouped by ``CHROM`` — the ``chrom`` grouping key in a different
+            case — over a seeded table.
+        When:
+            Transpiling for DuckDB and executing it.
+        Then:
+            The GROUP BY should be accepted (SQL folds the unquoted identifier onto the
+            grouping key) and the merged regions returned, rather than falsely rejected
+            as a non-grouping column (#192).
+        """
+        # Arrange
+        duckdb = pytest.importorskip("duckdb")
+        conn = duckdb.connect(":memory:")
+        conn.execute(
+            'CREATE TABLE peaks (chrom VARCHAR, "start" INTEGER, "end" INTEGER)'
+        )
+        conn.executemany(
+            "INSERT INTO peaks VALUES (?, ?, ?)",
+            [("chr1", 10, 20), ("chr1", 15, 30), ("chr1", 100, 110)],
+        )
+
+        # Act
+        sql = transpile(
+            "SELECT chrom, MERGE(interval) FROM peaks GROUP BY CHROM",
+            tables=["peaks"],
+            dialect="duckdb",
+        )
+        cursor = conn.execute(sql)
+        columns = [desc[0] for desc in cursor.description]
+        rows = cursor.fetchall()
+
+        # Assert
+        assert columns == ["chrom", "start", "end"]
+        assert sorted(rows) == [("chr1", 10, 30), ("chr1", 100, 110)]
+
+    def test_transpile_should_keep_unaliased_cast_over_grouping_key(self):
+        """Test that an unaliased cast over the grouping key is kept, not rejected.
+
+        Given:
+            A MERGE projected beside an unaliased ``CAST(chrom AS VARCHAR)`` over the
+            grouping key, grouped by chrom.
+        When:
+            Transpiling for DuckDB and executing it.
+        Then:
+            The cast should surface (it is functionally determined by the grouping key,
+            and its emitted column name is the cast text, not ``chrom``) rather than
+            falsely rejected as colliding with the synthesized ``chrom`` on the strength
+            of sqlglot's output-name heuristic (#192).
+        """
+        # Arrange
+        duckdb = pytest.importorskip("duckdb")
+        conn = duckdb.connect(":memory:")
+        conn.execute(
+            'CREATE TABLE peaks (chrom VARCHAR, "start" INTEGER, "end" INTEGER)'
+        )
+        conn.executemany(
+            "INSERT INTO peaks VALUES (?, ?, ?)",
+            [("chr1", 10, 20), ("chr1", 15, 30)],
+        )
+
+        # Act
+        sql = transpile(
+            "SELECT CAST(chrom AS VARCHAR), MERGE(interval) FROM peaks GROUP BY chrom",
+            tables=["peaks"],
+            dialect="duckdb",
+        )
+        rows = conn.execute(sql).fetchall()
+
+        # Assert
+        assert rows == [("chr1", 10, 30, "chr1")]
+
+    def test_transpile_should_raise_when_windowed_aggregate_over_raw_column(self):
+        """Test that a window aggregate over a raw column is rejected loudly.
+
+        Given:
+            A MERGE projected beside a window aggregate whose argument is a raw
+            non-grouping column (``SUM(score) OVER (PARTITION BY chrom)``).
+        When:
+            Transpiling the query.
+        Then:
+            It should raise a ValueError naming ``score``: a window aggregate runs
+            after the GROUP BY and does not collapse the group, so its raw argument is
+            still ungrouped — MERGE rejects it with a clear diagnostic rather than
+            emitting SQL the engine rejects with a raw binder error (#192).
+        """
+        # Act & assert
+        with pytest.raises(
+            ValueError, match="MERGE cannot project the non-aggregated column"
+        ):
+            transpile(
+                "SELECT SUM(score) OVER (PARTITION BY chrom) AS s, MERGE(interval) "
+                "FROM peaks GROUP BY chrom",
+                tables=["peaks"],
+            )
+
+    def test_transpile_should_honor_having_over_merged_regions(self):
+        """Test that a HAVING filters merged regions instead of being dropped.
+
+        Given:
+            A MERGE with ``HAVING COUNT(*) > 1`` over a seeded table where one merged
+            region is built from two input intervals and another from a single interval.
+        When:
+            Transpiling for DuckDB and executing it.
+        Then:
+            Only the multi-interval region should be returned — the HAVING is honored
+            against the per-region grouping rather than silently dropped by the rewrite,
+            which had returned the unfiltered regions (#192).
+        """
+        # Arrange
+        duckdb = pytest.importorskip("duckdb")
+        conn = duckdb.connect(":memory:")
+        conn.execute(
+            'CREATE TABLE peaks (chrom VARCHAR, "start" INTEGER, "end" INTEGER)'
+        )
+        conn.executemany(
+            "INSERT INTO peaks VALUES (?, ?, ?)",
+            [("chr1", 0, 10), ("chr1", 5, 15), ("chr1", 100, 110)],
+        )
+
+        # Act
+        sql = transpile(
+            "SELECT chrom, COUNT(*) AS n, MERGE(interval) FROM peaks "
+            "HAVING COUNT(*) > 1",
+            tables=["peaks"],
+            dialect="duckdb",
+        )
+        cursor = conn.execute(sql)
+        columns = [desc[0] for desc in cursor.description]
+        rows = cursor.fetchall()
+
+        # Assert
+        assert columns == ["chrom", "start", "end", "n"]
+        assert rows == [("chr1", 0, 15, 2)]
+
     def test_transpile_should_group_by_strand_when_merge_stranded(self):
         """Test that a stranded MERGE aggregates within strand.
 
