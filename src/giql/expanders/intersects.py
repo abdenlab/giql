@@ -9,13 +9,18 @@ is byte-identical to the strings the legacy emitter produced.
 
 These are *node-local* predicate rewrites: an INTERSECTS / CONTAINS / WITHIN node
 expands to a boolean ``(chrom = ... AND start < ... AND end > ...)`` expression that
-replaces it in place. The whole-query column-to-column **join** rewrites (the binned
-equi-join and the DuckDB IEJoin) remain capability-gated pre-pass transformers in
-:mod:`giql.transformer` keyed on ``capabilities.range_join_strategy`` — they consume
-a column-to-column INTERSECTS *join* before this pass runs, so by the time a
-column-to-column INTERSECTS reaches an expander it is a residual predicate (e.g.
-inside an ``OR``, or a join shape the transformer declined) that the legacy emitter
-also rendered as a plain predicate. The expander handles that residual the same way.
+replaces it in place. For a column-to-column INTERSECTS *join* this in-place
+expansion IS the join plan on every target but DuckDB: the boolean overlap
+predicate is a plain ``ON`` condition the engine plans as a range join (a hash join
+keyed on ``chrom`` with the position inequalities as a residual filter), correct for
+both inner and outer joins. The one whole-query pre-pass rewrite that survives is
+the DuckDB IEJoin transformer in :mod:`giql.transformer`, gated on
+``capabilities.range_join_strategy == "iejoin"``; it consumes a column-to-column
+INTERSECTS *join* before this pass runs for the shapes it supports, and every shape
+it declines falls through to this expander's naive predicate. (The generic binned
+equi-join was dropped in favor of the naive predicate — #167.) A literal-range or
+residual column-to-column INTERSECTS *predicate* (e.g. inside an ``OR``) reaches the
+expander and is rendered the same way.
 
 Only :class:`~giql.targets.GenericTarget` expanders are registered: spatial-predicate
 *emission* is portable SQL-92 and does not vary by engine, so one generic expander
@@ -213,9 +218,7 @@ def expand_within(node: exp.Expression, ctx: ExpansionContext) -> exp.Expression
 
 
 @register(GenericTarget, SpatialSetPredicate)
-def expand_spatial_set(
-    node: exp.Expression, ctx: ExpansionContext
-) -> exp.Expression:
+def expand_spatial_set(node: exp.Expression, ctx: ExpansionContext) -> exp.Expression:
     """Expand a quantified set predicate (``ANY`` / ``ALL``) to boolean SQL AST.
 
     Reproduces the legacy ``_generate_spatial_set`` emitter: the single left

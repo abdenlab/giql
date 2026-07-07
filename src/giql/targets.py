@@ -18,7 +18,7 @@ active target's capabilities.
 from dataclasses import dataclass
 from typing import Literal
 
-RangeJoinStrategy = Literal["binned", "iejoin"]
+RangeJoinStrategy = Literal["naive", "iejoin"]
 
 
 @dataclass(frozen=True)
@@ -49,10 +49,12 @@ class Capabilities:
         emission path consumes it yet (a future window-function operator
         port would).
     range_join_strategy : RangeJoinStrategy
-        The plan used for column-to-column INTERSECTS joins: ``"binned"``
-        for the generic binned equi-join, ``"iejoin"`` for DuckDB's
-        per-partition IEJoin plan. The IEJoin path covers INNER / SEMI /
-        ANTI joins, with binned fallback for unsupported shapes.
+        The plan used for column-to-column INTERSECTS joins: ``"naive"``
+        emits the naive overlap predicate (a plain ``ON`` condition the engine
+        plans as a range join) via the ``(GenericTarget, Intersects)`` pass-3
+        expander; ``"iejoin"`` selects DuckDB's per-partition IEJoin pre-pass
+        plan. The IEJoin path covers INNER / SEMI / ANTI joins and falls back to
+        the naive predicate for the shapes it declines (#167).
     """
 
     supports_lateral: bool
@@ -109,7 +111,7 @@ class GenericTarget(Target):
         supports_lateral=True,
         supports_star_replace=False,
         supports_qualify=False,
-        range_join_strategy="binned",
+        range_join_strategy="naive",
     )
 
 
@@ -157,8 +159,10 @@ class DataFusionTarget(Target):
     so NEAREST takes the decorrelated window fallback), ``supports_star_replace=
     False`` (DataFusion supports ``* EXCEPT`` / ``* EXCLUDE`` but not
     ``* REPLACE``, so the canonicalizer and the NEAREST/DISJOIN passthroughs emit
-    the portable ``* EXCEPT`` form), ``supports_qualify=False``, and the binned
-    equi-join range strategy.
+    the portable ``* EXCEPT`` form), ``supports_qualify=False``, and the naive
+    overlap-predicate range strategy (the column-to-column INTERSECTS join stays a
+    plain ``ON`` condition DataFusion plans as a hash join keyed on ``chrom`` with
+    the position inequalities as a residual join filter — #167).
 
     A ``SELECT *`` / ``SELECT b.*`` over a correlated NEAREST would otherwise expose
     the decorrelated fallback's reserved ``__giql_x_*`` rank/key columns; a statement
@@ -179,7 +183,7 @@ class DataFusionTarget(Target):
         supports_lateral=False,
         supports_star_replace=False,
         supports_qualify=False,
-        range_join_strategy="binned",
+        range_join_strategy="naive",
     )
 
 

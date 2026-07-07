@@ -390,7 +390,7 @@ class _PluginTarget(Target):
         supports_lateral=True,
         supports_star_replace=False,
         supports_qualify=False,
-        range_join_strategy="binned",
+        range_join_strategy="naive",
     )
 
 
@@ -1179,7 +1179,7 @@ class _FakeTarget(Target):
         supports_lateral=True,
         supports_star_replace=False,
         supports_qualify=False,
-        range_join_strategy="binned",
+        range_join_strategy="naive",
     )
 
 

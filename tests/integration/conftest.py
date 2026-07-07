@@ -48,7 +48,7 @@ from ._oracle import normalize
 from ._oracle import resolve_routing
 
 # Default per-target schema: GIQL's default interval columns. Reserved words
-# (``end``) are quoted by the loaders below, mirroring ``test_binned_join.py``.
+# (``end``) are quoted by the loaders below, mirroring ``test_intersects_join.py``.
 DEFAULT_COLUMNS: tuple[tuple[str, str], ...] = (
     ("chrom", "utf8"),
     ("start", "int64"),

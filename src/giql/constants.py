@@ -10,9 +10,6 @@ DEFAULT_END_COL = "end"
 DEFAULT_STRAND_COL = "strand"
 DEFAULT_GENOMIC_COL = "interval"
 
-# Default bin size for INTERSECTS binned equi-join optimization
-DEFAULT_BIN_SIZE = 10_000
-
 #: The reserved alias prefix naming DISJOIN's internal CTEs (``__giql_dj_ref`` /
 #: ``__giql_dj_tgt`` / ``__giql_dj_cuts`` / ...). Follows the same
 #: reserved-prefix scheme as :data:`giql.canonicalizer.CANON_PREFIX`; the leading

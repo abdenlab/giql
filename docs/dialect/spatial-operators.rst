@@ -99,12 +99,12 @@ Find all variants, with gene information where available:
    FROM variants v
    LEFT JOIN genes g ON v.interval INTERSECTS g.interval
 
-Binned Join Internals
-~~~~~~~~~~~~~~~~~~~~~
+Join Internals
+~~~~~~~~~~~~~~
 
-Column-to-column ``INTERSECTS`` joins use a binned equi-join strategy internally: each interval is assigned to one or more fixed-width bins, and the join is performed on ``(chrom, bin)`` pairs. Because an interval that spans a bin boundary belongs to more than one bin, the raw binned join can produce duplicate matches for the same pair of source rows.
+A column-to-column ``INTERSECTS`` join expands to the **naive overlap predicate** — ``a.chrom = b.chrom AND a.start < b.end AND b.start < a.end`` — left in place as an ordinary ``ON`` (or ``WHERE``) condition. GIQL emits standard SQL and lets each engine's optimizer plan the range join: on DuckDB and DataFusion this becomes a hash join keyed on ``chrom`` with the two position inequalities applied as a residual join filter. Because the predicate is a plain condition on the original tables, inner and outer joins (``LEFT`` / ``RIGHT`` / ``FULL``) get correct semantics — including unmatched-row preservation — with no special restructuring, and every output row's multiplicity follows standard SQL bag semantics with no ``DISTINCT`` workaround.
 
-GIQL eliminates these duplicates inside a **pairs CTE** that computes the set of distinct ``(left_key, right_key)`` pairs from the binned inner join, then joins the original tables back through this CTE. Because ``DISTINCT`` is applied only to the key pairs — not to the output query — all source rows are preserved, including genuinely duplicate records. Overlap counts, aggregations, and standard SQL bag semantics all work correctly without requiring any workaround.
+DuckDB additionally offers an opt-in ``dialect="duckdb"`` per-chromosome IEJoin plan for INNER / SEMI / ANTI joins that routes through its ``IE_JOIN`` / ``PIECEWISE_MERGE_JOIN`` family; shapes it declines fall through to the naive predicate. See the :doc:`performance guide </transpilation/performance>` for details.
 
 Related Operators
 ~~~~~~~~~~~~~~~~~

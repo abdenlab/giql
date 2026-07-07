@@ -1,8 +1,13 @@
 """Query transformers for GIQL operations.
 
-This module contains the pre-pass transformers that rewrite column-to-column
-INTERSECTS joins (the binned equi-join and DuckDB IEJoin plans) into equivalent
-SQL with CTEs. CLUSTER and MERGE were relocated to the operator-expander registry
+This module contains the DuckDB IEJoin pre-pass transformer, which rewrites a
+column-to-column INTERSECTS join into a per-chromosome dynamic-SQL pattern DuckDB
+plans through its range-join family. Every other target — and every shape the
+IEJoin path declines — leaves the INTERSECTS in place for the pass-3
+``(GenericTarget, Intersects)`` expander, which renders the naive overlap
+predicate (a plain ``ON`` condition the engine plans as a range join). The generic
+binned equi-join transformer was dropped in favor of that naive predicate (#167).
+CLUSTER and MERGE were relocated to the operator-expander registry
 (``giql.expanders.cluster`` / ``giql.expanders.merge``) in epic #137 (#144).
 """
 
@@ -15,7 +20,6 @@ from sqlglot import exp
 
 from giql.canonical import canonical_end
 from giql.canonical import canonical_start
-from giql.constants import DEFAULT_BIN_SIZE
 from giql.constants import DEFAULT_CHROM_COL
 from giql.constants import DEFAULT_END_COL
 from giql.constants import DEFAULT_START_COL
@@ -38,12 +42,11 @@ class _UnqualifiedProjectionError(Exception):
     """
 
 
-# These predicates are shared between :class:`IntersectsBinnedJoinTransformer`
-# and :class:`IntersectsDuckDBIEJoinTransformer`; they live at module scope
-# rather than on either class so neither owns them. Style §2's strict
-# "functions after classes" ordering is relaxed here under the
-# topic-interleaved exception, generalized to "shared by multiple consumer
-# classes."
+# These predicates support :class:`IntersectsDuckDBIEJoinTransformer`; they live
+# at module scope rather than on the class so a future target-specific INTERSECTS
+# override can reuse them without importing the transformer. Style §2's strict
+# "functions after classes" ordering is relaxed here under the topic-interleaved
+# exception.
 
 
 def _is_column_intersects(node: Intersects) -> bool:
@@ -72,7 +75,7 @@ def _normalize_alias(name: str, *, quoted: bool = False) -> str:
 
     DuckDB (and standard SQL) treat unquoted identifiers case-insensitively.
     Comparing aliases via raw Python equality rejects valid mixed-case queries
-    that the binned plan accepts; normalize via :py:meth:`str.casefold` so the
+    that the naive-predicate plan accepts; normalize via :py:meth:`str.casefold` so the
     dialect matches DuckDB's identifier semantics. Quoted identifiers stay
     case-sensitive per the SQL standard.
     """
@@ -226,497 +229,6 @@ class _IEJoinSides:
         )
 
 
-class IntersectsBinnedJoinTransformer:
-    """Transform column-to-column INTERSECTS into binned equi-joins.
-
-    Handles both explicit ``JOIN ... ON`` and implicit cross-join (WHERE)
-    INTERSECTS patterns. Each rewrite emits a pairs CTE that holds the
-    matching ``(left_key, right_key)`` tuples computed by an INNER binned
-    join with ``SELECT DISTINCT`` on the join keys, then bridges the
-    original tables through that pairs CTE::
-
-        WITH __giql_peaks_bins AS (
-            SELECT "chrom", "start", "end",
-                   UNNEST(range(...)) AS __giql_bin FROM peaks
-        ),
-        __giql_genes_bins AS (...),
-        __giql_pairs_0 AS (
-            SELECT DISTINCT
-                __giql_l.<chrom> AS __giql_l_chrom, ...,
-                __giql_r.<chrom> AS __giql_r_chrom, ...
-            FROM __giql_peaks_bins AS __giql_l
-            JOIN __giql_genes_bins AS __giql_r
-              ON __giql_l.<chrom> = __giql_r.<chrom>
-                 AND __giql_l.__giql_bin = __giql_r.__giql_bin
-                 AND __giql_l.<start> < __giql_r.<end>
-                 AND __giql_l.<end> > __giql_r.<start>
-        )
-        SELECT a.*, b.*
-        FROM peaks a
-        JOIN __giql_pairs_0 AS __giql_p0
-          ON a.<chrom> = __giql_p0.__giql_l_chrom
-             AND a.<start> = __giql_p0.__giql_l_start
-             AND a.<end> = __giql_p0.__giql_l_end
-        JOIN genes b
-          ON b.<chrom> = __giql_p0.__giql_r_chrom
-             AND b.<start> = __giql_p0.__giql_r_start
-             AND b.<end> = __giql_p0.__giql_r_end
-
-    Deduplication happens inside the pairs CTE on the join keys, so the
-    output query does NOT carry a ``SELECT DISTINCT`` — source rows that
-    differ only in unselected columns are preserved. Outer joins ride
-    safely on top of this because the bridge-join structure prevents bin
-    fan-out from creating spurious NULL rows.
-
-    Literal-range INTERSECTS (e.g., ``WHERE interval INTERSECTS 'chr1:...'``)
-    are left untouched.
-    """
-
-    def __init__(self, tables: Tables, bin_size: int | None = None):
-        """Initialize transformer.
-
-        :param tables:
-            Table configurations for column mapping
-        :param bin_size:
-            Bin width for the equi-join rewrite. Defaults to
-            :data:`~giql.constants.DEFAULT_BIN_SIZE` if not specified.
-        """
-        self.tables = tables
-        resolved = bin_size if bin_size is not None else DEFAULT_BIN_SIZE
-        if not isinstance(resolved, int) or resolved <= 0:
-            raise ValueError(f"bin_size must be a positive integer, got {resolved!r}")
-        self.bin_size = resolved
-
-    def transform(self, query: exp.Expression) -> exp.Expression:
-        """Rewrite column-to-column INTERSECTS joins as a pairs-CTE binned plan.
-
-        Walks ``query.args["joins"]`` and the top-level ``WHERE`` for
-        column-to-column :class:`Intersects` predicates and replaces each one
-        with a bridge through a freshly-allocated pairs CTE
-        (``__giql_pairs_<n>``) plus the per-table bin CTEs that feed it.
-        Non-INTERSECTS predicates are preserved verbatim; literal-range
-        ``INTERSECTS`` (``WHERE interval INTERSECTS 'chr1:100-200'``) is
-        left untouched and emitted by the default generator.
-
-        :param query:
-            Parsed query AST.
-        :return:
-            The transformed AST (mutated in place when an INTERSECTS join
-            is rewritten; returned unchanged for non-``Select`` inputs).
-        """
-        if not isinstance(query, exp.Select):
-            return query
-
-        # The pairs-CTE approach computes matching (left_key, right_key)
-        # pairs via an INNER binned join with DISTINCT on key columns,
-        # then joins the original tables through the pairs CTE. This
-        # avoids adding SELECT DISTINCT to the output query, which would
-        # collapse legitimately different source rows that happen to
-        # have identical selected columns. It also handles outer joins
-        # correctly by preventing bin fan-out from creating spurious
-        # NULL rows.
-        return self._transform_with_pairs(query)
-
-    def _transform_with_pairs(self, query: exp.Select) -> exp.Select:
-        """Transform INTERSECTS joins using the pairs-CTE approach.
-
-        Computes matching (left_key, right_key) pairs via an INNER
-        binned join with DISTINCT on key columns, then joins the
-        original tables through the pairs CTE.  Unlike the full-CTE
-        and bridge paths, this does NOT add SELECT DISTINCT to the
-        output — deduplication happens inside the pairs CTE on
-        (chrom, start, end) keys, preserving all source rows.
-        """
-        joins = query.args.get("joins") or []
-        key_binned: dict[str, str] = {}
-        pairs_idx = 0
-        new_joins: list[exp.Join] = []
-        rewrote_any = False
-
-        for join in joins:
-            on = join.args.get("on")
-            if on:
-                intersects = _find_column_intersects_in(on)
-                if intersects:
-                    extra = _strip_intersects(on, intersects)
-                    replacement = self._build_pairs_replacement_joins(
-                        query, join, intersects, extra, key_binned, pairs_idx
-                    )
-                    new_joins.extend(replacement)
-                    pairs_idx += 1
-                    rewrote_any = True
-                    continue
-            new_joins.append(join)
-
-        where = query.args.get("where")
-        if where:
-            intersects = _find_column_intersects_in(where.this)
-            if intersects:
-                cross_join = self._find_cross_join_for_intersects(
-                    query, intersects, new_joins
-                )
-                if cross_join is not None:
-                    new_joins.remove(cross_join)
-                    replacement = self._build_pairs_replacement_joins(
-                        query,
-                        cross_join,
-                        intersects,
-                        None,
-                        key_binned,
-                        pairs_idx,
-                    )
-                    new_joins.extend(replacement)
-                    self._remove_intersects_from_where(query, intersects)
-                    pairs_idx += 1
-                    rewrote_any = True
-
-        if rewrote_any:
-            query.set("joins", new_joins)
-
-        return query
-
-    def _build_pairs_cte(
-        self,
-        name: str,
-        l_cte: str,
-        r_cte: str,
-        l_cols: tuple[str, str, str],
-        r_cols: tuple[str, str, str],
-    ) -> exp.CTE:
-        """Build a DISTINCT inner-join pairs CTE.
-
-        Returns a CTE named *name* that selects the six key columns
-        (__giql_l_chrom, __giql_l_start, __giql_l_end, __giql_r_chrom,
-        __giql_r_start, __giql_r_end) from an INNER join of the two bin
-        CTEs on chrom, __giql_bin, and the overlap predicate.
-        """
-        l_alias = "__giql_l"
-        r_alias = "__giql_r"
-
-        select = exp.Select()
-        select.set("distinct", exp.Distinct())
-
-        first = True
-        for tbl_alias, cols, prefix in [
-            (l_alias, l_cols, "__giql_l"),
-            (r_alias, r_cols, "__giql_r"),
-        ]:
-            for col, suffix in zip(cols, ["_chrom", "_start", "_end"]):
-                col_expr = exp.Alias(
-                    this=exp.column(col, table=tbl_alias, quoted=True),
-                    alias=exp.Identifier(this=f"{prefix}{suffix}"),
-                )
-                select.select(col_expr, append=not first, copy=False)
-                first = False
-
-        select.from_(
-            exp.Table(
-                this=exp.Identifier(this=l_cte),
-                alias=exp.TableAlias(this=exp.Identifier(this=l_alias)),
-            ),
-            copy=False,
-        )
-
-        join_on = exp.And(
-            this=exp.And(
-                this=exp.EQ(
-                    this=exp.column(l_cols[0], table=l_alias, quoted=True),
-                    expression=exp.column(r_cols[0], table=r_alias, quoted=True),
-                ),
-                expression=exp.EQ(
-                    this=exp.column("__giql_bin", table=l_alias),
-                    expression=exp.column("__giql_bin", table=r_alias),
-                ),
-            ),
-            expression=self._build_overlap(l_alias, r_alias, l_cols, r_cols),
-        )
-
-        select.join(
-            exp.Table(
-                this=exp.Identifier(this=r_cte),
-                alias=exp.TableAlias(this=exp.Identifier(this=r_alias)),
-            ),
-            on=join_on,
-            copy=False,
-        )
-
-        return exp.CTE(
-            this=select,
-            alias=exp.TableAlias(this=exp.Identifier(this=name)),
-        )
-
-    def _build_pairs_replacement_joins(
-        self,
-        query: exp.Select,
-        join: exp.Join,
-        intersects: Intersects,
-        extra: exp.Expression | None,
-        key_binned: dict[str, str],
-        pairs_idx: int,
-    ) -> list[exp.Join]:
-        """Build a pairs CTE and two replacement joins for one INTERSECTS.
-
-        Returns two joins:
-        - join1: from_alias [SIDE] JOIN __giql_pairs ON from.key = pairs.from_key
-        - join2: [SIDE] JOIN join_table ON join.key = pairs.join_key [AND extra]
-        """
-        from_table = query.args["from_"].this
-        join_table = join.this
-        if not isinstance(from_table, exp.Table) or not isinstance(
-            join_table, exp.Table
-        ):
-            return [join]
-
-        from_alias = from_table.alias or from_table.name
-        join_alias = join_table.alias or join_table.name
-        from_table_name = from_table.name
-        join_table_name = join_table.name
-
-        left_alias = intersects.this.table
-        from_cols = self._get_columns(from_table_name)
-        join_cols = self._get_columns(join_table_name)
-
-        # Prefix assignment encodes which INTERSECTS argument feeds the
-        # left vs right bin column of the pairs CTE, so the downstream
-        # equi-join compares matching halves regardless of FROM order.
-        if left_alias == from_alias:
-            l_table_name, r_table_name = from_table_name, join_table_name
-            l_cols, r_cols = from_cols, join_cols
-            from_prefix, join_prefix = "__giql_l", "__giql_r"
-        else:
-            l_table_name, r_table_name = join_table_name, from_table_name
-            l_cols, r_cols = join_cols, from_cols
-            from_prefix, join_prefix = "__giql_r", "__giql_l"
-
-        l_cte = self._ensure_key_binned(query, l_table_name, key_binned)
-        r_cte = self._ensure_key_binned(query, r_table_name, key_binned)
-
-        pairs_name = f"__giql_pairs_{pairs_idx}"
-        pairs_cte = self._build_pairs_cte(pairs_name, l_cte, r_cte, l_cols, r_cols)
-        existing_with = query.args.get("with_")
-        if existing_with:
-            existing_with.append("expressions", pairs_cte)
-        else:
-            query.set("with_", exp.With(expressions=[pairs_cte]))
-
-        side = join.args.get("side")
-        p_alias = f"__giql_p{pairs_idx}"
-
-        join1_on = self._build_key_match(from_alias, from_cols, p_alias, from_prefix)
-        join1_kwargs: dict = {
-            "this": exp.Table(
-                this=exp.Identifier(this=pairs_name),
-                alias=exp.TableAlias(this=exp.Identifier(this=p_alias)),
-            ),
-            "on": join1_on,
-        }
-        if side:
-            join1_kwargs["side"] = side
-        join1 = exp.Join(**join1_kwargs)
-
-        join2_on = self._build_key_match(join_alias, join_cols, p_alias, join_prefix)
-        if extra:
-            join2_on = exp.And(this=join2_on, expression=extra)
-        join2_kwargs: dict = {
-            "this": exp.Table(
-                this=exp.Identifier(this=join_table_name),
-                alias=exp.TableAlias(this=exp.Identifier(this=join_alias)),
-            ),
-            "on": join2_on,
-        }
-        if side:
-            join2_kwargs["side"] = side
-        join2 = exp.Join(**join2_kwargs)
-
-        return [join1, join2]
-
-    def _build_key_match(
-        self,
-        table_alias: str,
-        cols: tuple[str, str, str],
-        pairs_alias: str,
-        prefix: str,
-    ) -> exp.And:
-        """Build ``table.chrom = pairs.prefix_chrom AND ...`` for all three keys."""
-        return exp.And(
-            this=exp.And(
-                this=exp.EQ(
-                    this=exp.column(cols[0], table=table_alias, quoted=True),
-                    expression=exp.column(f"{prefix}_chrom", table=pairs_alias),
-                ),
-                expression=exp.EQ(
-                    this=exp.column(cols[1], table=table_alias, quoted=True),
-                    expression=exp.column(f"{prefix}_start", table=pairs_alias),
-                ),
-            ),
-            expression=exp.EQ(
-                this=exp.column(cols[2], table=table_alias, quoted=True),
-                expression=exp.column(f"{prefix}_end", table=pairs_alias),
-            ),
-        )
-
-    def _build_bin_range(
-        self, start: str, end: str
-    ) -> tuple[exp.Expression, exp.Expression]:
-        """Build the (low, high) bin-index expressions for UNNEST(range(...)).
-
-        Returns ``start // bin_size`` and ``(end - 1) // bin_size + 1``.
-        Uses integer floor division to avoid rounding errors from
-        float division + CAST.
-        """
-        bs = self.bin_size
-
-        low = exp.IntDiv(
-            this=exp.column(start, quoted=True),
-            expression=exp.Literal.number(bs),
-        )
-        high = exp.Add(
-            this=exp.IntDiv(
-                this=exp.Paren(
-                    this=exp.Sub(
-                        this=exp.column(end, quoted=True),
-                        expression=exp.Literal.number(1),
-                    ),
-                ),
-                expression=exp.Literal.number(bs),
-            ),
-            expression=exp.Literal.number(1),
-        )
-        return low, high
-
-    def _find_cross_join_for_intersects(
-        self,
-        query: exp.Select,
-        intersects: Intersects,
-        current_joins: list[exp.Join],
-    ) -> exp.Join | None:
-        """Find the implicit cross-join entry for the table in a WHERE INTERSECTS."""
-        from_table = query.args["from_"].this
-        if not isinstance(from_table, exp.Table):
-            return None
-        from_alias = from_table.alias or from_table.name
-
-        left_alias = intersects.this.table
-        right_alias = intersects.expression.table
-        if left_alias == from_alias:
-            target_alias = right_alias
-        elif right_alias == from_alias:
-            target_alias = left_alias
-        else:
-            return None
-
-        for join in current_joins:
-            if isinstance(join.this, exp.Table):
-                alias = join.this.alias or join.this.name
-                if alias == target_alias:
-                    return join
-        return None
-
-    def _remove_intersects_from_where(
-        self, query: exp.Select, intersects: Intersects
-    ) -> None:
-        """Remove the INTERSECTS predicate from the WHERE clause."""
-        where = query.args.get("where")
-        if not where:
-            return
-        remainder = _strip_intersects(where.this, intersects)
-        if remainder is None:
-            query.set("where", None)
-        else:
-            query.set("where", exp.Where(this=remainder))
-
-    def _get_columns(self, table_name: str) -> tuple[str, str, str]:
-        """Return (chrom, start, end) column names for a table."""
-        table = self.tables.get(table_name)
-        if table:
-            return (table.chrom_col, table.start_col, table.end_col)
-        return (DEFAULT_CHROM_COL, DEFAULT_START_COL, DEFAULT_END_COL)
-
-    def _build_overlap(
-        self,
-        from_alias: str,
-        join_alias: str,
-        from_cols: tuple[str, str, str],
-        join_cols: tuple[str, str, str],
-    ) -> exp.And:
-        """Build ``from.start < join.end AND from.end > join.start``."""
-        return exp.And(
-            this=exp.LT(
-                this=exp.column(from_cols[1], table=from_alias, quoted=True),
-                expression=exp.column(join_cols[2], table=join_alias, quoted=True),
-            ),
-            expression=exp.GT(
-                this=exp.column(from_cols[2], table=from_alias, quoted=True),
-                expression=exp.column(join_cols[1], table=join_alias, quoted=True),
-            ),
-        )
-
-    def _find_table_name_for_alias(self, query: exp.Select, alias: str) -> str:
-        """Resolve an alias to its underlying table name."""
-        from_table = query.args["from_"].this
-        if isinstance(from_table, exp.Table):
-            if (from_table.alias or from_table.name) == alias:
-                return from_table.name
-        for join in query.args.get("joins") or []:
-            if isinstance(join.this, exp.Table):
-                t = join.this
-                if (t.alias or t.name) == alias:
-                    return t.name
-        return alias  # fallback: alias == table name
-
-    def _build_key_only_bins_select(
-        self, table_name: str, cols: tuple[str, str, str]
-    ) -> exp.Select:
-        """Build the binned-key SELECT for *table_name*.
-
-        Emits ``SELECT chrom, start, end, UNNEST(range(...)) AS __giql_bin
-        FROM <table_name>``.
-        """
-        chrom, start, end = cols
-        low, high = self._build_bin_range(start, end)
-
-        range_fn = exp.Anonymous(this="range", expressions=[low, high])
-        unnest_fn = exp.Anonymous(this="UNNEST", expressions=[range_fn])
-        bin_alias = exp.Alias(
-            this=unnest_fn,
-            alias=exp.Identifier(this="__giql_bin"),
-        )
-
-        select = exp.Select()
-        select.select(exp.column(chrom, quoted=True), copy=False)
-        select.select(exp.column(start, quoted=True), append=True, copy=False)
-        select.select(exp.column(end, quoted=True), append=True, copy=False)
-        select.select(bin_alias, append=True, copy=False)
-        select.from_(exp.Table(this=exp.Identifier(this=table_name)), copy=False)
-        return select
-
-    def _ensure_key_binned(
-        self,
-        query: exp.Select,
-        table_name: str,
-        key_binned: dict[str, str],
-    ) -> str:
-        """Ensure a key-only bins CTE exists for *table_name*; return its name."""
-        if table_name in key_binned:
-            return key_binned[table_name]
-
-        cte_name = f"__giql_{table_name}_bins"
-        cols = self._get_columns(table_name)
-        cte = exp.CTE(
-            this=self._build_key_only_bins_select(table_name, cols),
-            alias=exp.TableAlias(this=exp.Identifier(this=cte_name)),
-        )
-
-        existing_with = query.args.get("with_")
-        if existing_with:
-            existing_with.append("expressions", cte)
-        else:
-            query.set("with_", exp.With(expressions=[cte]))
-
-        key_binned[table_name] = cte_name
-        return cte_name
-
-
 class IntersectsDuckDBIEJoinTransformer:
     """Transform column-to-column INTERSECTS joins into a DuckDB IEJoin pattern.
 
@@ -743,7 +255,7 @@ class IntersectsDuckDBIEJoinTransformer:
     - ``a.*`` / ``b.*`` star projections expand to the genomic columns
       declared by the corresponding :class:`~giql.table.Table` config
       (chrom / start / end, plus strand when set). This narrows the result
-      schema relative to the binned plan, which delegates star expansion
+      schema relative to the generic naive-predicate plan, which delegates star expansion
       to DuckDB and projects every base-table column. Users with additional
       non-genomic columns should list them explicitly.
     - ``SEMI JOIN`` and ``ANTI JOIN`` outputs are left-side only. Any
@@ -775,16 +287,16 @@ class IntersectsDuckDBIEJoinTransformer:
         exactly ``SELECT <qualified projections> FROM <registered base
         table> [JOIN <registered base table>] {ON|WHERE} <one
         column-to-column INTERSECTS>`` with no other top-level clause.
-        Everything else returns ``None`` so the binned plan handles it.
+        Everything else returns ``None`` so the generic naive-predicate plan handles it.
         """
         if not isinstance(query, exp.Select):
             return None
 
-        # Top-level WITH (CTEs) still falls back to the binned plan.
+        # Top-level WITH (CTEs) still falls back to the naive-predicate plan.
         # ORDER BY / LIMIT / OFFSET / DISTINCT / GROUP BY / HAVING ride
         # on the outer SELECT wrapper. ``DISTINCT ON (...)`` is the one
         # DISTINCT variant we don't try to translate — it would interact
-        # with the outer alias rewrite in ways the binned plan handles
+        # with the outer alias rewrite in ways the naive-predicate plan handles
         # for free.
         if query.args.get("with_"):
             return None
@@ -839,8 +351,8 @@ class IntersectsDuckDBIEJoinTransformer:
 
         # NATURAL needs schema introspection we don't have at transpile time
         # (Table configs only expose chrom/start/end/strand; user columns
-        # like name/score are invisible). The binned plan defers to DuckDB,
-        # which does see the schema, so falling back IS the optimal plan.
+        # like name/score are invisible). The naive-predicate plan defers to
+        # DuckDB, which does see the schema, so falling back IS the optimal plan.
         if the_join.args.get("method"):
             return None
 
@@ -856,8 +368,9 @@ class IntersectsDuckDBIEJoinTransformer:
 
         # INNER (the default), CROSS (functionally equivalent to INNER once
         # the chromosome partition is in place), SEMI, and ANTI all engage.
-        # Everything else falls back so the binned plan can preserve its
-        # semantics (e.g. RIGHT / FULL outer joins).
+        # Everything else falls back so the naive-predicate plan can preserve its
+        # semantics (e.g. RIGHT / FULL outer joins, which the naive overlap
+        # predicate expresses as a plain outer ``ON`` condition).
         kind_str = the_join.args.get("kind")
         if kind_str and kind_str.upper() not in ("INNER", "CROSS", "SEMI", "ANTI"):
             return None
@@ -875,7 +388,7 @@ class IntersectsDuckDBIEJoinTransformer:
         # ``name`` and would be interpolated as an empty identifier into
         # broken SQL. (A CTE-named operand is already handled by the
         # ``with_`` guard above; an unregistered base table is fine — the
-        # dialect uses default columns just like the binned path does.)
+        # dialect uses default columns just like the naive-predicate path does.)
         if not from_table.name:
             return None
         join_table = the_join.this
@@ -889,13 +402,14 @@ class IntersectsDuckDBIEJoinTransformer:
         if sides.left_user_alias == sides.right_user_alias:
             # Same alias on both sides of the INTERSECTS — the inner subquery
             # would alias the same underlying relation as both "a" and "b",
-            # which the binned plan handles correctly via its bridge CTE.
+            # which the naive-predicate plan renders correctly in place (no
+            # inner subquery, so no ambiguous double-alias).
             return None
 
         # Compare fully-qualified identifiers (catalog/db/name) so two
         # distinct same-named tables in different schemas are not treated
         # as a self-join. Same qualified identifier still falls back so the
-        # binned plan handles the legitimate self-join shape.
+        # naive-predicate plan handles the legitimate self-join shape.
         if self._qualified_table_ident(sides.left_table) == self._qualified_table_ident(
             sides.right_table
         ):
@@ -950,7 +464,7 @@ class IntersectsDuckDBIEJoinTransformer:
     def _classify_extras(
         extras: list[exp.Expression],
     ) -> Literal["inline", "fallback"]:
-        """Return ``"fallback"`` if any extra has a shape the binned plan must handle.
+        """Return ``"fallback"`` if any extra needs the naive-predicate plan.
 
         Soft-fallback shapes: an INTERSECTS still embedded in the residual
         (because :func:`_strip_intersects` couldn't peel an OR/NOT/Paren
@@ -1124,7 +638,7 @@ class IntersectsDuckDBIEJoinTransformer:
         Note: :func:`_strip_intersects` only descends ``exp.And``. Predicates
         whose AND tree wraps the INTERSECTS in ``exp.Or`` / ``exp.Not`` /
         ``exp.Paren`` surface here with the INTERSECTS still embedded;
-        :meth:`_classify_extras` then routes them to the binned plan, while
+        :meth:`_classify_extras` then routes them to the naive-predicate plan, while
         :meth:`_validate_extra_qualifiers` enforces qualifier rules for the
         remaining inlinable residuals.
         """
@@ -1192,7 +706,7 @@ class IntersectsDuckDBIEJoinTransformer:
         """Render the multi-statement DuckDB IEJoin SQL string for *query*.
 
         Returns ``None`` when a soft-fallback condition fires (the residual
-        of the join carries a shape the binned plan can handle but the
+        of the join carries a shape the naive-predicate plan can handle but the
         dialect cannot inline, or a single-column USING references a column
         that is not both tables' ``chrom_col``). Raises
         :class:`_UnqualifiedProjectionError` when a user-mistake condition
@@ -1206,7 +720,7 @@ class IntersectsDuckDBIEJoinTransformer:
             self._validate_extra_qualifiers(extras, sides)
 
         # Tables registry is keyed by the bare table name; an unregistered
-        # table uses default column names like the binned plan does.
+        # table uses default column names like the naive-predicate plan does.
         l_table = self.tables.get(sides.left_table.name)
         r_table = self.tables.get(sides.right_table.name)
         l_chrom = l_table.chrom_col if l_table else DEFAULT_CHROM_COL
@@ -1220,8 +734,8 @@ class IntersectsDuckDBIEJoinTransformer:
         # single-column USING). The dialect's per-chromosome partition IS
         # the equi-join that USING(<chrom_col>) requests; if the USING
         # column doesn't match both tables' chrom_col (or the chrom_cols
-        # diverge), fall back so the binned plan emits the proper
-        # equi-join.
+        # diverge), fall back so the naive-predicate plan preserves the
+        # USING equi-join for the engine to resolve.
         using_cols = the_join.args.get("using") or []
         if using_cols:
             using_name = _normalize_alias(using_cols[0].name)
@@ -1627,7 +1141,7 @@ class IntersectsDuckDBIEJoinTransformer:
                     "dialect='duckdb' does not support window aggregates "
                     f"in the SELECT list; got {target.sql()!r}. Either "
                     "drop the OVER (...) clause, or omit dialect='duckdb' "
-                    "to use the binned plan."
+                    "to use the generic naive-predicate plan."
                 )
             if isinstance(target, exp.Filter):
                 raise _UnqualifiedProjectionError(
@@ -1644,14 +1158,14 @@ class IntersectsDuckDBIEJoinTransformer:
                     "dialect='duckdb' does not support scalar subqueries in "
                     f"the SELECT list; got {target.sql()!r}. Either rewrite "
                     "without the subquery, or omit dialect='duckdb' to use "
-                    "the binned plan."
+                    "the generic naive-predicate plan."
                 )
             if target.find(exp.Window) is not None:
                 raise _UnqualifiedProjectionError(
                     "dialect='duckdb' does not support window aggregates "
                     f"in the SELECT list; got {target.sql()!r}. Either "
                     "drop the OVER (...) clause, or omit dialect='duckdb' "
-                    "to use the binned plan."
+                    "to use the generic naive-predicate plan."
                 )
             if target.find(exp.Filter) is not None:
                 raise _UnqualifiedProjectionError(

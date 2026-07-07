@@ -3,7 +3,6 @@
 A SQL dialect for genomic range queries.
 """
 
-from giql.constants import DEFAULT_BIN_SIZE
 from giql.expander import REGISTRY
 from giql.expander import ExpanderRegistry
 from giql.expander import ExpansionContext
@@ -22,7 +21,6 @@ __version__ = "0.1.0"
 
 
 __all__ = [
-    "DEFAULT_BIN_SIZE",
     "Table",
     "transpile",
     # Extension hook: register custom targets and override operator expanders.

@@ -21,7 +21,6 @@ from giql.resolver import resolve_operator_refs
 from giql.table import Table
 from giql.table import Tables
 from giql.targets import resolve_target
-from giql.transformer import IntersectsBinnedJoinTransformer
 from giql.transformer import IntersectsDuckDBIEJoinTransformer
 
 
@@ -31,7 +30,6 @@ def transpile(
     tables: list[str | Table] | None = None,
     *,
     dialect: Literal["datafusion"] | None = None,
-    intersects_bin_size: int | None = None,
 ) -> str: ...
 
 
@@ -41,22 +39,19 @@ def transpile(
     tables: list[str | Table] | None = None,
     *,
     dialect: Literal["duckdb"],
-    intersects_bin_size: None = None,
 ) -> str: ...
 
 
 # Widened overload for arbitrary custom-target dialect names (the registry
-# plugin hub). It intentionally subsumes the ``Literal["duckdb"]`` overload
-# above, so the static ``dialect="duckdb"`` + ``intersects_bin_size`` guard is not
-# enforced for a ``str``-typed dialect; that combination still raises ``ValueError``
-# at runtime (see the body).
+# plugin hub). It subsumes the ``Literal["duckdb"]`` overload above, which is
+# kept deliberately so editors still autocomplete the ``"duckdb"`` literal
+# (symmetric with the ``Literal["datafusion"]`` overload).
 @overload
 def transpile(
     giql: str,
     tables: list[str | Table] | None = None,
     *,
     dialect: str,
-    intersects_bin_size: int | None = None,
 ) -> str: ...
 
 
@@ -65,7 +60,6 @@ def transpile(
     tables: list[str | Table] | None = None,
     *,
     dialect: str | None = None,
-    intersects_bin_size: int | None = None,
 ) -> str:
     """Transpile a GIQL query to SQL.
 
@@ -94,12 +88,17 @@ def transpile(
         ``INTERSECTS`` joins (INNER, SEMI, or ANTI) are transpiled into a
         per-chromosome dynamic-SQL pattern (``SET VARIABLE`` +
         ``query(getvariable(...))``) that DuckDB plans through its
-        range-join family (``IE_JOIN`` / ``PIECEWISE_MERGE_JOIN``); this
-        IEJoin plan is mutually exclusive with ``intersects_bin_size``.
-        ``"datafusion"`` and ``None`` use the generic binned equi-join path
-        and accept ``intersects_bin_size``. Hard-error projection shapes
-        raise ``ValueError`` at transpile time; see the performance guide
-        for the full enumeration. The target's capabilities also choose the
+        range-join family (``IE_JOIN`` / ``PIECEWISE_MERGE_JOIN``). Shapes
+        the IEJoin path declines (LEFT/RIGHT/FULL joins, self-joins, multiple
+        INTERSECTS, extra predicates, non-base operands, 3+ tables) fall
+        through to the generic naive overlap predicate. ``"datafusion"`` and
+        ``None`` always emit that naive predicate — a plain
+        ``ON a.chrom = b.chrom AND a.start < b.end AND b.start < a.end``
+        condition the engine's own optimizer plans as a range join — for both
+        inner and outer column-to-column INTERSECTS joins. Hard-error
+        projection shapes raise ``ValueError`` at transpile time; see the
+        performance guide for the full enumeration. The target's capabilities
+        also choose the
         coordinate-canonicalization emit form for a non-canonically-encoded
         table: ``"duckdb"`` emits ``SELECT * REPLACE (...)``, while the generic
         (``None``) and ``"datafusion"`` targets emit the portable
@@ -108,12 +107,6 @@ def transpile(
         DuckDB — pass ``dialect="duckdb"`` for DuckDB-runnable output. Tables in
         the canonical 0-based half-open encoding are unaffected (they emit
         portable SQL on every target).
-    intersects_bin_size : int | None
-        Bin size for INTERSECTS equi-join optimization. When a query
-        contains a full-table column-to-column INTERSECTS join, the
-        transpiler rewrites it as a binned equi-join for performance.
-        Defaults to 10,000 if not specified. Cannot be combined with
-        ``dialect="duckdb"``.
 
     Returns
     -------
@@ -123,9 +116,8 @@ def transpile(
     Raises
     ------
     ValueError
-        If the query cannot be parsed or transpiled, if ``dialect`` is
-        unknown, or if ``dialect="duckdb"`` and ``intersects_bin_size``
-        are both set.
+        If the query cannot be parsed or transpiled, or if ``dialect`` is
+        unknown.
 
     Examples
     --------
@@ -151,13 +143,13 @@ def transpile(
             ],
         )
 
-    Binned equi-join with custom bin size::
+    Column-to-column INTERSECTS join (naive overlap predicate; inner or
+    outer, planned as a range join by the target engine)::
 
         sql = transpile(
             "SELECT a.*, b.* FROM peaks a JOIN genes b "
             "ON a.interval INTERSECTS b.interval",
             tables=["peaks", "genes"],
-            intersects_bin_size=100000,
         )
 
     DuckDB IEJoin dialect (column-to-column INNER/SEMI/ANTI JOIN only;
@@ -172,84 +164,56 @@ def transpile(
     """
     target = resolve_target(dialect)
     uses_iejoin = target.capabilities.range_join_strategy == "iejoin"
-    if uses_iejoin and intersects_bin_size is not None:
-        raise ValueError(
-            f"intersects_bin_size has no effect with dialect={target.name!r}; "
-            f"the {target.name} target uses an IEJoin per-partition plan instead "
-            "of the binned equi-join. Pass one or the other, not both."
-        )
 
-    # The INTERSECTS join-rewrite override (governs the three uses below).
+    # The INTERSECTS join-rewrite override.
     #
     # A *target-specific* ``(target, Intersects)`` registry entry — the public
     # extension hook, matched by ``ExpanderRegistry.has_override`` — takes over the
     # INTERSECTS join rewrite entirely. ``has_override`` deliberately matches only
     # an *exact non-generic* entry: the built-in ``(GenericTarget(), Intersects)``
-    # predicate expander is NOT a join-strategy override (it only renders the
-    # residual / literal-range predicates the join transformers leave behind), so
-    # it must not disable the join rewrite. When an override is present, all three
-    # built-in join paths below are bypassed for that target so the INTERSECTS node
-    # flows untouched into ExpandOperators, which dispatches it to that expander:
-    #   1. ``intersects_bin_size`` is rejected — it only configures the built-in
-    #      binned transformer the override supersedes (rejected here, parallel to
-    #      the iejoin rejection above, rather than silently dropped);
-    #   2. the DuckDB IEJoin short-circuit is skipped (the registry-deferral the
-    #      IEJoin early-return used to preclude, #141);
-    #   3. the binned-join transformer is skipped.
+    # predicate expander is NOT a join-strategy override — it renders the naive
+    # overlap predicate that IS the generic join plan, so it must not disable the
+    # IEJoin short-circuit. When an override is present, the DuckDB IEJoin
+    # short-circuit below is skipped (the registry-deferral the IEJoin early-return
+    # used to preclude, #141) so the INTERSECTS node flows untouched into
+    # ExpandOperators, which dispatches it to that expander.
     target_overrides_intersects = REGISTRY.has_override(target, Intersects)
-    if target_overrides_intersects and intersects_bin_size is not None:
-        raise ValueError(
-            "intersects_bin_size has no effect when a target-specific "
-            f"(target={target.name!r}, Intersects) expander is registered; that "
-            "expander supersedes the built-in binned join transformer the bin "
-            "size configures. Pass one or the other, not both."
-        )
 
     tables_container = _build_tables(tables)
 
     with _reraise_as_value_error("Parse error", query=giql):
         ast = parse_one(giql, dialect=GIQLDialect)
 
-    # The column-to-column INTERSECTS *join* rewrites are capability-gated
-    # pre-pass transformers (epic #137, #141): the target's
-    # ``range_join_strategy`` selects the DuckDB IEJoin plan or the generic
-    # binned equi-join. They run on the raw parsed AST (before resolution, which
-    # rewrites the genomic column name) and consume a column-to-column INTERSECTS
-    # *join* so it never reaches the predicate expander; a literal-range or
-    # residual column-to-column INTERSECTS *predicate* survives to pass 3.
-    # ``target_overrides_intersects`` (computed above) gates whether these
-    # built-in join paths run — see its definition for the override rationale.
-
-    # Falls back to the binned plan for unsupported shapes — see
-    # IntersectsDuckDBIEJoinTransformer.transform_to_sql for the complete
-    # fallback set. The IEJoin transformer emits a whole-query string, so when it
-    # produces output it must short-circuit the AST pipeline. This never skips an
-    # INTERSECTS that pass 3 would expand: ``_classify_extras`` forces the binned
-    # fallback (returning None here) for any query carrying a residual INTERSECTS
-    # alongside the join, so a query the IEJoin transformer accepts has no residual
-    # INTERSECTS left for the expander. (A residual CONTAINS/WITHIN/ANY beside an
-    # IEJoin is a pre-existing IEJoin limitation that errors identically on main.)
+    # The DuckDB IEJoin plan is the one remaining capability-gated pre-pass
+    # transformer (epic #137, #141): ``range_join_strategy == "iejoin"`` selects
+    # it. It runs on the raw parsed AST (before resolution, which rewrites the
+    # genomic column name) and consumes a column-to-column INTERSECTS *join* so it
+    # never reaches the predicate expander. Every other target — and every shape
+    # the IEJoin path declines — leaves the column-to-column INTERSECTS in place
+    # for pass 3, where the ``(GenericTarget, Intersects)`` expander renders it as
+    # the naive overlap predicate (a plain ``ON`` condition the engine plans as a
+    # range join). Literal-range and residual INTERSECTS predicates flow the same
+    # way. ``target_overrides_intersects`` (computed above) gates whether the
+    # IEJoin path runs — see its definition for the override rationale.
+    #
+    # The IEJoin transformer emits a whole-query string, so when it produces output
+    # it must short-circuit the AST pipeline. This never skips an INTERSECTS that
+    # pass 3 would expand: ``_classify_extras`` declines (returning None here) for
+    # any query carrying a residual INTERSECTS alongside the join, so a query the
+    # IEJoin transformer accepts has no residual INTERSECTS left for the expander.
+    # (A residual CONTAINS/WITHIN/ANY beside an IEJoin is a pre-existing IEJoin
+    # limitation that errors identically on main.)
+    #
+    # CLUSTER and MERGE used to be rewritten as pre-pass transformers too; they are
+    # now expanded in pass 3 (ExpandOperators) by giql.expanders.cluster / .merge
+    # (#144), and the generic binned equi-join was dropped in favor of the naive
+    # predicate (#167).
     if uses_iejoin and not target_overrides_intersects:
         duckdb_transformer = IntersectsDuckDBIEJoinTransformer(tables_container)
         with _reraise_as_value_error("Transformation error"):
             duckdb_sql = duckdb_transformer.transform_to_sql(ast)
         if duckdb_sql is not None:
             return duckdb_sql
-
-    with _reraise_as_value_error("Transformation error"):
-        # Reaching here with an iejoin target means the IEJoin transformer
-        # declined the query (returned None) and fell back to the binned plan,
-        # exactly as before. ``intersects_bin_size`` is rejected up front for
-        # iejoin targets, so the binned transformer always sees its default there.
-        #
-        # CLUSTER and MERGE used to be rewritten here too; they are now expanded in
-        # pass 3 (ExpandOperators) by giql.expanders.cluster / .merge (#144).
-        if not target_overrides_intersects:
-            intersects_transformer = IntersectsBinnedJoinTransformer(
-                tables_container,
-                bin_size=intersects_bin_size,
-            )
-            ast = intersects_transformer.transform(ast)
 
     # Pass 1 of the normalization pipeline (epic #114): attach resolution
     # metadata to every GIQL operator slot ahead of generation. Every migrated

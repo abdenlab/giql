@@ -11,8 +11,9 @@ For the non-join operators (DISTANCE, CONTAINS, WITHIN, ANY/ALL, CLUSTER,
 MERGE) the generic and datafusion targets emit byte-identical SQL and both run
 on the DataFusion engine, so the load-bearing comparison there is
 DataFusion-vs-DuckDB. Only the column-to-column INTERSECTS join produces
-genuinely divergent SQL across targets (the DuckDB IEJoin vs. the binned
-equi-join).
+genuinely divergent SQL across targets (the DuckDB IEJoin vs. the naive overlap
+predicate the generic / datafusion targets emit; an outer INTERSECTS join, which
+the IEJoin path declines, runs the naive predicate on every target — #167).
 
 NEAREST's correlated expansion is capability-driven (#142): lateral-capable
 targets (generic, duckdb) emit the portable ``LATERAL`` subquery, while
@@ -102,7 +103,8 @@ class TestCrossTargetOracleIntersects:
             other intervals do not overlap or sit on another chromosome.
         When:
             A column-to-column INTERSECTS join runs — generic/datafusion via the
-            binned equi-join on DataFusion and duckdb via the IEJoin on DuckDB.
+            naive overlap predicate on DataFusion and duckdb via the IEJoin on
+            DuckDB.
         Then:
             Every target should return the single overlapping pair, proving the
             structurally different DuckDB IEJoin SQL yields identical rows.
@@ -122,6 +124,43 @@ class TestCrossTargetOracleIntersects:
                 ("chr2", 9000, 9500),
             ],
             expected=[("chr1", 100, 300)],
+        )
+
+    def test_column_to_column_left_join_preserves_unmatched(self, cross_target_oracle):
+        """Test an outer INTERSECTS join agrees across all targets, keeping NULLs.
+
+        Given:
+            Peaks and genes where one peak overlaps a gene on chr1, one peak on
+            chr1 has no overlap, and one peak sits on chr2 with no overlapping gene.
+        When:
+            A column-to-column ``LEFT JOIN ... ON ... INTERSECTS`` runs. The DuckDB
+            IEJoin path declines outer joins, so every target — generic, datafusion,
+            and duckdb — evaluates the naive overlap predicate as a plain outer
+            ``ON`` condition.
+        Then:
+            Every target should return the matched pair plus both unmatched left
+            rows with a NULL right column, proving the naive predicate gives correct
+            outer-join semantics identically on every engine (#167).
+        """
+        # Arrange / Act / Assert
+        cross_target_oracle(
+            "SELECT a.chrom, a.start AS a_start, b.start AS b_start "
+            "FROM peaks a LEFT JOIN genes b ON a.interval INTERSECTS b.interval",
+            peaks=[
+                ("chr1", 100, 500),
+                ("chr1", 1000, 2000),
+                ("chr2", 100, 500),
+            ],
+            genes=[
+                ("chr1", 300, 600),
+                ("chr1", 5000, 6000),
+                ("chr2", 9000, 9500),
+            ],
+            expected=[
+                ("chr1", 100, 300),
+                ("chr1", 1000, None),
+                ("chr2", 100, None),
+            ],
         )
 
 
@@ -1485,20 +1524,18 @@ class TestCrossTargetOracleDataShapes:
             expected=[(100, 200)],
         )
 
-    def test_large_interval_spanning_bins_is_not_duplicated(self, cross_target_oracle):
-        """Test two intervals sharing many bins yield one pair, not duplicates.
+    def test_large_interval_span_is_not_duplicated(self, cross_target_oracle):
+        """Test a large-span overlap yields exactly one pair, not duplicates.
 
         Given:
-            A peak (0-500000) and a gene (5000-495000) that co-occupy dozens of
-            shared join bins (the bin width is 10000), so the binned candidate
-            join produces the same pair once per shared bin.
+            A peak (0-500000) and a gene (5000-495000) whose long spans overlap.
         When:
             A column-to-column INTERSECTS join runs on every target.
         Then:
-            Every target should return exactly one pair — the binned join's
-            ``SELECT DISTINCT`` must collapse the duplicate cross-bin candidates,
-            and the oracle's multiset compare is what would catch a stripped
-            DISTINCT as a duplicate-row regression.
+            Every target should return exactly one pair — the naive overlap
+            predicate is a plain ``ON`` condition with no cross-bin fan-out to
+            deduplicate, so a single pair is emitted; the oracle's multiset compare
+            is what would catch a spurious duplicate row as a regression.
         """
         # Arrange / Act / Assert
         cross_target_oracle(

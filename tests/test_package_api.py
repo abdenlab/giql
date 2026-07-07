@@ -13,7 +13,7 @@ import pytest
 import giql
 
 #: The extension-hook symbols exported from ``giql.__all__`` (beyond the
-#: pre-existing ``DEFAULT_BIN_SIZE`` / ``Table`` / ``transpile``): #146 added the
+#: pre-existing ``Table`` / ``transpile``): #146 added the
 #: registry/target hooks, #160 added ``StatementFinalizer`` (the query-level seam
 #: type, root-exported so an extension author has a public type to annotate a
 #: finalizer against — the seam has no ``Protocol`` form the way ``expand`` has

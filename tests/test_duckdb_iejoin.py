@@ -111,8 +111,8 @@ _EXPECTED_OVERLAPS_PEAKS_GENES = [
 class TestTranspileDuckDBIEJoinSQLStructure:
     """SQL-shape and routing assertions for the DuckDB IEJoin dialect path."""
 
-    def test_transpile_should_keep_binned_path_when_dialect_is_none(self):
-        """Test that omitting ``dialect`` keeps the generic binned plan.
+    def test_transpile_should_keep_naive_predicate_path_when_dialect_is_none(self):
+        """Test that omitting ``dialect`` keeps the generic naive-predicate plan.
 
         Given:
             A column-to-column INTERSECTS JOIN.
@@ -136,10 +136,10 @@ class TestTranspileDuckDBIEJoinSQLStructure:
         assert "SET VARIABLE" not in sql.upper()
         assert "getvariable" not in sql
 
-    def test_transpile_should_route_outer_join_intersects_to_binned_plan_when_dialect_is_duckdb(
+    def test_transpile_should_route_outer_join_intersects_to_naive_predicate_plan_when_dialect_is_duckdb(
         self, conn
     ):
-        """Test that LEFT JOIN INTERSECTS falls back to the binned plan.
+        """Test that LEFT JOIN INTERSECTS falls back to the naive-predicate plan.
 
         Given:
             A LEFT JOIN INTERSECTS query and a peak with no overlapping
@@ -149,7 +149,7 @@ class TestTranspileDuckDBIEJoinSQLStructure:
         Then:
             It should preserve LEFT JOIN semantics by returning the
             unmatched peak with NULL gene columns (which the IEJoin path
-            cannot do, so the binned fallback fires).
+            cannot do, so the naive-predicate fallback fires).
         """
         # Arrange
         _make_table(
@@ -193,7 +193,7 @@ class TestTranspileDuckDBIEJoinSQLStructure:
             The dialect path should inline the extra predicate into each
             per-chromosome subquery's join ON, excluding the pair that
             violates the predicate and including the pair that satisfies
-            it. (Note: the binned plan still drops this predicate per
+            it. (Note: the naive-predicate plan still drops this predicate per
             bug #94; the dialect now sidesteps that bug entirely by
             handling extras directly.)
         """
@@ -357,10 +357,10 @@ class TestTranspileDuckDBIEJoinSQLStructure:
         assert "SET VARIABLE __giql_iejoin_" in sql
         assert rows == [(300,)]
 
-    def test_transpile_should_route_to_binned_plan_when_extra_predicate_uses_or(
+    def test_transpile_should_route_to_naive_predicate_plan_when_extra_predicate_uses_or(
         self,
     ):
-        """Test that an OR-wrapped extra predicate falls back to the binned plan.
+        """Test that an OR-wrapped predicate falls back to the naive-predicate plan.
 
         Given:
             A column-to-column INTERSECTS INNER join whose JOIN ON wraps
@@ -370,7 +370,7 @@ class TestTranspileDuckDBIEJoinSQLStructure:
         Then:
             The dialect cannot peel the INTERSECTS out of the OR tree
             (only AND-conjunctions are decomposable safely) and routes
-            to the binned plan.
+            to the naive-predicate plan.
         """
         # Arrange & act
         sql = transpile(
@@ -396,7 +396,7 @@ class TestTranspileDuckDBIEJoinSQLStructure:
             The query is transpiled with ``dialect='duckdb'``.
         Then:
             The dialect cannot safely scope the predicate to either
-            ``a`` or ``b`` inside the inner subquery, and the binned
+            ``a`` or ``b`` inside the inner subquery, and the naive-predicate
             plan can't handle it correctly either (issue #94), so the
             dialect raises with an actionable message naming the join's
             valid aliases instead of silently routing to a broken plan.
@@ -574,36 +574,6 @@ class TestTranspileDuckDBIEJoinSQLStructure:
         with pytest.raises(ValueError, match="qualified"):
             transpile(query, tables=["peaks", "genes"], dialect="duckdb")
 
-    def test_transpile_should_raise_when_dialect_duckdb_and_intersects_bin_size_are_both_set(
-        self,
-    ):
-        """Test that ``dialect='duckdb'`` and ``intersects_bin_size`` are mutually exclusive.
-
-        Given:
-            ``dialect='duckdb'`` together with a non-None
-            ``intersects_bin_size``.
-        When:
-            ``transpile`` is called.
-        Then:
-            It should raise ``ValueError`` whose message names
-            ``intersects_bin_size``.
-        """
-        # Arrange
-        query = """
-            SELECT a.chrom, a.start, b.start
-            FROM peaks a
-            JOIN genes b ON a.interval INTERSECTS b.interval
-            """
-
-        # Act & assert
-        with pytest.raises(ValueError, match="intersects_bin_size"):
-            transpile(
-                query,
-                tables=["peaks", "genes"],
-                dialect="duckdb",
-                intersects_bin_size=50000,
-            )
-
     # --- DI-001..DI-009: new SQL-structure / contract tests --------------
 
     def test_transpile_should_be_round_trip_executable_when_dialect_is_duckdb(
@@ -640,10 +610,10 @@ class TestTranspileDuckDBIEJoinSQLStructure:
         # Assert
         assert rows == sorted(_EXPECTED_OVERLAPS_PEAKS_GENES)
 
-    def test_transpile_should_route_to_binned_plan_when_query_has_two_intersects_predicates(
+    def test_transpile_should_route_to_naive_predicate_plan_when_query_has_two_intersects_predicates(
         self, conn
     ):
-        """Test that two INTERSECTS predicates fall back to the binned plan.
+        """Test that two INTERSECTS predicates fall back to the naive-predicate plan.
 
         Given:
             A three-table chained INTERSECTS query (peaks JOIN genes
@@ -652,7 +622,7 @@ class TestTranspileDuckDBIEJoinSQLStructure:
             The query is transpiled both with ``dialect='duckdb'`` and
             with ``dialect=None`` and both are executed.
         Then:
-            The DuckDB-dialect path should fall back to the binned plan
+            The DuckDB-dialect path should fall back to the naive-predicate plan
             and return the same multiset of triply-overlapping rows as the
             default ``dialect=None`` path.
         """
@@ -696,7 +666,7 @@ class TestTranspileDuckDBIEJoinSQLStructure:
         When:
             The query is transpiled with ``dialect='duckdb'`` and executed.
         Then:
-            It should fall back to the binned plan and return the
+            It should fall back to the naive-predicate plan and return the
             self-overlap pairs without raising.
         """
         # Arrange
@@ -1263,10 +1233,8 @@ class TestTranspileDuckDBIEJoinSQLStructure:
         assert "DISTINCT" in sql.upper()
         assert rows == [("chr1", 2)]
 
-    def test_query_should_match_binned_plan_avg_aggregate_when_dialect_is_duckdb(
-        self, conn
-    ):
-        """Test that AVG aggregate matches the binned plan executing-side.
+    def test_query_should_match_naive_predicate_plan_for_avg_aggregate(self, conn):
+        """Test that AVG aggregate matches the naive-predicate plan executing-side.
 
         Given:
             Two chromosomes with multiple overlap pairs and varied
@@ -1274,7 +1242,7 @@ class TestTranspileDuckDBIEJoinSQLStructure:
             average.
         When:
             A ``SELECT a.chrom, AVG(a.score) ... GROUP BY a.chrom`` is
-            transpiled under both ``dialect=None`` (binned plan) and
+            transpiled under both ``dialect=None`` (naive-predicate plan) and
             ``dialect='duckdb'`` and executed.
         Then:
             Both plans return the same per-chrom averages (compared via
@@ -1393,7 +1361,7 @@ class TestTranspileDuckDBIEJoinSQLStructure:
                 dialect="duckdb",
             )
 
-    def test_transpile_should_route_to_binned_plan_when_outer_join_intersects_lives_in_where(
+    def test_transpile_should_route_to_naive_predicate_plan_when_outer_join_intersects_lives_in_where(
         self,
     ):
         """Test that LEFT JOIN ON TRUE WHERE INTERSECTS falls back.
@@ -1420,7 +1388,7 @@ class TestTranspileDuckDBIEJoinSQLStructure:
         # Assert
         assert "SET VARIABLE __giql_iejoin_" not in sql
 
-    def test_transpile_should_route_to_binned_plan_when_full_outer_join_intersects_lives_in_where(
+    def test_transpile_should_route_to_naive_predicate_plan_when_full_outer_join_intersects_lives_in_where(
         self,
     ):
         """Test that FULL OUTER JOIN ... WHERE INTERSECTS falls back.
@@ -1431,7 +1399,7 @@ class TestTranspileDuckDBIEJoinSQLStructure:
         When:
             ``transpile`` is called with ``dialect='duckdb'``.
         Then:
-            The dialect must not engage; the binned plan handles the
+            The dialect must not engage; the naive-predicate plan handles the
             outer-join semantics.
         """
         # Arrange & act
@@ -1446,7 +1414,7 @@ class TestTranspileDuckDBIEJoinSQLStructure:
         # Assert
         assert "SET VARIABLE __giql_iejoin_" not in sql
 
-    def test_transpile_should_route_to_binned_plan_when_extra_predicate_contains_window_function(
+    def test_transpile_should_route_to_naive_predicate_plan_when_extra_predicate_contains_window_function(
         self,
     ):
         """Test that window functions inside extras force a fallback.
@@ -1460,7 +1428,7 @@ class TestTranspileDuckDBIEJoinSQLStructure:
             ``transpile`` is called with ``dialect='duckdb'``.
         Then:
             The dialect must reject the residual and route to the
-            binned plan (rather than emit SQL that DuckDB rejects at
+            naive-predicate plan (rather than emit SQL that DuckDB rejects at
             runtime).
         """
         # Arrange & act
@@ -1564,21 +1532,21 @@ class TestTranspileDuckDBIEJoinSQLStructure:
             "expression" in message or "arithmetic" in message
         )
 
-    def test_transpile_should_route_to_binned_plan_when_modifier_contains_subquery(
+    def test_transpile_should_route_to_naive_predicate_plan_when_modifier_has_subquery(
         self,
     ):
-        """Test that a subquery inside ORDER BY routes to the binned plan.
+        """Test that a subquery inside ORDER BY routes to the naive-predicate plan.
 
         Given:
             A query whose ``ORDER BY`` clause embeds a scalar subquery
             (``(SELECT MAX(score) FROM peaks)``). The modifier rewriter
             is not scope-aware, so the dialect should fall back to the
-            binned plan rather than rewrite column refs inside the
+            naive-predicate plan rather than rewrite column refs inside the
             nested scope.
         When:
             ``transpile`` is called with ``dialect='duckdb'``.
         Then:
-            The dialect must not engage; the binned plan handles the
+            The dialect must not engage; the naive-predicate plan handles the
             subquery natively.
         """
         # Arrange & act
@@ -1593,10 +1561,10 @@ class TestTranspileDuckDBIEJoinSQLStructure:
         # Assert
         assert "SET VARIABLE __giql_iejoin_" not in sql
 
-    def test_transpile_should_route_to_binned_plan_when_modifier_contains_exists(
+    def test_transpile_should_route_to_naive_predicate_plan_when_modifier_has_exists(
         self,
     ):
-        """Test that EXISTS inside ORDER BY routes to the binned plan.
+        """Test that EXISTS inside ORDER BY routes to the naive-predicate plan.
 
         Given:
             A query whose ``ORDER BY`` clause embeds an ``EXISTS
@@ -1622,10 +1590,10 @@ class TestTranspileDuckDBIEJoinSQLStructure:
         # Assert
         assert "SET VARIABLE __giql_iejoin_" not in sql
 
-    def test_transpile_should_route_to_binned_plan_when_having_contains_subquery(
+    def test_transpile_should_route_to_naive_predicate_plan_when_having_has_subquery(
         self,
     ):
-        """Test that a subquery inside HAVING routes to the binned plan.
+        """Test that a subquery inside HAVING routes to the naive-predicate plan.
 
         Given:
             A query whose HAVING compares against a scalar subquery
@@ -1713,8 +1681,10 @@ class TestTranspileDuckDBIEJoinSQLStructure:
             )
         assert "subquer" in str(excinfo.value).lower()
 
-    def test_transpile_should_route_to_binned_plan_when_query_has_distinct_on(self):
-        """Test that DISTINCT ON (...) falls back to the binned plan.
+    def test_transpile_should_route_to_naive_predicate_plan_when_query_has_distinct_on(
+        self,
+    ):
+        """Test that DISTINCT ON (...) falls back to the naive-predicate plan.
 
         Given:
             A column-to-column INTERSECTS INNER join with a
@@ -1736,10 +1706,10 @@ class TestTranspileDuckDBIEJoinSQLStructure:
         # Assert
         assert "SET VARIABLE __giql_iejoin_" not in sql
 
-    def test_transpile_should_route_to_binned_plan_and_execute_correctly_when_query_has_top_level_with_clause(
+    def test_transpile_should_route_to_naive_predicate_plan_and_execute_correctly_when_query_has_top_level_with_clause(
         self, conn
     ):
-        """Test that a top-level WITH clause falls back to the binned plan.
+        """Test that a top-level WITH clause falls back to the naive-predicate plan.
 
         Given:
             A query whose INTERSECTS join is wrapped in a top-level
@@ -1748,7 +1718,7 @@ class TestTranspileDuckDBIEJoinSQLStructure:
         When:
             The query is transpiled with ``dialect='duckdb'`` and executed.
         Then:
-            It should fall back to the binned plan, preserve the CTE
+            It should fall back to the naive-predicate plan, preserve the CTE
             definition, and execute against the materialized CTE. The
             dialect path would otherwise emit a `FROM big` referencing
             a missing table.
@@ -1779,10 +1749,10 @@ class TestTranspileDuckDBIEJoinSQLStructure:
         assert "SET VARIABLE __giql_iejoin_" not in sql
         assert rows == [(100,)]
 
-    def test_transpile_should_route_to_binned_plan_when_query_has_three_table_cross_join(
+    def test_transpile_should_route_to_naive_predicate_plan_when_three_table_cross_join(
         self, conn
     ):
-        """Test that a 3-table implicit cross-join falls back to the binned plan.
+        """Test that a 3-table cross-join falls back to the naive-predicate plan.
 
         Given:
             A 3-table comma-style FROM clause where the INTERSECTS
@@ -1791,7 +1761,7 @@ class TestTranspileDuckDBIEJoinSQLStructure:
         When:
             The query is transpiled with ``dialect='duckdb'`` and executed.
         Then:
-            It should fall back to the binned plan and return a row
+            It should fall back to the naive-predicate plan and return a row
             count consistent with the full 3-way join — the dialect
             path would silently drop the third table.
         """
@@ -1830,7 +1800,7 @@ class TestTranspileDuckDBIEJoinSQLStructure:
         # = 2 result rows. The dialect path would emit only 1 (extra dropped).
         assert len(rows) == 2
 
-    def test_transpile_should_route_to_binned_plan_when_join_target_is_a_giql_operator(
+    def test_transpile_should_route_to_naive_predicate_plan_when_target_is_giql_operator(
         self, conn
     ):
         """Test that a GIQL table-function in JOIN position falls back.
@@ -1845,7 +1815,7 @@ class TestTranspileDuckDBIEJoinSQLStructure:
         Then:
             The dialect path should return ``None`` (fall back) and the
             emitted SQL should contain no ``SET VARIABLE`` block and no
-            empty ``FROM `` interpolation. (Execution is the binned
+            empty ``FROM `` interpolation. (Execution is the naive-predicate
             path's domain and is covered by DISJOIN's own tests.)
         """
         # Arrange & Act
@@ -2287,10 +2257,10 @@ class TestTranspileDuckDBIEJoinSQLStructure:
         assert "IS NULL" in set_part
         assert "IS NULL" not in outer_part
 
-    def test_transpile_should_route_to_binned_plan_when_paren_wraps_intersects(
+    def test_transpile_should_route_to_naive_predicate_plan_when_paren_wraps_intersects(
         self,
     ):
-        """Test that a Paren-wrapped INTERSECTS routes to the binned plan.
+        """Test that a Paren-wrapped INTERSECTS routes to the naive-predicate plan.
 
         Given:
             A join ``ON (a.interval INTERSECTS b.interval) AND a.score > 0``
@@ -2301,7 +2271,7 @@ class TestTranspileDuckDBIEJoinSQLStructure:
             The dialect only decomposes AND-conjunctions when stripping
             the INTERSECTS out of a join clause; a paren wrapper leaves
             the INTERSECTS embedded in the residual and the dialect
-            must fall back to the binned plan.
+            must fall back to the naive-predicate plan.
         """
         # Arrange & act
         sql = transpile(
@@ -2315,7 +2285,7 @@ class TestTranspileDuckDBIEJoinSQLStructure:
         # Assert
         assert "SET VARIABLE __giql_iejoin_" not in sql
 
-    def test_transpile_should_route_to_binned_plan_when_residual_contains_subquery(
+    def test_transpile_should_route_to_naive_predicate_plan_when_residual_has_subquery(
         self,
     ):
         """Test that a subquery in the residual predicate forces a fallback.
@@ -2328,7 +2298,7 @@ class TestTranspileDuckDBIEJoinSQLStructure:
         Then:
             The dialect's residual-safety check rejects predicates
             containing a subquery, so the query falls back to the
-            binned plan.
+            naive-predicate plan.
         """
         # Arrange & act
         sql = transpile(
@@ -2509,10 +2479,10 @@ class TestTranspileDuckDBIEJoinSQLStructure:
         assert "a.start" not in outer_select
         assert "a.end" not in outer_select
 
-    def test_transpile_should_route_right_outer_join_intersects_to_binned_plan_when_dialect_is_duckdb(
+    def test_transpile_should_route_right_outer_join_intersects_to_naive_predicate_plan_when_dialect_is_duckdb(
         self,
     ):
-        """Test that ``RIGHT JOIN ... INTERSECTS`` falls back to the binned plan.
+        """Test that ``RIGHT JOIN INTERSECTS`` falls back to the naive-predicate plan.
 
         Given:
             A query with a ``RIGHT JOIN`` whose ON contains a
@@ -2521,7 +2491,7 @@ class TestTranspileDuckDBIEJoinSQLStructure:
             ``transpile`` is called with ``dialect='duckdb'``.
         Then:
             ``_has_outer_join_intersects`` should detect the
-            outer-join side and route to the binned plan.
+            outer-join side and route to the naive-predicate plan.
         """
         # Arrange & act
         sql = transpile(
@@ -2534,10 +2504,10 @@ class TestTranspileDuckDBIEJoinSQLStructure:
         # Assert
         assert "SET VARIABLE __giql_iejoin_" not in sql
 
-    def test_transpile_should_route_to_binned_plan_when_join_target_is_subquery(
+    def test_transpile_should_route_to_naive_predicate_plan_when_join_target_is_subquery(
         self,
     ):
-        """Test that a subquery JOIN target routes to the binned plan.
+        """Test that a subquery JOIN target routes to the naive-predicate plan.
 
         Given:
             A query whose JOIN target is a parenthesised subquery,
@@ -2547,7 +2517,7 @@ class TestTranspileDuckDBIEJoinSQLStructure:
             ``transpile`` is called with ``dialect='duckdb'``.
         Then:
             The dialect's "must be a base table" gate should fire and
-            route to the binned plan.
+            route to the naive-predicate plan.
         """
         # Arrange & act
         sql = transpile(
@@ -2638,8 +2608,10 @@ class TestTranspileDuckDBIEJoinSQLStructure:
         assert isinstance(excinfo.value, ValueError)
         assert "qualified" in str(excinfo.value)
 
-    def test_transpile_should_fall_back_to_binned_plan_when_join_is_natural(self):
-        """Test that NATURAL JOIN falls back to the binned plan.
+    def test_transpile_should_fall_back_to_naive_predicate_plan_when_join_is_natural(
+        self,
+    ):
+        """Test that NATURAL JOIN falls back to the naive-predicate plan.
 
         Given:
             A query joining two tables with ``NATURAL JOIN`` and an
@@ -2689,7 +2661,7 @@ class TestTranspileDuckDBIEJoinSQLStructure:
         assert "SET VARIABLE __giql_iejoin_" in sql
 
     def test_transpile_should_fall_back_when_using_join_targets_non_chrom_column(self):
-        """Test that ``USING(<non-chrom>)`` falls back to the binned plan.
+        """Test that ``USING(<non-chrom>)`` falls back to the naive-predicate plan.
 
         Given:
             A query with ``USING(strand)`` plus INTERSECTS — the partition
@@ -2697,7 +2669,7 @@ class TestTranspileDuckDBIEJoinSQLStructure:
         When:
             ``transpile`` is called with ``dialect='duckdb'``.
         Then:
-            It should fall back to the binned plan (no
+            It should fall back to the naive-predicate plan (no
             ``SET VARIABLE __giql_iejoin_`` block).
         """
         # Arrange
@@ -2720,7 +2692,7 @@ class TestTranspileDuckDBIEJoinSQLStructure:
         When:
             ``transpile`` is called with ``dialect='duckdb'``.
         Then:
-            It should fall back to the binned plan (multi-column USING
+            It should fall back to the naive-predicate plan (multi-column USING
             inline support is a documented follow-up).
         """
         # Arrange
@@ -2775,7 +2747,7 @@ class TestTranspileDuckDBIEJoinSQLStructure:
         When:
             ``transpile`` is called with ``dialect='duckdb'``.
         Then:
-            It should fall back to the binned plan.
+            It should fall back to the naive-predicate plan.
         """
         # Arrange
         query = (
@@ -2801,7 +2773,7 @@ class TestTranspileDuckDBIEJoinSQLStructure:
         When:
             ``transpile`` is called with ``dialect='duckdb'``.
         Then:
-            It should fall back to the binned plan.
+            It should fall back to the naive-predicate plan.
         """
         # Arrange
         query = (
@@ -3079,16 +3051,16 @@ class TestTranspileDuckDBIEJoinExecution:
         # Assert
         assert rows == []
 
-    def test_query_should_match_binned_plan_results_when_executed_on_duckdb(
+    def test_query_should_match_naive_predicate_plan_results_when_executed_on_duckdb(
         self, peaks_genes
     ):
-        """Test that the binned plan and the IEJoin path agree on results.
+        """Test that the naive-predicate plan and the IEJoin path agree on results.
 
         Given:
             The ``peaks_genes`` fixture and a column-to-column
             INTERSECTS INNER JOIN.
         When:
-            The query is transpiled both with ``dialect=None`` (binned
+            The query is transpiled both with ``dialect=None`` (naive-predicate
             plan) and with ``dialect='duckdb'`` (IEJoin path) and both
             are executed.
         Then:
@@ -3102,15 +3074,15 @@ class TestTranspileDuckDBIEJoinExecution:
             FROM peaks a
             JOIN genes b ON a.interval INTERSECTS b.interval
             """
-        binned_sql = transpile(query, tables=["peaks", "genes"])
+        generic_sql = transpile(query, tables=["peaks", "genes"])
         duckdb_sql = transpile(query, tables=["peaks", "genes"], dialect="duckdb")
 
         # Act
-        binned_rows = sorted(peaks_genes.execute(binned_sql).fetchall())
+        generic_rows = sorted(peaks_genes.execute(generic_sql).fetchall())
         duckdb_rows = sorted(peaks_genes.execute(duckdb_sql).fetchall())
 
         # Assert
-        assert binned_rows == duckdb_rows
+        assert generic_rows == duckdb_rows
         assert duckdb_rows == sorted(_EXPECTED_OVERLAPS_PEAKS_GENES)
 
     def test_query_should_handle_chrom_with_single_quote_in_name(self, conn):
@@ -3650,7 +3622,7 @@ class TestTranspileDuckDBIEJoinExecution:
             executed.
         Then:
             The unmatched peak should appear in the result with NULL
-            gene columns (the IEJoin path falls back to the binned plan
+            gene columns (the IEJoin path falls back to the naive-predicate plan
             for outer joins).
         """
         # Arrange
@@ -4471,7 +4443,7 @@ class TestTranspileDuckDBIEJoinExecution:
             ("1based", "closed"),
         ],
     )
-    def test_query_should_match_binned_plan_for_coordinate_system_combinations(
+    def test_query_should_match_naive_predicate_plan_for_coordinate_system_combinations(
         self, conn, coordinate_system, interval_type
     ):
         """Test cross-plan equivalence across all 4 coord-system × interval-type combos.
@@ -4481,7 +4453,7 @@ class TestTranspileDuckDBIEJoinExecution:
             depend on how endpoints are interpreted.
         When:
             The same logical query is transpiled twice — once with
-            ``dialect=None`` (binned plan) and once with
+            ``dialect=None`` (naive-predicate plan) and once with
             ``dialect="duckdb"`` — under each of the 4
             ``(coordinate_system, interval_type)`` combinations.
         Then:
@@ -4655,8 +4627,10 @@ class TestTranspileDuckDBIEJoinExecution:
             max_size=6,
         ),
     )
-    def test_query_should_match_binned_plan_for_random_inputs(self, conn, peaks, genes):
-        """Test that the binned plan and the IEJoin path agree on random inputs.
+    def test_query_should_match_naive_predicate_plan_for_random_inputs(
+        self, conn, peaks, genes
+    ):
+        """Test that the naive-predicate plan and the IEJoin path agree on random inputs.
 
         Given:
             A Hypothesis-generated pair of small interval lists.
@@ -4726,7 +4700,7 @@ class TestTranspileDuckDBIEJoinExecution:
         ),
         score_threshold=st.integers(min_value=0, max_value=50),
     )
-    def test_query_should_match_binned_plan_when_where_group_count_order_combined(
+    def test_query_should_match_naive_predicate_plan_when_where_group_order_combined(
         self, conn, peaks, genes, score_threshold
     ):
         """Test cross-plan equivalence with extras, GROUP BY, and ORDER BY.
@@ -4867,7 +4841,7 @@ class TestTranspileDuckDBIEJoinExecution:
         ),
         threshold=st.integers(min_value=0, max_value=50),
     )
-    def test_query_should_match_binned_plan_for_random_extra_where_predicates(
+    def test_query_should_match_naive_predicate_plan_for_random_extra_where_predicates(
         self, conn, peaks, genes, predicate_kind, threshold
     ):
         """Test cross-plan equivalence under random WHERE extras.
@@ -4957,7 +4931,7 @@ class TestTranspileDuckDBIEJoinExecution:
             ]
         ),
     )
-    def test_query_should_match_binned_plan_for_random_group_by_aggregates(
+    def test_query_should_match_naive_predicate_plan_for_random_group_by_aggregates(
         self, conn, peaks, genes, aggregate_kind
     ):
         """Test cross-plan equivalence for GROUP BY + random aggregate.
@@ -5050,7 +5024,7 @@ class TestTranspileDuckDBIEJoinExecution:
         # exercised against both plans.
         limit=st.integers(min_value=0, max_value=10),
     )
-    def test_query_should_match_binned_plan_for_full_composite_query(
+    def test_query_should_match_naive_predicate_plan_for_full_composite_query(
         self, conn, peaks, genes, score_threshold, having_min, limit
     ):
         """Test cross-plan equivalence under the full Tier 1 composition.
@@ -5146,8 +5120,8 @@ class TestTranspileDuckDBIEJoinExecution:
         # Assert
         assert plain_rows == using_rows
 
-    def test_query_should_match_binned_plan_for_mixed_case_aliases(self, conn):
-        """Test that mixed-case aliases under the dialect match the binned plan.
+    def test_query_should_match_naive_predicate_plan_for_mixed_case_aliases(self, conn):
+        """Test that mixed-case aliases under the dialect match the naive-predicate plan.
 
         Given:
             The shared peaks_genes fixture loaded onto ``conn`` and a
@@ -5190,7 +5164,9 @@ class TestTranspileDuckDBIEJoinExecution:
         # Assert
         assert rows_default == rows_duckdb
 
-    def test_query_should_preserve_rows_from_left_only_chromosomes_when_join_is_anti(self, conn):
+    def test_query_should_preserve_rows_from_left_only_chromosomes_when_join_is_anti(
+        self, conn
+    ):
         """Test that ANTI JOIN preserves left-only chromosomes (C1b regression).
 
         Given:
@@ -5332,16 +5308,16 @@ class TestTranspileDuckDBIEJoinExecution:
             max_size=6,
         ),
     )
-    def test_query_should_match_binned_plan_for_semi_join_random_inputs(
+    def test_query_should_match_naive_predicate_plan_for_semi_join_random_inputs(
         self, conn, peaks, genes
     ):
-        """Test that SEMI JOIN under the dialect matches the binned plan.
+        """Test that SEMI JOIN under the dialect matches the naive-predicate plan.
 
         Given:
             A Hypothesis-generated pair of small interval lists.
         When:
             The same SEMI JOIN INTERSECTS query is transpiled with
-            ``dialect=None`` (binned) and ``dialect='duckdb'`` and
+            ``dialect=None`` (naive predicate) and ``dialect='duckdb'`` and
             executed.
         Then:
             Both plans should return the same multiset of distinct
@@ -5448,26 +5424,84 @@ class TestTranspileDuckDBIEJoinExecution:
         # Assert
         assert sql_rows == expected
 
-    # NOTE: a `test_query_should_match_binned_plan_for_anti_join_random_inputs`
-    # would also be desirable, but the binned plan currently returns the
-    # WRONG result for ANTI JOIN when the right table is empty (it drops
-    # all left rows, where ANTI semantics demands that every left row
-    # passes). The dialect IS correct for that case — covered by
-    # ``test_query_should_preserve_rows_from_left_only_chromosomes_when_join_is_anti`` and
-    # ``test_query_should_match_python_native_anti_overlap_for_random_inputs``
-    # — so cross-plan parity for ANTI is not a useful contract until the
-    # binned plan's ANTI handling is fixed in a follow-up.
+    @settings(
+        max_examples=25,
+        deadline=None,
+        suppress_health_check=[HealthCheck.function_scoped_fixture],
+    )
+    @given(
+        peaks=st.lists(
+            st.tuples(
+                st.sampled_from(["chr1", "chr2"]),
+                st.integers(min_value=0, max_value=100),
+                st.integers(min_value=1, max_value=30),
+            ),
+            min_size=0,
+            max_size=6,
+        ),
+        genes=st.lists(
+            st.tuples(
+                st.sampled_from(["chr1", "chr2"]),
+                st.integers(min_value=0, max_value=100),
+                st.integers(min_value=1, max_value=30),
+            ),
+            min_size=0,
+            max_size=6,
+        ),
+    )
+    def test_query_should_match_naive_predicate_plan_for_anti_join_random_inputs(
+        self, conn, peaks, genes
+    ):
+        """Test that ANTI JOIN under the dialect matches the naive-predicate plan.
+
+        Given:
+            A Hypothesis-generated pair of small interval lists.
+        When:
+            The same ANTI JOIN INTERSECTS query is transpiled with
+            ``dialect=None`` (naive predicate) and ``dialect='duckdb'``
+            and executed.
+        Then:
+            Both plans should return the same multiset of distinct left
+            rows, including left rows on chromosomes absent from the
+            right table and every left row when the right table is empty
+            (standard ``ANTI JOIN ... ON <predicate>`` semantics).
+        """
+        # Arrange
+        peak_rows = [(c, s, s + length) for (c, s, length) in peaks]
+        gene_rows = [(c, s, s + length) for (c, s, length) in genes]
+        conn.execute("DROP TABLE IF EXISTS peaks")
+        conn.execute("DROP TABLE IF EXISTS genes")
+        conn.execute(
+            'CREATE TABLE peaks (chrom VARCHAR, "start" INTEGER, "end" INTEGER)'
+        )
+        if peak_rows:
+            conn.executemany("INSERT INTO peaks VALUES (?, ?, ?)", peak_rows)
+        conn.execute(
+            'CREATE TABLE genes (chrom VARCHAR, "start" INTEGER, "end" INTEGER)'
+        )
+        if gene_rows:
+            conn.executemany("INSERT INTO genes VALUES (?, ?, ?)", gene_rows)
+        query = (
+            "SELECT a.chrom, a.start, a.end "
+            "FROM peaks a "
+            "ANTI JOIN genes b ON a.interval INTERSECTS b.interval"
+        )
+        sql_default = transpile(query, tables=["peaks", "genes"])
+        sql_duckdb = transpile(query, tables=["peaks", "genes"], dialect="duckdb")
+
+        # Act
+        rows_default = sorted(set(conn.execute(sql_default).fetchall()))
+        rows_duckdb = sorted(set(conn.execute(sql_duckdb).fetchall()))
+
+        # Assert
+        assert rows_default == rows_duckdb
 
 
 class TestTranspileDuckDBIEJoinKwargs:
-    """Tests for the ``dialect`` / ``intersects_bin_size`` kwarg surface.
+    """Tests for the ``dialect`` kwarg surface.
 
-    Covers the ``@overload`` pair on :func:`giql.transpile.transpile`, the
-    mutual-exclusivity validation between ``dialect`` and
-    ``intersects_bin_size``, the unknown-dialect error, and one
-    behavioral regression — running ``intersects_bin_size`` with
-    ``dialect`` omitted — that verifies adding the dialect kwarg did not
-    perturb the binned plan.
+    Covers the ``@overload`` set on :func:`giql.transpile.transpile`, the
+    ``dialect=None``-equals-omitted equivalence, and the unknown-dialect error.
     """
 
     def test_transpile_should_match_default_when_dialect_none_is_explicit(self):
@@ -5495,38 +5529,6 @@ class TestTranspileDuckDBIEJoinKwargs:
         # Assert
         assert sql_omitted == sql_explicit_none
 
-    def test_transpile_should_accept_intersects_bin_size_when_dialect_is_omitted(
-        self, conn
-    ):
-        """Test that ``intersects_bin_size`` works when ``dialect`` is omitted.
-
-        Given:
-            A column-to-column INTERSECTS JOIN.
-        When:
-            ``transpile`` is called with ``intersects_bin_size=50000`` and
-            no ``dialect`` and the resulting SQL is executed.
-        Then:
-            It should return the correct overlapping rows.
-        """
-        # Arrange
-        _make_table(conn, "peaks", [("chr1", 100, 200, "p", 0, "+")])
-        _make_table(conn, "genes", [("chr1", 150, 250, "g", 0, "+")])
-        sql = transpile(
-            """
-            SELECT a.chrom AS a_chrom, a.start AS a_start, b.start AS b_start
-            FROM peaks a
-            JOIN genes b ON a.interval INTERSECTS b.interval
-            """,
-            tables=["peaks", "genes"],
-            intersects_bin_size=50000,
-        )
-
-        # Act
-        rows = sorted(conn.execute(sql).fetchall())
-
-        # Assert
-        assert rows == [("chr1", 100, 150)]
-
     def test_transpile_should_echo_offending_value_in_unknown_dialect_error(self):
         """Test that the unknown-dialect error names the offending value.
 
@@ -5547,34 +5549,3 @@ class TestTranspileDuckDBIEJoinKwargs:
         message = str(excinfo.value)
         assert "Unknown dialect" in message
         assert "'postgres'" in message
-
-    def test_transpile_should_mention_both_kwargs_in_mutex_error_message(self):
-        """Test that the mutex error names both ``intersects_bin_size`` and ``duckdb``.
-
-        Given:
-            ``dialect='duckdb'`` together with a non-None
-            ``intersects_bin_size``.
-        When:
-            ``transpile`` is called.
-        Then:
-            It should raise ``ValueError`` whose message mentions both
-            ``intersects_bin_size`` and ``duckdb``.
-        """
-        # Arrange
-        query = """
-            SELECT a.chrom, a.start, b.start
-            FROM peaks a
-            JOIN genes b ON a.interval INTERSECTS b.interval
-            """
-
-        # Act & assert
-        with pytest.raises(ValueError) as excinfo:
-            transpile(
-                query,
-                tables=["peaks", "genes"],
-                dialect="duckdb",
-                intersects_bin_size=50000,
-            )
-        message = str(excinfo.value)
-        assert "intersects_bin_size" in message
-        assert "duckdb" in message

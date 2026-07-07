@@ -1009,8 +1009,8 @@ class TestResolvePredicateColumns:
         """Test that a column-to-column predicate resolves both operands.
 
         Given:
-            A column-to-column WITHIN joining two aliased tables (a shape the
-            binned-join transformer leaves untouched, so it reaches the pass).
+            A column-to-column WITHIN joining two aliased tables (a shape no
+            pre-pass join rewrite touches, so it reaches the pass).
         When:
             Running the resolve pass.
         Then:

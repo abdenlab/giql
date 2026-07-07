@@ -1,9 +1,10 @@
 """DataFusion execution smoke tests for the ``dialect="datafusion"`` target.
 
 Issue #132 makes ``"datafusion"`` a routing key in :func:`giql.transpile`. The
-existing ``TestBinnedJoinDataFusion`` suite proves the binned plan executes on
-DataFusion, but always with ``dialect`` omitted (``None``); nothing executes the
-``dialect="datafusion"`` entry point end-to-end. These tests close that seam.
+existing INTERSECTS-join DataFusion suite proves the naive overlap predicate
+executes on DataFusion, but always with ``dialect`` omitted (``None``); nothing
+executes the ``dialect="datafusion"`` entry point end-to-end. These tests close
+that seam.
 """
 
 import pytest
@@ -85,21 +86,19 @@ class TestDataFusionTargetExecution:
         # Assert
         assert len(df) == 0
 
-    def test_intersects_join_with_bin_size_dedups_across_bins(self, datafusion_ctx):
-        """Test the datafusion-routed binned join honours an explicit bin size.
+    def test_intersects_join_dedups_across_overlaps(self, datafusion_ctx):
+        """Test the datafusion-routed INTERSECTS join returns each overlap once.
 
         Given:
             Two interval tables in a real DataFusion context whose single
-            intervals overlap and span several bins under a small bin size.
+            intervals overlap.
         When:
             A column-to-column INTERSECTS join is transpiled with
-            dialect="datafusion" and an explicit intersects_bin_size, then
-            executed.
+            dialect="datafusion" and executed.
         Then:
-            It should be accepted (not rejected as it would be for duckdb),
-            the explicit bin size should reach emission (changing the SQL vs
-            the default), and execution should return exactly one row — the
-            overlap, de-duplicated by the pairs CTE across the shared bins.
+            The naive overlap predicate should be accepted (not rejected as
+            it would be for duckdb) and execution should return exactly one
+            row — the overlap, without duplicates.
         """
         # Arrange
         ctx = datafusion_ctx(
@@ -111,19 +110,12 @@ class TestDataFusionTargetExecution:
             'b.start AS b_start, b."end" AS b_end '
             "FROM peaks a JOIN genes b ON a.interval INTERSECTS b.interval"
         )
-        default_sql = transpile(query, tables=["peaks", "genes"], dialect="datafusion")
-        sized_sql = transpile(
-            query,
-            tables=["peaks", "genes"],
-            dialect="datafusion",
-            intersects_bin_size=1000,
-        )
+        sql = transpile(query, tables=["peaks", "genes"], dialect="datafusion")
 
         # Act
-        df = ctx.sql(sized_sql).to_pandas()
+        df = ctx.sql(sql).to_pandas()
 
         # Assert
-        assert sized_sql != default_sql  # the explicit bin size reaches emission
-        assert len(df) == 1  # de-duplicated across the shared bins
+        assert len(df) == 1  # the single overlap, without duplicates
         assert df.iloc[0]["start"] == 0
         assert df.iloc[0]["b_start"] == 500
