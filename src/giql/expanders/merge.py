@@ -250,6 +250,44 @@ def _transform_for_merge(
 
     group_by_cols.append(exp.column(CLUSTER_ID_COL))
 
+    # The columns the synthesized grouping exposes to the user's projection and GROUP
+    # BY: chrom, plus strand when stranded (the per-merge __giql_cluster_id is internal
+    # and never user-referenceable). Used below to reconcile the user's own projection
+    # and GROUP BY against MERGE's aggregation (#192).
+    grouping_keys = {chrom_col}
+    if stranded:
+        grouping_keys.add(strand_col)
+    # Every identifier comparison below folds case. SQL binds unquoted identifiers
+    # case-insensitively, so ``AS Start`` collides with the synthesized ``start`` and
+    # ``GROUP BY CHROM`` names the ``chrom`` grouping key. Folding both sides matches a
+    # case-variant rather than silently missing it — the safe direction, since a missed
+    # collision is silently-wrong output while an over-match merely fails loud (#192).
+    grouping_keys_folded = {key.lower() for key in grouping_keys}
+
+    # Reconcile the user's GROUP BY with MERGE's synthesized grouping. MERGE groups by
+    # chrom (and strand when stranded) plus its per-merge __giql_cluster_id, so a user
+    # GROUP BY over exactly those grouping-key columns is subsumed by it (the documented
+    # "merge by chromosome" shape). Anything else — another column, or an expression /
+    # ordinal MERGE cannot map to its grouping — was previously dropped silently,
+    # changing the result, so reject it loudly. Each item must be a *bare column*
+    # reference to a grouping key: an expression (GROUP BY UPPER(chrom)) or an ordinal
+    # (GROUP BY 1) is not an exp.Column, so it cannot be verified to name a grouping key
+    # and is rejected rather than honored-then-discarded (#192).
+    user_group = query.args.get("group")
+    if user_group is not None:
+        for item in user_group.expressions:
+            if (
+                not isinstance(item, exp.Column)
+                or item.name.lower() not in grouping_keys_folded
+            ):
+                raise ValueError(
+                    f"MERGE cannot honor GROUP BY {item.sql()}: MERGE groups rows by "
+                    "chrom (and strand when stranded) and its synthesized per-merge "
+                    "cluster id, so group only by a bare chrom (or strand) column "
+                    "reference alongside MERGE — not another column, an expression, or "
+                    "an ordinal, which it cannot faithfully honor."
+                )
+
     # Build SELECT expressions for merged intervals
     select_exprs = []
 
@@ -268,7 +306,18 @@ def _transform_for_merge(
         exp.alias_(exp.Max(this=exp.column(end_col, quoted=True)), end_col, quoted=False)
     )
 
-    # Process other columns from original SELECT
+    # The output-column names MERGE synthesizes: the grouping keys plus the aggregated
+    # ``start`` / ``end`` bounds. A user item may not silently collide with these. Folded
+    # for case-insensitive comparison, as grouping_keys_folded above.
+    synthesized_names_folded = {
+        name.lower() for name in (grouping_keys | {start_col, end_col})
+    }
+
+    # Process the other projection items. MERGE already projects the grouping keys and
+    # the MIN/MAX bounds and aggregates rows into one row per merged region, so each
+    # remaining item is reconciled against that grouping rather than copied verbatim —
+    # copying verbatim duplicated a grouping key the user also projected and, for a raw
+    # non-grouped column, emitted SQL the engine rejects (#192).
     for expression in query.expressions:
         # Skip the MERGE expression itself
         if isinstance(expression, GIQLMerge):
@@ -277,9 +326,67 @@ def _transform_for_merge(
             expression.this, GIQLMerge
         ):
             continue
-        # Include other columns (they should be aggregates or in GROUP BY)
-        else:
-            select_exprs.append(expression)
+
+        # A projected item is well-formed under MERGE's per-cluster GROUP BY only if
+        # every column it references *outside a grouping aggregate* is a grouping key.
+        # A column counts as ungrouped when no aggregate wraps it (a raw ``score``, or
+        # ``start`` in ``MAX(score) + start``) OR when the aggregate that wraps it is a
+        # *window* aggregate (``SUM(score) OVER (...)``): a window is evaluated after the
+        # GROUP BY and does not collapse the group, so its argument still has to be
+        # grouped. Fail loudly rather than emitting SQL the engine rejects (or that a
+        # lenient engine runs with an arbitrary-row value) (#192).
+        ungrouped = {
+            col.name.lower()
+            for col in expression.find_all(exp.Column)
+            if col.find_ancestor(exp.AggFunc) is None
+            or col.find_ancestor(exp.Window) is not None
+        }
+        if not ungrouped <= grouping_keys_folded:
+            raise ValueError(
+                "MERGE cannot project the non-aggregated column "
+                f"{', '.join(repr(c) for c in sorted(ungrouped - grouping_keys_folded))}"
+                f" in '{expression.sql()}': MERGE aggregates rows into one row per "
+                "merged region, so project only grouping columns (chrom, and "
+                "strand when stranded) and plain aggregates (e.g. COUNT(*)) "
+                "alongside MERGE."
+            )
+
+        out_name = expression.output_name
+        inner = expression.this if isinstance(expression, exp.Alias) else expression
+
+        # A grouping-key column MERGE already projects, under its own name (bare
+        # ``chrom`` or a no-op ``chrom AS chrom`` of the "merge by chromosome" shape):
+        # drop the duplicate rather than surfacing the column twice (#192).
+        if (
+            out_name.lower() in grouping_keys_folded
+            and isinstance(inner, exp.Column)
+            and inner.name.lower() == out_name.lower()
+        ):
+            continue
+
+        # Reject an item whose *output name* collides with a synthesized column (the
+        # aggregated ``start`` / ``end`` bounds, or a value aliased onto a grouping key
+        # such as ``chrom AS start``): emitting two columns of that name silently
+        # duplicates one, and for ``start`` / ``end`` hijacks the default
+        # ``ORDER BY "chrom", "start"``, returning rows in the wrong order. Apply this
+        # only to an explicit alias or a bare column, whose output name the engine emits
+        # verbatim; for any other unaliased expression (``CAST(chrom AS VARCHAR)``,
+        # ``chrom || ''``), ``output_name`` is a sqlglot heuristic that does NOT match
+        # the engine's generated label, so checking it there would falsely reject a
+        # well-formed projection over a grouping key. Fold case so an unquoted ``Start``
+        # is caught (it binds to the synthesized ``start``) (#192).
+        names_reliable = isinstance(expression, (exp.Alias, exp.Column))
+        if names_reliable and out_name.lower() in synthesized_names_folded:
+            raise ValueError(
+                f"MERGE cannot project a column named {out_name!r} alongside MERGE: it "
+                "collides with the chrom/start/end columns MERGE synthesizes for each "
+                "merged region — alias it to a different name."
+            )
+
+        # An aggregate over the merged rows (COUNT(*), AVG(score), ...) or a
+        # non-aggregate expression over only grouping-key columns (UPPER(chrom), a
+        # rename ``chrom AS c``): keep it — well-formed under the GROUP BY, no collision.
+        select_exprs.append(expression)
 
     # Build final query
     final_query = exp.Select()
@@ -297,6 +404,18 @@ def _transform_for_merge(
 
     # Add GROUP BY
     final_query.group_by(*group_by_cols, copy=False)
+
+    # Honor the user's HAVING over the merged output. MERGE aggregates rows into one row
+    # per merged region, so a HAVING filters those regions — ``HAVING COUNT(*) > 1``
+    # keeps only regions built from more than one input interval, resolving against the
+    # per-region GROUP BY above. The rewrite builds ``final_query`` fresh and transplant
+    # clears the original HAVING (a rebuilt root arg), so it must be re-attached here;
+    # omitting it silently dropped the clause and returned unfiltered rows (#192). An
+    # invalid HAVING (over a raw non-grouped column) surfaces a loud engine binder error,
+    # exactly as an unsupported ORDER BY does — never silently-wrong output.
+    user_having = query.args.get("having")
+    if user_having is not None:
+        final_query.set("having", user_having.copy())
 
     # ORDER BY: honor the user's ORDER BY over the merged output when present,
     # otherwise default to (chromosome, start) for deterministic output. MERGE

@@ -429,6 +429,35 @@ Notes
    :ref:`CLUSTER <cluster-operator>`, a per-row window over which a star *is*
    meaningful and supported.
 
+.. note::
+
+   **Projecting columns alongside** ``MERGE``. ``MERGE`` emits one row per merged
+   region and always projects the grouping keys (``chrom``, and ``strand`` when
+   ``stranded := true``) followed by ``MIN(start)`` / ``MAX(end)``. The other items in
+   a ``SELECT ..., MERGE(...)`` projection are reconciled against that grouping
+   (#192): an explicit grouping-key column (the ``chrom`` of the *Merge by Chromosome*
+   shape above) is emitted once, not duplicated; an aggregate (``COUNT(*)``,
+   ``AVG(score)``, ``STRING_AGG(name, ',')``) is computed per merged region; and an
+   expression over only grouping-key columns (``UPPER(chrom)``) is kept. A raw,
+   non-aggregated column that is neither a grouping key nor derived from one (e.g.
+   ``score``, or ``start`` within ``MAX(score) + start``) has no coherent value per
+   merged region and raises a ``ValueError`` — as does a *window* aggregate over such a
+   column (``SUM(score) OVER (...)``), since a window is evaluated after the grouping and
+   does not collapse it. An item whose output name collides with the ``chrom`` /
+   ``start`` / ``end`` columns ``MERGE`` synthesizes (e.g. ``chrom AS start``) also raises
+   rather than emitting two columns of that name — alias it to a distinct name instead.
+   The collision check folds case (``chrom AS Start`` raises too, since SQL binds the
+   unquoted alias onto ``start``), while an unaliased expression over a grouping key
+   (``CAST(chrom AS VARCHAR)``) is kept — its emitted column name is the expression, not a
+   bare grouping-key name. Likewise, a ``GROUP BY`` may name only the grouping-key columns
+   ``MERGE`` groups by, as a *bare column reference*: ``GROUP BY chrom`` is honored (it is
+   subsumed by the synthesized per-merge grouping), while ``GROUP BY`` over any other
+   column — or an expression (``GROUP BY UPPER(chrom)``) or ordinal (``GROUP BY 1``) that
+   ``MERGE`` cannot map to its grouping — raises a ``ValueError`` rather than being
+   silently discarded. A ``HAVING`` is honored against the per-merge grouping
+   (``HAVING COUNT(*) > 1`` keeps only regions built from more than one input interval)
+   rather than being dropped.
+
 Related Operators
 ~~~~~~~~~~~~~~~~~
 
