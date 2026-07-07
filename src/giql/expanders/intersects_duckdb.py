@@ -437,7 +437,9 @@ class IntersectsDuckDBIEJoinTransformer:
             return None
 
         # Extra predicates are inlined into each per-chromosome subquery's
-        # join ON (see :meth:`_build_sql`). Soft-fallback residuals (subquery,
+        # join ON, except WHERE residuals under a left-only (SEMI / ANTI) join,
+        # which :meth:`_build_sql` applies as an outer wrapper filter (#200).
+        # Soft-fallback residuals (subquery,
         # aggregate, window, or an INTERSECTS still wrapped in OR/NOT/Paren)
         # cause ``_build_sql`` to return None. User-mistake residuals
         # (unqualified or unknown-aliased columns, or columns with a
@@ -648,13 +650,25 @@ class IntersectsDuckDBIEJoinTransformer:
         self,
         query: exp.Select,
         intersects: Intersects,
-    ) -> list[exp.Expression]:
-        """Return the non-INTERSECTS predicate residuals from joins and WHERE.
+    ) -> tuple[list[exp.Expression], list[exp.Expression]]:
+        """Return the non-INTERSECTS residuals split by provenance.
 
         Walks the AND tree under each JOIN ON and the WHERE, strips the
-        target INTERSECTS node, and returns the residual predicates in
-        document order. An empty list means the query has no extras
-        beyond the target INTERSECTS.
+        target INTERSECTS node, and returns ``(on_residuals, where_residuals)``
+        in document order. ``on_residuals`` are the predicates that sat in a
+        ``JOIN ... ON`` alongside the INTERSECTS; ``where_residuals`` are the
+        predicates that sat in the top-level ``WHERE``. Both lists empty means
+        the query has no extras beyond the target INTERSECTS.
+
+        The split matters because the two sources are *not* interchangeable
+        for every join kind. An ON residual is a genuine join condition and is
+        correct to inline into the per-chromosome ON for INNER / SEMI / ANTI
+        alike. A WHERE residual is a post-join filter: inlining it into the ON
+        is only sound for INNER (where ``ON overlap WHERE r`` ≡ ``ON overlap
+        AND r``) and SEMI (a left-only ``r`` is invariant over the right side);
+        for ANTI it inverts the anti-join for rows failing ``r`` (#200). See
+        :meth:`_build_sql`, which routes WHERE residuals to an outer filter for
+        the left-only (SEMI / ANTI) shapes.
 
         Note: :func:`_strip_intersects` only descends ``exp.And``. Predicates
         whose AND tree wraps the INTERSECTS in ``exp.Or`` / ``exp.Not`` /
@@ -663,20 +677,21 @@ class IntersectsDuckDBIEJoinTransformer:
         :meth:`_validate_extra_qualifiers` enforces qualifier rules for the
         remaining inlinable residuals.
         """
-        residuals: list[exp.Expression] = []
+        on_residuals: list[exp.Expression] = []
         for join in query.args.get("joins") or []:
             on = join.args.get("on")
             if on is None:
                 continue
             residual = _strip_intersects(on, intersects)
             if residual is not None:
-                residuals.append(residual)
+                on_residuals.append(residual)
+        where_residuals: list[exp.Expression] = []
         where = query.args.get("where")
         if where:
             residual = _strip_intersects(where.this, intersects)
             if residual is not None:
-                residuals.append(residual)
-        return residuals
+                where_residuals.append(residual)
+        return on_residuals, where_residuals
 
     def _find_target_join(
         self, query: exp.Select
@@ -734,11 +749,27 @@ class IntersectsDuckDBIEJoinTransformer:
         fires; callers translating to the public surface wrap the raise to
         :class:`ValueError`.
         """
-        extras = self._extract_extra_predicates(query, intersects)
-        if extras and self._classify_extras(extras) == "fallback":
+        on_residuals, where_residuals = self._extract_extra_predicates(query, intersects)
+        all_residuals = on_residuals + where_residuals
+        if all_residuals and self._classify_extras(all_residuals) == "fallback":
             return None
-        if extras:
-            self._validate_extra_qualifiers(extras, sides)
+        if all_residuals:
+            self._validate_extra_qualifiers(all_residuals, sides)
+
+        # ON residuals are genuine join conditions and inline into the
+        # per-chromosome ON for every kind. WHERE residuals are post-join
+        # filters: inlining them into the ON is only sound for INNER (and the
+        # equivalent SEMI case), but inverts the anti-join for rows failing the
+        # residual under ANTI (#200). For the left-only shapes (SEMI / ANTI) we
+        # therefore layer WHERE residuals as an outer filter on the wrapper
+        # relation instead of folding them into the join. INNER keeps inlining
+        # them (byte-identical output, provably equivalent).
+        if sides.is_left_only_join:
+            inline_residuals = on_residuals
+            outer_where_residuals = where_residuals
+        else:
+            inline_residuals = on_residuals + where_residuals
+            outer_where_residuals = []
 
         # Tables registry is keyed by the bare table name; an unregistered
         # table uses default column names like the naive-predicate plan does.
@@ -777,6 +808,7 @@ class IntersectsDuckDBIEJoinTransformer:
             r_table,
             (l_chrom, l_start, l_end),
             (r_chrom, r_start, r_end),
+            outer_where_residuals,
         )
 
         # Per-call random token (full uuid4 hex = 128 bits) so the SET
@@ -822,7 +854,7 @@ class IntersectsDuckDBIEJoinTransformer:
             f"{l_start_expr} < {r_end_expr}",
             f"{l_end_expr} > {r_start_expr}",
         ]
-        for residual in extras:
+        for residual in inline_residuals:
             on_clause_predicates.append(
                 self._rewrite_refs_for_per_chrom_subquery(residual, sides)
             )
@@ -895,6 +927,21 @@ class IntersectsDuckDBIEJoinTransformer:
             f"FROM query(getvariable('{var_name}')) AS {wrapper_alias}"
         ]
 
+        # WHERE residuals for the left-only (SEMI / ANTI) shapes are applied
+        # here as a post-join filter on the wrapper relation, rewritten to the
+        # wrapper's inner-alias column names — never folded into the per-chrom
+        # ON, which would invert the anti-join for rows failing the residual
+        # (#200). Every referenced column was pre-allocated into the wrapper's
+        # projection list by :meth:`_resolve_projections`.
+        if outer_where_residuals:
+            where_sql = " AND ".join(
+                self._rewrite_refs_for_wrapper_relation(
+                    residual, projection_map, sides, "WHERE"
+                )
+                for residual in outer_where_residuals
+            )
+            outer_select_parts.append(f"WHERE {where_sql}")
+
         # The rewriter translates any ``a.col`` / ``b.col`` references in
         # the GROUP BY / HAVING / ORDER BY clauses to the wrapper
         # relation's inner-alias column names (``__giql_p<n>``), since
@@ -943,8 +990,16 @@ class IntersectsDuckDBIEJoinTransformer:
         r_table: Table | None,
         l_cols: tuple[str, str, str],
         r_cols: tuple[str, str, str],
+        outer_where_residuals: list[exp.Expression] | None = None,
     ) -> tuple[list[str], list[str], dict[tuple[str, str], str]]:
         """Resolve the SELECT list (and any modifier-referenced columns).
+
+        ``outer_where_residuals`` are the WHERE residuals that :meth:`_build_sql`
+        applies as an outer filter on the wrapper relation (the left-only
+        SEMI / ANTI shapes — #200). Their columns are pre-allocated into
+        ``inner_projections`` here so the wrapper exposes them even when they
+        appear only in the filter and not in the SELECT list. For INNER the
+        list is empty because those residuals inline into the per-chromosome ON.
 
         Returns ``(inner_projections, outer_projections, projection_map)``:
 
@@ -1062,6 +1117,18 @@ class IntersectsDuckDBIEJoinTransformer:
             if modifier_node is None:
                 continue
             for col in modifier_node.find_all(exp.Column):
+                col_table = _normalize_alias(col.table) if col.table else ""
+                if col_table in (l_alias, r_alias):
+                    reject_right_side_if_left_only(col_table, col.sql())
+                    allocate(col_table, col.name)
+
+        # Pre-allocate inner aliases for columns referenced in the WHERE
+        # residuals routed to the outer wrapper filter (SEMI / ANTI, #200), so
+        # the wrapper exposes them even when they appear only in the filter.
+        # A right-side reference is rejected here (the left-only outer SELECT
+        # cannot resolve it), matching the SELECT-list / modifier behavior.
+        for residual in outer_where_residuals or []:
+            for col in residual.find_all(exp.Column):
                 col_table = _normalize_alias(col.table) if col.table else ""
                 if col_table in (l_alias, r_alias):
                     reject_right_side_if_left_only(col_table, col.sql())
