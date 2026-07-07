@@ -48,6 +48,7 @@ from giql.expanders._genomic import GenomicColumns
 from giql.expanders._genomic import extract_stranded
 from giql.expanders._genomic import find_projected
 from giql.expanders._genomic import genomic_columns
+from giql.expanders._genomic import is_star_projection
 from giql.expanders._genomic import reject_cluster_merge_mix
 from giql.expanders._genomic import require_top_level_projection
 from giql.expanders._genomic import transplant
@@ -85,6 +86,7 @@ def expand_merge(node: GIQLMerge, ctx: ExpansionContext) -> exp.Expression:
         return node
     require_top_level_projection(select, node, GIQLMerge)
     reject_cluster_merge_mix(select)
+    _reject_star_projection(select)
     columns = genomic_columns(select, ctx.tables)
     # Build from a detached copy, then transplant onto the original SELECT to
     # preserve its identity (and rewrite a root SELECT without a parent to replace
@@ -120,6 +122,43 @@ def expand_merge(node: GIQLMerge, ctx: ExpansionContext) -> exp.Expression:
     if result is not select:
         select.replace(result)
     return node
+
+
+def _reject_star_projection(select: exp.Select) -> None:
+    """Raise if *select* projects a star alongside its MERGE. MERGE-specific guard.
+
+    MERGE is an aggregate whole-query rewrite: its output is one row per merged
+    region (``chrom``, ``MIN(start)``, ``MAX(end)``), so a star projected in the
+    same SELECT has no coherent meaning — it names the *pre-aggregation* input
+    columns of a relation the rewrite has already collapsed into ``__giql_clustered``
+    and grouped away. Left unguarded, a bare ``*`` re-surfaces those non-grouped,
+    non-aggregated columns under the synthesized ``GROUP BY`` and a qualified
+    ``rel.*`` dangles a table alias the outer aggregation no longer exposes — both
+    non-executable SQL (#189). Fail loudly here, mirroring the sibling MERGE guards
+    (multiple-MERGE, CLUSTER/MERGE mix), so the shape raises a clear diagnostic
+    instead.
+
+    This is a genuinely MERGE-specific guard — unlike CLUSTER, a per-row window over
+    which a star is meaningful and supported (#184, #185), MERGE collapses rows, so
+    no star projection alongside it is well-formed — hence it lives here rather than
+    in the operator-neutral toolkit. The check is gated on there being a *projected*
+    MERGE (``find_projected``) so a MERGE parsing outside the projection (WHERE /
+    ORDER BY) is left on the expander's existing out-of-projection no-op path
+    rather than rejected. Legitimate sibling items — extra aggregates such as
+    ``COUNT(*)`` (a ``Star`` wrapped in an aggregate, not a bare or qualified star)
+    — are untouched; only a star is rejected.
+    """
+    if not find_projected(select, GIQLMerge):
+        return
+    if any(is_star_projection(projection) for projection in select.expressions):
+        raise ValueError(
+            "MERGE cannot be combined with a star projection (e.g. SELECT *, "
+            "MERGE(...) or SELECT rel.*, MERGE(...)); MERGE aggregates rows into one "
+            "row per merged region, so a star has no coherent per-row meaning. Drop "
+            "the star, or project only grouping columns and aggregates (e.g. "
+            "COUNT(*)) alongside MERGE — not raw input columns, which are neither "
+            "grouped nor aggregated."
+        )
 
 
 def _transform_select_merge(

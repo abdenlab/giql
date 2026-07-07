@@ -414,6 +414,21 @@ Notes
    separate queries instead — for example, CLUSTER over a subquery, or MERGE
    over one.
 
+.. note::
+
+   MERGE cannot be projected alongside a star. MERGE aggregates rows into one
+   row per merged region, so a ``SELECT *, MERGE(...)`` or ``SELECT t.*,
+   MERGE(...)`` has no coherent per-row meaning — the star names the
+   pre-aggregation input columns of a relation MERGE has already collapsed and
+   grouped away. Transpiling either shape raises a ``ValueError`` rather than
+   emitting non-executable SQL (a bare ``*`` re-surfaces non-grouped columns
+   under the synthesized ``GROUP BY``; a qualified ``rel.*`` dangles an alias the
+   aggregation no longer exposes). Drop the star, or project only grouping
+   columns and aggregates (e.g. ``COUNT(*)``) alongside ``MERGE`` — not raw input
+   columns, which are neither grouped nor aggregated. This is unlike
+   :ref:`CLUSTER <cluster-operator>`, a per-row window over which a star *is*
+   meaningful and supported.
+
 Related Operators
 ~~~~~~~~~~~~~~~~~
 
