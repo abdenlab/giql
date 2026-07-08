@@ -414,16 +414,24 @@ class IntersectsDuckDBIEJoinTransformer:
 
     1. ``SET VARIABLE __giql_iejoin_<token> = COALESCE(<dynamic-sql>, <empty-schema>);``
        where ``<dynamic-sql>`` is a ``string_agg`` over the chromosome
-       partition that emits one ``SELECT ... FROM (... WHERE chrom = '<c>')
-       a JOIN (... WHERE chrom = '<c>') b ON <range-overlap>`` per
-       chromosome, joined by ``UNION ALL``.
+       partition that emits one per-chromosome overlap query joined by
+       ``UNION ALL``. For INNER, that is ``SELECT ... FROM (... WHERE chrom =
+       '<c>') a JOIN (... WHERE chrom = '<c>') b ON <range-overlap>``; for
+       SEMI / ANTI it is ``SELECT ... FROM (... WHERE chrom = '<c>') a WHERE
+       [NOT] EXISTS (SELECT 1 FROM (... WHERE chrom = '<c>') b WHERE
+       <range-overlap>)``.
     2. ``SELECT <projections> FROM query(getvariable('__giql_iejoin_<token>'))``
 
     Each per-chromosome subquery uses pure inequality predicates which DuckDB
     plans through its range-join family (``IE_JOIN`` or ``PIECEWISE_MERGE_JOIN``).
-    The dialect supports INNER, SEMI, and ANTI variants — the per-chromosome
-    join keyword switches accordingly, and SEMI / ANTI restrict the outer
-    SELECT to left-side projections only.
+    The dialect supports INNER, SEMI, and ANTI variants. Crucially, DuckDB only
+    selects ``IE_JOIN`` for INNER pure-inequality joins — a bare ``SEMI JOIN`` /
+    ``ANTI JOIN`` inequality join is planned as a ``BLOCKWISE_NL_JOIN`` (a nested
+    loop, quadratic). So the left-only shapes are emitted as a correlated
+    ``WHERE EXISTS`` (SEMI) / ``WHERE NOT EXISTS`` (ANTI) subquery instead of a
+    semi/anti join keyword, which reaches ``IE_JOIN`` while preserving exact
+    semantics (#208). SEMI / ANTI restrict the outer SELECT to left-side
+    projections only.
 
     See :doc:`/transpilation/performance` for the full join-shape support
     matrix, fallback enumeration, and hard-error projection shapes.
@@ -1028,45 +1036,73 @@ class IntersectsDuckDBIEJoinTransformer:
         l_table_ident = self._qualified_table_ident(sides.left_table)
         r_table_ident = self._qualified_table_ident(sides.right_table)
 
-        # Join keyword switches by ``sides.kind``: SEMI / ANTI engage
-        # DuckDB's IE_JOIN with the corresponding semi/anti semantics; INNER
-        # is the default. (CROSS folded to INNER inside ``_IEJoinSides``.)
-        join_keyword = {
-            "INNER": "JOIN",
-            "SEMI": "SEMI JOIN",
-            "ANTI": "ANTI JOIN",
-        }[sides.kind]
-
-        inner_select_list = ", ".join(inner_projections)
-        per_chrom_select_prefix = f"SELECT {inner_select_list} "
-        from_left = f"FROM (SELECT * FROM {l_table_ident} WHERE {q(l_chrom)} = "
-        from_right_open = (
-            f") a {join_keyword} (SELECT * FROM {r_table_ident} WHERE {q(r_chrom)} = "
-        )
-        on_clause_predicates = [
+        # The overlap predicate (canonical, strict) plus any inline residuals,
+        # shared by both the INNER join-ON form and the SEMI / ANTI EXISTS form.
+        overlap_predicates = [
             f"{l_start_expr} < {r_end_expr}",
             f"{l_end_expr} > {r_start_expr}",
         ]
         for residual in inline_residuals:
-            on_clause_predicates.append(
+            overlap_predicates.append(
                 self._rewrite_refs_for_per_chrom_subquery(residual, sides)
             )
-        on_clause = ") b ON " + " AND ".join(on_clause_predicates)
+        predicate_sql = " AND ".join(overlap_predicates)
 
         # The dynamic SQL builder, expressed as a SQL string-concat that
         # ``string_agg`` aggregates per-chromosome. Single quotes are
         # doubled because the result is itself an SQL string literal that
-        # contains SQL.
+        # contains SQL. The chromosome literal is interpolated twice — once
+        # into the left partition filter, once into the right.
         chrom_literal = "'''' || replace(chrom, '''', '''''') || ''''"
-
         esc = self._sql_escape
-        per_chrom_sql_expr = (
-            f"'{esc(per_chrom_select_prefix)}{esc(from_left)}' "
-            f"|| {chrom_literal} "
-            f"|| '{esc(from_right_open)}' "
-            f"|| {chrom_literal} "
-            f"|| '{esc(on_clause)}'"
-        )
+        inner_select_list = ", ".join(inner_projections)
+
+        if sides.is_left_only_join:
+            # SEMI / ANTI: a bare per-chromosome ``SEMI JOIN`` / ``ANTI JOIN``
+            # with an inequality overlap predicate is planned by DuckDB as a
+            # ``BLOCKWISE_NL_JOIN`` (a nested loop), not its fast ``IE_JOIN``
+            # range join — DuckDB selects IE_JOIN only for INNER pure-inequality
+            # joins (#208). A correlated ``WHERE EXISTS`` / ``WHERE NOT EXISTS``
+            # over the same per-chromosome right partition reaches IE_JOIN and
+            # preserves exact SEMI / ANTI semantics (one row per qualifying left
+            # row, no dedup-on-projection hazard). Inline (ON) residuals sit in
+            # the subquery WHERE beside the overlap predicate; WHERE residuals
+            # are still layered as an outer wrapper filter (``outer_where_residuals``
+            # below, #200).
+            exists_keyword = "EXISTS" if sides.kind == "SEMI" else "NOT EXISTS"
+            select_from_left = (
+                f"SELECT {inner_select_list} "
+                f"FROM (SELECT * FROM {l_table_ident} WHERE {q(l_chrom)} = "
+            )
+            exists_open = (
+                f") a WHERE {exists_keyword} (SELECT 1 FROM "
+                f"(SELECT * FROM {r_table_ident} WHERE {q(r_chrom)} = "
+            )
+            exists_close = f") b WHERE {predicate_sql})"
+            per_chrom_sql_expr = (
+                f"'{esc(select_from_left)}' "
+                f"|| {chrom_literal} "
+                f"|| '{esc(exists_open)}' "
+                f"|| {chrom_literal} "
+                f"|| '{esc(exists_close)}'"
+            )
+        else:
+            # INNER (CROSS folded to INNER inside ``_IEJoinSides``): a
+            # per-chromosome INNER join whose pure-inequality ON predicate DuckDB
+            # plans through ``IE_JOIN``.
+            per_chrom_select_prefix = f"SELECT {inner_select_list} "
+            from_left = f"FROM (SELECT * FROM {l_table_ident} WHERE {q(l_chrom)} = "
+            from_right_open = (
+                f") a JOIN (SELECT * FROM {r_table_ident} WHERE {q(r_chrom)} = "
+            )
+            on_clause = f") b ON {predicate_sql}"
+            per_chrom_sql_expr = (
+                f"'{esc(per_chrom_select_prefix)}{esc(from_left)}' "
+                f"|| {chrom_literal} "
+                f"|| '{esc(from_right_open)}' "
+                f"|| {chrom_literal} "
+                f"|| '{esc(on_clause)}'"
+            )
 
         # Empty-schema fallback when no chromosomes pass the partition
         # filter. Project from the source tables under WHERE FALSE so
