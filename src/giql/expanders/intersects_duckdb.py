@@ -516,12 +516,24 @@ def _match_count_overlaps(query: exp.Expression) -> "_CountOverlapsShape | None"
 
     if agg_item is None or not key_items:
         return None
-    # Every projected key must be a group key (guard SELECT-only left columns).
-    group_sql = {e.sql(dialect="duckdb") for e in query.args["group"].expressions}
-    for item in key_items:
-        expr = item.this if isinstance(item, exp.Alias) else item
-        if expr.sql(dialect="duckdb") not in group_sql:
-            return None
+    # The GROUP BY keys must be exactly the projected left columns. An extra
+    # group key produces more rows than the distinct projected keys (which the
+    # zero-fill base relation reconstructs and so cannot reproduce), and a
+    # projected key absent from the group would be an invalid aggregate query.
+    projected_key_exprs = {
+        (item.this if isinstance(item, exp.Alias) else item).sql(dialect="duckdb")
+        for item in key_items
+    }
+    group_exprs = {e.sql(dialect="duckdb") for e in query.args["group"].expressions}
+    if group_exprs != projected_key_exprs:
+        return None
+    # The zero-fill wrapper joins on the user-facing output names and re-projects
+    # the count under its alias, so those names must be distinct — otherwise a
+    # key column and the count alias collide and USING / COALESCE bind to the
+    # wrong column.
+    output_names = [item.output_name for item in key_items] + [agg_item.output_name]
+    if len(set(output_names)) != len(output_names):
+        return None
 
     return _CountOverlapsShape(
         the_join=the_join,
