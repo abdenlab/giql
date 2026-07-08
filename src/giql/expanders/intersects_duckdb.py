@@ -407,6 +407,132 @@ class _IEJoinSides:
         )
 
 
+@dataclass(frozen=True)
+class _CountOverlapsShape:
+    """The matched ``count_overlaps`` LEFT-join-with-COUNT shape (#209).
+
+    Bundles the LEFT :class:`~sqlglot.expressions.Join`, the un-aliased left
+    (FROM) base table, the left/right user aliases (case-folded), the left-side
+    group-key SELECT items, and the single ``COUNT`` aggregate SELECT item. The
+    emission reuses the INNER path to build the per-chromosome IEJoin count and
+    wraps it in a zero-fill LEFT join against the distinct left keys.
+    """
+
+    the_join: exp.Join
+    left_table: exp.Table
+    left_alias: str
+    right_alias: str
+    key_items: tuple[exp.Expression, ...]
+    agg_item: exp.Alias
+
+
+def _match_count_overlaps(query: exp.Expression) -> "_CountOverlapsShape | None":
+    """Return the count_overlaps shape when *query* matches it, else ``None``.
+
+    Matches exactly ``SELECT <left cols>, COUNT(<right col>) AS <alias> FROM
+    <base> a LEFT JOIN <base> b ON <one column-to-column INTERSECTS> GROUP BY
+    <left cols>`` -- the only right-side reference is the COUNT argument, and the
+    projected left columns are the group keys. Every other shape (``COUNT(*)``,
+    non-COUNT or multiple aggregates, a WHERE / HAVING / ORDER BY / LIMIT, a
+    non-LEFT outer join, extra ON residuals) returns ``None`` so the caller keeps
+    the existing behaviour (the naive-predicate plan).
+    """
+    if not isinstance(query, exp.Select):
+        return None
+    if query.args.get("with_") or query.args.get("distinct"):
+        return None
+    if any(
+        query.args.get(k) is not None for k in ("having", "order", "limit", "offset")
+    ):
+        return None
+    if query.args.get("group") is None or query.args.get("where") is not None:
+        return None
+
+    joins = query.args.get("joins") or []
+    if len(joins) != 1:
+        return None
+    the_join = joins[0]
+    if _normalize_alias(the_join.args.get("side") or "") != "left":
+        return None
+    if (the_join.args.get("kind") or "").upper() not in ("", "OUTER"):
+        return None
+    on = the_join.args.get("on")
+    if on is None:
+        return None
+    intersects = _find_column_intersects_in(on)
+    if intersects is None or _count_column_intersects(query) != 1:
+        return None
+    # v1 supports only a bare INTERSECTS ON (no residual join conditions).
+    if _strip_intersects(on, intersects) is not None:
+        return None
+
+    from_node = query.args.get("from_")
+    from_table = from_node.this if from_node else None
+    join_table = the_join.this
+    if not isinstance(from_table, exp.Table) or not from_table.name:
+        return None
+    if not isinstance(join_table, exp.Table) or not join_table.name:
+        return None
+    left_alias = _normalize_alias(from_table.alias_or_name)
+    right_alias = _normalize_alias(join_table.alias_or_name)
+    if left_alias == right_alias:
+        return None
+
+    key_items: list[exp.Expression] = []
+    agg_item: exp.Alias | None = None
+    for sel in query.expressions:
+        target = sel.this if isinstance(sel, exp.Alias) else sel
+        while isinstance(target, exp.Paren):
+            target = target.this
+        if isinstance(target, exp.AggFunc):
+            # Exactly one COUNT(<right col>) / COUNT(DISTINCT <right col>) aggregate,
+            # aliased so the wrapper can reference and re-project it.
+            if agg_item is not None or not isinstance(target, exp.Count):
+                return None
+            if not isinstance(sel, exp.Alias) or not sel.output_name:
+                return None
+            arg = target.this
+            if isinstance(arg, exp.Distinct):
+                if len(arg.expressions) != 1:
+                    return None
+                arg = arg.expressions[0]
+            if not (
+                isinstance(arg, exp.Column)
+                and not isinstance(arg.this, exp.Star)
+                and _normalize_alias(arg.table) == right_alias
+            ):
+                return None
+            agg_item = sel
+        elif (
+            isinstance(target, exp.Column)
+            and target.table
+            and not isinstance(target.this, exp.Star)
+        ):
+            if _normalize_alias(target.table) != left_alias:
+                return None
+            key_items.append(sel)
+        else:
+            return None
+
+    if agg_item is None or not key_items:
+        return None
+    # Every projected key must be a group key (guard SELECT-only left columns).
+    group_sql = {e.sql(dialect="duckdb") for e in query.args["group"].expressions}
+    for item in key_items:
+        expr = item.this if isinstance(item, exp.Alias) else item
+        if expr.sql(dialect="duckdb") not in group_sql:
+            return None
+
+    return _CountOverlapsShape(
+        the_join=the_join,
+        left_table=from_table,
+        left_alias=left_alias,
+        right_alias=right_alias,
+        key_items=tuple(key_items),
+        agg_item=agg_item,
+    )
+
+
 class IntersectsDuckDBIEJoinTransformer:
     """Transform column-to-column INTERSECTS joins into a DuckDB IEJoin pattern.
 
@@ -507,6 +633,15 @@ class IntersectsDuckDBIEJoinTransformer:
         distinct_node = query.args.get("distinct")
         if distinct_node is not None and distinct_node.args.get("on"):
             return None
+
+        # count_overlaps fast path (#209): a LEFT JOIN whose only right-side use
+        # is a COUNT(b.col) with a GROUP BY on the left keys reaches IE_JOIN via
+        # the INNER path plus a zero-fill LEFT join, rather than declining to the
+        # naive HASH_JOIN + inequality filter that every other outer join takes.
+        # Checked before the outer-join decline below since it *is* an outer join.
+        count_shape = _match_count_overlaps(query)
+        if count_shape is not None:
+            return self._build_count_overlaps_sql(query, count_shape)
 
         if _has_outer_join_intersects(query):
             return None
@@ -652,6 +787,56 @@ class IntersectsDuckDBIEJoinTransformer:
             return None
         except _UnqualifiedProjectionError as exc:
             raise ValueError(str(exc)) from exc
+
+    def _build_count_overlaps_sql(
+        self, query: exp.Select, shape: "_CountOverlapsShape"
+    ) -> str | None:
+        """Render the count_overlaps zero-fill SQL for a matched LEFT-join shape (#209).
+
+        Reuses the INNER IEJoin path: an INNER copy of the query (same
+        projections and GROUP BY, LEFT downgraded to INNER) is transpiled by
+        :meth:`transform_to_sql` into ``SET VARIABLE ...; <count SELECT>``, which
+        DuckDB plans through ``IE_JOIN`` + hash aggregate. The INNER count drops
+        left rows with no overlap, so its ``SELECT`` is wrapped as a CTE and
+        LEFT-joined back onto the distinct left keys, zero-filling the missing
+        counts. Returns ``None`` (fall back to the naive plan) if the INNER copy
+        itself declines.
+        """
+        inner_query = query.copy()
+        inner_join = inner_query.args["joins"][0]
+        inner_join.set("side", None)
+        inner_join.set("kind", None)
+        inner_sql = self.transform_to_sql(inner_query)
+        if inner_sql is None or ";\n" not in inner_sql:
+            return None
+        set_var_stmt, inner_select = inner_sql.split(";\n", 1)
+
+        q = self._sql_quote_ident
+        key_names = [item.output_name for item in shape.key_items]
+        key_projections = [item.sql(dialect="duckdb") for item in shape.key_items]
+        group_exprs = [
+            (item.this if isinstance(item, exp.Alias) else item).sql(dialect="duckdb")
+            for item in shape.key_items
+        ]
+        agg_name = shape.agg_item.output_name
+
+        # Distinct left-key relation, rendering the FROM table with its own alias
+        # so the key projections (``a.chrom`` ...) resolve against it.
+        base_cte = (
+            f"SELECT {', '.join(key_projections)} "
+            f"FROM {shape.left_table.sql(dialect='duckdb')} "
+            f"GROUP BY {', '.join(group_exprs)}"
+        )
+        using_cols = ", ".join(q(name) for name in key_names)
+        base_out = ", ".join(f"base.{q(name)}" for name in key_names)
+        wrapper = (
+            f"WITH __giql_counts AS ({inner_select}), "
+            f"__giql_base AS ({base_cte}) "
+            f"SELECT {base_out}, COALESCE(c.{q(agg_name)}, 0) AS {q(agg_name)} "
+            f"FROM __giql_base AS base "
+            f"LEFT JOIN __giql_counts AS c USING ({using_cols})"
+        )
+        return set_var_stmt + ";\n" + wrapper
 
     @staticmethod
     def _sql_escape(s: str) -> str:
