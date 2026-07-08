@@ -399,13 +399,16 @@ left-distinct chromosome partition rather than the chromosome INTERSECT
 used by INNER / SEMI, so left rows on chromosomes absent from the right
 table are preserved.
 
-DuckDB plans INNER through the IE_JOIN / PIECEWISE_MERGE_JOIN
-sort-merge family. SEMI and ANTI with inequality predicates plan
-through ``BLOCKWISE_NL_JOIN`` instead — not the IE_JOIN sort-merge fast
-path, but still a per-chromosome plan. Expect speedups vs. the naive
-predicate for SEMI / ANTI
-where the chromosome partition already filters most pairs; INNER gets
-the largest speedup.
+DuckDB plans all three variants through its ``IE_JOIN`` /
+``PIECEWISE_MERGE_JOIN`` sort-merge range-join family. INNER emits a
+per-chromosome inner join directly. SEMI and ANTI are emitted as a
+correlated ``WHERE EXISTS`` / ``WHERE NOT EXISTS`` subquery over the
+per-chromosome right partition, because DuckDB plans a bare ``SEMI
+JOIN`` / ``ANTI JOIN`` inequality overlap as a quadratic
+``BLOCKWISE_NL_JOIN`` (a nested loop) rather than the range-join fast
+path — the correlated form reaches the fast path while preserving exact
+semantics (#208). Expect large speedups over the naive predicate for all
+three variants at scale.
 
 On top of the core shape the dialect also absorbs several common
 decorations:
