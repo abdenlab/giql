@@ -381,8 +381,9 @@ results.
    rows = conn.execute(sql).fetchall()
 
 The dialect rewrites the whole query, so the supported shape is
-``SELECT <qualified projections> FROM <base table> {INNER|SEMI|ANTI}
-JOIN <base table> {ON|WHERE} <one column-to-column INTERSECTS>`` — the
+``SELECT <qualified non-star projections> FROM <base table>
+{INNER|SEMI|ANTI} JOIN <base table> {ON|WHERE} <one column-to-column
+INTERSECTS>`` — the
 JOIN and the column-to-column ``INTERSECTS`` are both required
 (literal-range ``INTERSECTS`` against a single table falls through to
 the default predicate generator).
@@ -390,11 +391,13 @@ the default predicate generator).
 **Join variants.** ``INNER JOIN`` is the default. ``SEMI JOIN`` returns
 distinct left rows that have at least one overlapping match; ``ANTI
 JOIN`` returns left rows with no overlapping match. Both restrict the
-outer SELECT to left-side projections — any reference to the right
-side (``b.col`` / ``b.*`` / aggregate over ``b.*``) raises
-``ValueError``. ANTI uses a left-distinct chromosome partition rather
-than the chromosome INTERSECT used by INNER / SEMI, so left rows on
-chromosomes absent from the right table are preserved.
+outer SELECT to left-side projections — any ``b.col`` reference (or an
+aggregate over ``b.col``) raises ``ValueError``; a right-side ``b.*``
+declines to the naive-predicate plan with every other star (which then
+rejects the out-of-scope right table at bind time). ANTI uses a
+left-distinct chromosome partition rather than the chromosome INTERSECT
+used by INNER / SEMI, so left rows on chromosomes absent from the right
+table are preserved.
 
 DuckDB plans INNER through the IE_JOIN / PIECEWISE_MERGE_JOIN
 sort-merge family. SEMI and ANTI with inequality predicates plan
@@ -433,12 +436,6 @@ decorations:
   ``dialect=None`` path, ``dialect="duckdb"`` is one workaround — the
   dialect inlines extras directly into each per-chromosome subquery
   and is unaffected by that bug.
-- **Star projections (``a.*`` / ``b.*``).** Expanded to the genomic
-  columns declared by the corresponding :class:`Table` config (chrom
-  / start / end, plus strand when set). This narrows the result schema
-  relative to the naive-predicate plan, which delegates star expansion to
-  DuckDB and projects every base-table column. Users with additional
-  non-genomic columns should list them explicitly.
 
 The dialect splits unsupported shapes into two buckets. Soft-fallback
 shapes route to the naive-predicate plan automatically and return correct
@@ -455,6 +452,40 @@ The soft-fallback shapes are:
   when the join keeps its side modifier and the ``INTERSECTS`` lives in
   the top-level ``WHERE`` (e.g. ``LEFT JOIN ... ON TRUE WHERE
   a.interval INTERSECTS b.interval``).
+- **SEMI / ANTI join with the INTERSECTS in the WHERE.** A ``SEMI`` /
+  ``ANTI`` join whose column-to-column ``INTERSECTS`` sits in the
+  top-level ``WHERE`` rather than its own ``ON`` (e.g. ``ANTI JOIN ... ON
+  TRUE WHERE a.interval INTERSECTS b.interval``) falls back. The right
+  table is out of scope in the ``WHERE`` after a left-only join, so the
+  reference plans reject it with a binder error; the dialect declines so
+  it surfaces that same error instead of relocating the predicate into
+  the join and inventing anti/semi-overlap results. The idiomatic form
+  with the ``INTERSECTS`` in the join ``ON`` is unaffected.
+- **Star projections.** Any star in the top-level SELECT list — bare
+  ``*``, ``a.*``, ``b.*``, or ``a.* AS x`` — falls back. Building the
+  dialect's per-chromosome dynamic SQL requires enumerating the star's
+  columns at transpile time, but only the registered genomic columns
+  (``chrom`` / ``start`` / ``end`` / ``strand``) are known — arbitrary
+  user columns are invisible. The naive-predicate plan expands the real
+  star against DuckDB's live schema, so declining keeps the projection
+  identical across backends rather than silently narrowing it.
+- **Projections the IEJoin cannot rebuild.** The dialect's projection
+  rebuild handles a qualified column (``a.col``) or a plain aggregate
+  over qualified columns (``SUM(a.score)`` / ``COUNT(*)``). Any other
+  SELECT-list shape the naive plan compiles for free — an expression
+  (``a.start + 1``), a window aggregate (``SUM(a.score) OVER (...)``), a
+  ``FILTER`` clause, a scalar subquery, an aggregate nested in an
+  expression (``COUNT(*) * 2``), a bare literal, or a star nested in an
+  aggregate argument (``COUNT(a.*)`` / ``MIN(COLUMNS(*))``) — falls back,
+  so ``dialect="duckdb"`` stays consistent with every other backend
+  instead of hard-erroring or, for the aggregate-nested star,
+  miscompiling. A projection whose column the rebuild cannot attribute to
+  a join side (unqualified, an unknown table, or the right side under a
+  SEMI / ANTI join) raises at transpile time instead (see the hard-error
+  list below) — the unknown-table and right-side cases are rejected by the
+  naive plan too, and a bare unqualified column, though it may be
+  naive-valid when unambiguous, has no side the dialect can infer without a
+  live schema.
 - **NATURAL joins.** ``NATURAL JOIN`` falls back because the dialect
   cannot enumerate shared columns at transpile time (only the
   registered ``chrom`` / ``start`` / ``end`` / ``strand`` columns are
@@ -498,37 +529,35 @@ The soft-fallback shapes are:
 Query-shape ``ValueError`` raises (the dialect deliberately refuses
 these rather than silently miscompile):
 
-- **Bare** ``SELECT *`` **and unqualified columns.** The dialect path
-  needs to know which side each output column comes from. Use ``a.*``,
-  ``b.*``, ``a.col``, or ``a.col AS x``.
-- **Expression-form projections.** ``a.start + 1`` and other non-column
-  expressions (other than aggregates) raise. Project the underlying
-  column and compute in a wrapping query around the dialect's output,
-  or omit ``dialect="duckdb"`` to use the naive-predicate plan.
+- **Unqualified columns.** A bare column reference (``SELECT score``)
+  raises — the dialect path needs to know which side each output column
+  comes from, and has no live schema to infer it (so an unambiguous
+  unqualified column that the naive plan would accept still raises here).
+  Use ``a.col`` or ``a.col AS x``. (Bare ``SELECT *`` does not raise; like
+  every star it falls back to the naive-predicate plan — see the
+  soft-fallback list above. An expression / window aggregate / ``FILTER``
+  clause over an *unqualified* column raises the same "requires qualified
+  projections" error — once qualified, the wrapper itself falls back to the
+  naive plan rather than erroring. A scalar subquery always falls back, even
+  over an unqualified inner column, since that column resolves against the
+  subquery's own scope.)
 - **Unknown table qualifier.** ``c.col`` when the only sides are ``a``
   and ``b``.
 - **Unknown alias in GROUP BY / HAVING / ORDER BY.** A modifier-clause
   column qualified with a table alias outside the join's two sides
   (``c.col``) raises with a ``cannot resolve … in <CLAUSE>`` message
   naming the expected aliases.
-- **Right-side reference in SEMI / ANTI joins.** ``b.col`` / ``b.*`` /
-  aggregate over ``b.*`` in the outer SELECT, GROUP BY, HAVING, ORDER
+- **Right-side reference in SEMI / ANTI joins.** ``b.col`` or an
+  aggregate over ``b.col`` in the outer SELECT, GROUP BY, HAVING, ORDER
   BY, or aggregate argument under ``SEMI JOIN`` / ``ANTI JOIN`` raises;
-  SEMI / ANTI return left-side columns only.
+  SEMI / ANTI return left-side columns only. (A right-side ``b.*`` falls
+  back to the naive-predicate plan with every other star — see the
+  soft-fallback list above.)
 - **Aggregate of unqualified column.** ``SUM(score)`` raises; use
-  ``SUM(a.score)`` or ``SUM(b.score)``.
-- **Star projection with a user alias.** ``a.* AS x`` raises (most
-  engines reject star-with-alias outright); either drop the alias and
-  use ``a.*``, or list the columns explicitly with per-column aliases.
-- **Window aggregates and FILTER clauses.** ``SUM(a.score) OVER
-  (...)`` and ``SUM(a.score) FILTER (WHERE ...)`` raise with a
-  dedicated error; rewrite the projection or omit ``dialect="duckdb"``.
-- **Aggregates inside expressions.** ``COUNT(*) * 2`` and similar
-  arithmetic-over-aggregate projections raise; project the aggregate
-  on its own and do arithmetic in a wrapping query.
-- **Scalar subqueries in the SELECT list.** ``(SELECT SUM(x) FROM
-  other_table) AS s`` raises; rewrite without the subquery or omit
-  ``dialect="duckdb"``.
+  ``SUM(a.score)`` or ``SUM(b.score)``. (A qualified aggregate the IEJoin
+  cannot rebuild — ``SUM(a.score) OVER (...)``, ``SUM(a.score) FILTER
+  (WHERE ...)``, ``COUNT(*) * 2``, ``COUNT(a.*)`` — falls back to the
+  naive plan instead; see the soft-fallback list above.)
 - **Catalog/schema-qualified extra predicates.** ``mycat.myschema.a.col``
   in an extra predicate raises; the alias rewriter would leave the
   catalog/schema qualifier intact in the inner subquery, where it
