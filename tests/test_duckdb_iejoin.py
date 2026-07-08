@@ -63,6 +63,24 @@ def _python_anti_overlap(peaks: list[tuple], genes: list[tuple]) -> list[tuple]:
     return sorted({(pc, ps, pe) for (pc, ps, pe) in peaks} - matched)
 
 
+def _python_count_overlaps(peaks: list[tuple], genes: list[tuple]) -> list[tuple]:
+    """Reference count_overlaps as ``(chrom, start, end, count)`` per distinct left key.
+
+    Mirrors ``COUNT(b.col)`` under ``GROUP BY`` on the left keys: each distinct
+    left interval's count is the number of overlapping right intervals summed
+    across the duplicate left rows sharing that key (so a key appearing twice
+    with one overlap counts 2, matching SQL group-by-over-a-LEFT-join). Left keys
+    with no overlap are present with count 0.
+    """
+    out: list[tuple] = []
+    for key in set(peaks):
+        pc, ps, pe = key
+        duplicates = sum(1 for p in peaks if p == key)
+        b_overlaps = sum(1 for (gc, gs, ge) in genes if pc == gc and pe > gs and ge > ps)
+        out.append((pc, ps, pe, duplicates * b_overlaps))
+    return sorted(out)
+
+
 def _explain_dynamic_sql(conn, sql: str) -> str:
     """Return the DuckDB EXPLAIN text of the per-chromosome dynamic SQL for *sql*.
 
@@ -3196,6 +3214,269 @@ class TestTranspileDuckDBIEJoinSQLStructure:
         with pytest.raises(ValueError) as excinfo:
             transpile(query, tables=["peaks", "genes"], dialect="duckdb")
         assert "left-side" in str(excinfo.value)
+
+
+class TestTranspileDuckDBIEJoinCountOverlaps:
+    """The count_overlaps fast path: LEFT JOIN + COUNT(b.col) + GROUP BY (#209)."""
+
+    def test_transpile_should_emit_zero_fill_wrapper_when_left_join_count(self):
+        """Test that a LEFT-join COUNT over INTERSECTS emits the zero-fill fast path.
+
+        Given:
+            A ``SELECT a.cols, COUNT(b.col) ... FROM a LEFT JOIN b ON
+            a.interval INTERSECTS b.interval GROUP BY a.cols`` query.
+        When:
+            ``transpile`` is called with ``dialect='duckdb'``.
+        Then:
+            It should emit the INNER IEJoin count wrapped in a zero-fill
+            LEFT join (a ``SET VARIABLE`` block, a ``__giql_counts`` CTE, and
+            a ``COALESCE(..., 0)``), never the naive ``a.chrom = b.chrom``
+            hash-join predicate.
+        """
+        # Arrange
+        query = (
+            'SELECT a.chrom, a.start, a."end", COUNT(b.chrom) AS n '
+            "FROM peaks a LEFT JOIN genes b ON a.interval INTERSECTS b.interval "
+            'GROUP BY a.chrom, a.start, a."end"'
+        )
+
+        # Act
+        sql = transpile(query, tables=["peaks", "genes"], dialect="duckdb")
+
+        # Assert
+        assert "SET VARIABLE __giql_iejoin_" in sql
+        assert "__giql_counts" in sql
+        assert "COALESCE" in sql
+        assert 'a."chrom" = b."chrom"' not in sql
+
+    def test_transpile_should_decline_count_overlaps_when_count_star(self):
+        """Test that COUNT(*) over a LEFT join declines to the naive plan.
+
+        Given:
+            A LEFT-join query aggregating ``COUNT(*)`` rather than a
+            right-side column.
+        When:
+            ``transpile`` is called with ``dialect='duckdb'``.
+        Then:
+            It should decline the fast path (no ``__giql_counts`` wrapper),
+            because COUNT(*) over a LEFT join counts the null-padded row for
+            unmatched left rows, which the zero-fill rewrite cannot express.
+        """
+        # Arrange
+        query = (
+            "SELECT a.chrom, COUNT(*) AS n "
+            "FROM a LEFT JOIN b ON a.interval INTERSECTS b.interval GROUP BY a.chrom"
+        )
+
+        # Act
+        sql = transpile(query, tables=["a", "b"], dialect="duckdb")
+
+        # Assert
+        assert "__giql_counts" not in sql
+
+    def test_transpile_should_decline_count_overlaps_when_non_count_aggregate(self):
+        """Test that a non-COUNT aggregate over a LEFT join declines to the naive plan.
+
+        Given:
+            A LEFT-join query aggregating ``SUM(b.score)``.
+        When:
+            ``transpile`` is called with ``dialect='duckdb'``.
+        Then:
+            It should decline the fast path (no ``__giql_counts`` wrapper);
+            the fast path supports only ``COUNT`` in v1.
+        """
+        # Arrange
+        query = (
+            "SELECT a.chrom, SUM(b.score) AS s "
+            "FROM a LEFT JOIN b ON a.interval INTERSECTS b.interval GROUP BY a.chrom"
+        )
+
+        # Act
+        sql = transpile(query, tables=["a", "b"], dialect="duckdb")
+
+        # Assert
+        assert "__giql_counts" not in sql
+
+    def test_transpile_should_decline_count_overlaps_when_no_group_by(self):
+        """Test that a LEFT-join COUNT without GROUP BY declines to the naive plan.
+
+        Given:
+            A LEFT-join COUNT query with no GROUP BY clause.
+        When:
+            ``transpile`` is called with ``dialect='duckdb'``.
+        Then:
+            It should decline the fast path (no ``__giql_counts`` wrapper).
+        """
+        # Arrange
+        query = (
+            "SELECT COUNT(b.chrom) AS n "
+            "FROM a LEFT JOIN b ON a.interval INTERSECTS b.interval"
+        )
+
+        # Act
+        sql = transpile(query, tables=["a", "b"], dialect="duckdb")
+
+        # Assert
+        assert "__giql_counts" not in sql
+
+    def test_transpile_should_decline_count_overlaps_when_order_by(self):
+        """Test that a LEFT-join COUNT with ORDER BY declines to the naive plan.
+
+        Given:
+            A LEFT-join COUNT query carrying a top-level ORDER BY.
+        When:
+            ``transpile`` is called with ``dialect='duckdb'``.
+        Then:
+            It should decline the fast path (no ``__giql_counts`` wrapper);
+            result-ordering clauses are out of scope for v1.
+        """
+        # Arrange
+        query = (
+            "SELECT a.chrom, COUNT(b.chrom) AS n "
+            "FROM a LEFT JOIN b ON a.interval INTERSECTS b.interval "
+            "GROUP BY a.chrom ORDER BY a.chrom"
+        )
+
+        # Act
+        sql = transpile(query, tables=["a", "b"], dialect="duckdb")
+
+        # Assert
+        assert "__giql_counts" not in sql
+
+    def test_transpile_should_decline_count_overlaps_when_self_join(self):
+        """Test that a self-join LEFT COUNT declines to the naive plan.
+
+        Given:
+            A LEFT-join COUNT whose two sides are the same table (a self
+            overlap count).
+        When:
+            ``transpile`` is called with ``dialect='duckdb'``.
+        Then:
+            It should decline the fast path (no ``__giql_counts`` wrapper),
+            because the reused INNER path declines the self-join and the
+            count builder falls back to the naive plan.
+        """
+        # Arrange
+        query = (
+            "SELECT a.chrom, COUNT(b.chrom) AS n "
+            "FROM t a LEFT JOIN t b ON a.interval INTERSECTS b.interval GROUP BY a.chrom"
+        )
+
+        # Act
+        sql = transpile(query, tables=["t"], dialect="duckdb")
+
+        # Assert
+        assert "__giql_counts" not in sql
+
+    @settings(
+        max_examples=25,
+        deadline=None,
+        suppress_health_check=[HealthCheck.function_scoped_fixture],
+    )
+    @given(
+        peaks=st.lists(
+            st.tuples(
+                st.sampled_from(["chr1", "chr2", "chr3"]),
+                st.integers(min_value=0, max_value=100),
+                st.integers(min_value=1, max_value=30),
+            ),
+            min_size=0,
+            max_size=8,
+        ),
+        genes=st.lists(
+            st.tuples(
+                st.sampled_from(["chr1", "chr2", "chr3"]),
+                st.integers(min_value=0, max_value=100),
+                st.integers(min_value=1, max_value=30),
+            ),
+            min_size=0,
+            max_size=8,
+        ),
+    )
+    def test_count_overlaps_should_match_python_reference_for_random_inputs(
+        self, conn, peaks, genes
+    ):
+        """Test the count_overlaps fast path against a Python-native reference.
+
+        Given:
+            A Hypothesis-generated pair of small interval lists.
+        When:
+            A ``COUNT(b.chrom)`` LEFT-join over INTERSECTS is transpiled with
+            ``dialect='duckdb'`` and executed.
+        Then:
+            The returned ``(chrom, start, end, count)`` rows should equal the
+            Python count_overlaps reference, including left rows with no
+            overlap (count 0), chromosomes present on only one side, an empty
+            right table, and duplicate left rows.
+        """
+        # Arrange
+        peak_rows = [(c, s, s + length) for (c, s, length) in peaks]
+        gene_rows = [(c, s, s + length) for (c, s, length) in genes]
+        conn.execute("DROP TABLE IF EXISTS peaks")
+        conn.execute("DROP TABLE IF EXISTS genes")
+        conn.execute(
+            'CREATE TABLE peaks (chrom VARCHAR, "start" INTEGER, "end" INTEGER)'
+        )
+        if peak_rows:
+            conn.executemany("INSERT INTO peaks VALUES (?, ?, ?)", peak_rows)
+        conn.execute(
+            'CREATE TABLE genes (chrom VARCHAR, "start" INTEGER, "end" INTEGER)'
+        )
+        if gene_rows:
+            conn.executemany("INSERT INTO genes VALUES (?, ?, ?)", gene_rows)
+        sql = transpile(
+            'SELECT a.chrom, a.start, a."end", COUNT(b.chrom) AS n '
+            "FROM peaks a LEFT JOIN genes b ON a.interval INTERSECTS b.interval "
+            'GROUP BY a.chrom, a.start, a."end"',
+            tables=["peaks", "genes"],
+            dialect="duckdb",
+        )
+
+        # Act
+        rows = sorted(conn.execute(sql).fetchall())
+        expected = _python_count_overlaps(peak_rows, gene_rows)
+
+        # Assert
+        assert rows == expected
+
+    def test_count_overlaps_plan_should_avoid_nested_loop_when_executed_on_duckdb(
+        self, conn
+    ):
+        """Test that the count_overlaps fast path is not planned as a nested loop.
+
+        Given:
+            A dense single-chromosome peaks/genes pair large enough that a
+            naive LEFT-join count would be planned as a quadratic
+            ``BLOCKWISE_NL_JOIN``.
+        When:
+            The ``dialect='duckdb'`` count query is generated and its inner
+            per-chromosome dynamic SQL is planned with ``EXPLAIN``.
+        Then:
+            It should avoid ``BLOCKWISE_NL_JOIN`` — the INNER IEJoin count
+            routes through DuckDB's range-join family (#209).
+        """
+        # Arrange
+        _make_table(
+            conn, "peaks", [("chr1", i * 7, i * 7 + 5, "p", 1, "+") for i in range(4000)]
+        )
+        _make_table(
+            conn,
+            "genes",
+            [("chr1", i * 7 + 2, i * 7 + 9, "g", 1, "+") for i in range(4000)],
+        )
+        sql = transpile(
+            'SELECT a.chrom, a.start, a."end", COUNT(b.chrom) AS n '
+            "FROM peaks a LEFT JOIN genes b ON a.interval INTERSECTS b.interval "
+            'GROUP BY a.chrom, a.start, a."end"',
+            tables=["peaks", "genes"],
+            dialect="duckdb",
+        )
+
+        # Act
+        plan = _explain_dynamic_sql(conn, sql)
+
+        # Assert
+        assert "BLOCKWISE_NL_JOIN" not in plan
 
 
 class TestTranspileDuckDBIEJoinExecution:
