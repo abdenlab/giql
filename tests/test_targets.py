@@ -40,14 +40,12 @@ class TestCapabilities:
             supports_lateral=True,
             supports_star_replace=False,
             supports_qualify=True,
-            range_join_strategy="naive",
         )
 
         # Assert
         assert caps.supports_lateral is True
         assert caps.supports_star_replace is False
         assert caps.supports_qualify is True
-        assert caps.range_join_strategy == "naive"
 
     def test___eq___with_identical_values(self):
         """Test value equality of Capabilities.
@@ -64,13 +62,11 @@ class TestCapabilities:
             supports_lateral=True,
             supports_star_replace=True,
             supports_qualify=True,
-            range_join_strategy="iejoin",
         )
         second = Capabilities(
             supports_lateral=True,
             supports_star_replace=True,
             supports_qualify=True,
-            range_join_strategy="iejoin",
         )
 
         # Act & assert
@@ -91,13 +87,11 @@ class TestCapabilities:
             supports_lateral=True,
             supports_star_replace=True,
             supports_qualify=True,
-            range_join_strategy="iejoin",
         )
         differing = Capabilities(
             supports_lateral=True,
             supports_star_replace=True,
-            supports_qualify=True,
-            range_join_strategy="naive",
+            supports_qualify=False,
         )
 
         # Act & assert
@@ -118,7 +112,6 @@ class TestCapabilities:
             supports_lateral=True,
             supports_star_replace=False,
             supports_qualify=False,
-            range_join_strategy="naive",
         )
 
         # Act & assert
@@ -138,7 +131,7 @@ class TestGenericTarget:
             An instance is constructed.
         Then:
             It should carry the portable SQL-92 baseline: no engine dialect,
-            lateral supported, no star-REPLACE, no QUALIFY, naive-predicate joins.
+            lateral supported, no star-REPLACE, no QUALIFY.
         """
         # Act
         target = GenericTarget()
@@ -149,7 +142,6 @@ class TestGenericTarget:
         assert target.capabilities.supports_lateral is True
         assert target.capabilities.supports_star_replace is False
         assert target.capabilities.supports_qualify is False
-        assert target.capabilities.range_join_strategy == "naive"
 
 
 class TestDuckDBTarget:
@@ -164,7 +156,7 @@ class TestDuckDBTarget:
             An instance is constructed.
         Then:
             It should serialize through the duckdb dialect and enable
-            lateral, star-REPLACE, QUALIFY, and the IEJoin strategy.
+            lateral, star-REPLACE, and QUALIFY.
         """
         # Act
         target = DuckDBTarget()
@@ -175,7 +167,6 @@ class TestDuckDBTarget:
         assert target.capabilities.supports_lateral is True
         assert target.capabilities.supports_star_replace is True
         assert target.capabilities.supports_qualify is True
-        assert target.capabilities.range_join_strategy == "iejoin"
 
 
 class TestDataFusionTarget:
@@ -190,8 +181,7 @@ class TestDataFusionTarget:
             An instance is constructed.
         Then:
             It should fall back to generic serialization (no sqlglot
-            DataFusion dialect), disable star-REPLACE and QUALIFY, and use
-            the naive-predicate join strategy.
+            DataFusion dialect) and disable lateral, star-REPLACE, and QUALIFY.
         """
         # Act
         target = DataFusionTarget()
@@ -202,7 +192,6 @@ class TestDataFusionTarget:
         assert target.capabilities.supports_lateral is False
         assert target.capabilities.supports_star_replace is False
         assert target.capabilities.supports_qualify is False
-        assert target.capabilities.range_join_strategy == "naive"
 
 
 class TestTarget:
@@ -367,7 +356,6 @@ class _PostgresTarget(Target):
         supports_lateral=True,
         supports_star_replace=False,
         supports_qualify=True,
-        range_join_strategy="naive",
     )
 
 
@@ -528,7 +516,6 @@ class TestCustomTargetInjection:
                 supports_lateral=True,
                 supports_star_replace=False,
                 supports_qualify=False,
-                range_join_strategy="naive",
             )
 
         REGISTRY.register_target(_ShadowTarget())
@@ -605,7 +592,6 @@ class TestTargetDrivesSerialization:
                 supports_lateral=True,
                 supports_star_replace=False,
                 supports_qualify=False,
-                range_join_strategy="naive",
             )
 
         REGISTRY.register_target(_DuckLikeTarget())

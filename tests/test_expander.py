@@ -31,6 +31,7 @@ from giql.expander import OperatorExpander
 from giql.expander import RegistrySnapshot
 from giql.expander import expand_operators
 from giql.expander import register
+from giql.expanders.intersects_duckdb import expand_intersects_duckdb
 from giql.expressions import GIQLDisjoin
 from giql.expressions import GIQLMerge
 from giql.expressions import Intersects
@@ -390,7 +391,6 @@ class _PluginTarget(Target):
         supports_lateral=True,
         supports_star_replace=False,
         supports_qualify=False,
-        range_join_strategy="naive",
     )
 
 
@@ -453,7 +453,6 @@ class TestTargetRegistration:
                 supports_lateral=False,
                 supports_star_replace=True,
                 supports_qualify=True,
-                range_join_strategy="iejoin",
             )
 
         first = _PluginTarget()
@@ -1179,7 +1178,6 @@ class _FakeTarget(Target):
         supports_lateral=True,
         supports_star_replace=False,
         supports_qualify=False,
-        range_join_strategy="naive",
     )
 
 
@@ -1781,29 +1779,33 @@ class TestMigratedOperatorsRegistered:
 
 
 class TestIEJoinRegistryDeferral:
-    """The duckdb IEJoin path defers to a target-specific Intersects expander (#141).
+    """A user (DuckDBTarget, Intersects) override replaces the built-in IEJoin (#169).
 
-    Resolves Finding 2: the IEJoin early return used to emit before the
-    ExpandOperators pass, so an operator on an IEJoin-eligible query was never
-    expanded. Now a *target-specific* ``(DuckDBTarget, Intersects)`` registry
-    entry overrides the built-in join strategy entirely (the public extension
-    hook), while the default duckdb path — with no such override — still emits the
-    built-in IEJoin SQL.
+    The DuckDB IEJoin join rewrite is itself a registered
+    ``(DuckDBTarget, Intersects)`` expander (:mod:`giql.expanders.intersects_duckdb`),
+    dispatched by the pass-3 ``ExpandOperators`` pass rather than a capability-gated
+    pre-pass. A user registration for the same key replaces the built-in override
+    (last-write-wins), so the user's expander fires; the default duckdb path, with
+    only the built-in override, emits the IEJoin SET VARIABLE SQL.
     """
 
-    def test_iejoin_query_expands_target_override_expander(self, clean_registry):
-        """Test that a target-specific Intersects override fires on an IEJoin query.
+    def test_iejoin_query_should_expand_user_override_when_it_supersedes_builtin(
+        self, clean_registry
+    ):
+        """Test that a user Intersects override supersedes the built-in on DuckDB.
 
         Given:
-            A column-to-column INTERSECTS join eligible for the duckdb IEJoin
-            path, with a (DuckDBTarget, Intersects) expander registered.
+            A column-to-column INTERSECTS join, with the built-in DuckDB IEJoin
+            override registered first and a user (DuckDBTarget, Intersects)
+            expander registered on top of it (last-write-wins).
         When:
             Transpiling with dialect='duckdb'.
         Then:
-            The override expander's sentinel should appear — the IEJoin path
-            defers to the registry rather than short-circuiting expansion.
+            It should emit the user override's sentinel and not the built-in
+            IEJoin SET VARIABLE SQL.
         """
         # Arrange
+        clean_registry.register(DuckDBTarget(), Intersects, expand_intersects_duckdb)
         clean_registry.register(
             DuckDBTarget(), Intersects, lambda n, c: exp.column("__giql_iejoin_sentinel")
         )
@@ -1819,17 +1821,16 @@ class TestIEJoinRegistryDeferral:
         assert "__giql_iejoin_sentinel" in sql
         assert "SET VARIABLE __giql_iejoin_" not in sql
 
-    def test_iejoin_query_emits_builtin_iejoin_without_override(self):
+    def test_iejoin_query_should_emit_builtin_iejoin_without_override(self):
         """Test that the default duckdb path emits the built-in IEJoin SQL.
 
         Given:
-            The same IEJoin-eligible duckdb query and no target-specific
-            Intersects override registered (only the built-in generic expander).
+            The same IEJoin-eligible duckdb query and only the built-in
+            (DuckDBTarget, Intersects) IEJoin override in the registry.
         When:
             Transpiling with dialect='duckdb'.
         Then:
-            The built-in IEJoin SET VARIABLE SQL is emitted (the generic
-            predicate expander does not disable the join strategy).
+            It should emit the built-in IEJoin SET VARIABLE SQL.
         """
         # Arrange
         query = (
@@ -1842,6 +1843,22 @@ class TestIEJoinRegistryDeferral:
 
         # Assert
         assert "SET VARIABLE __giql_iejoin_" in sql
+
+    def test_registry_should_resolve_duckdb_intersects_to_iejoin_override(self):
+        """Test that the built-in DuckDB IEJoin override is registered.
+
+        Given:
+            The process-wide registry with its import-time built-in expanders.
+        When:
+            Querying it for the (DuckDBTarget, Intersects) entry.
+        Then:
+            It should report the override present and resolve it to the DuckDB
+            IEJoin expander — the migrated pass-3 join strategy (#169), not the
+            generic naive-predicate fallback.
+        """
+        # Act & assert
+        assert REGISTRY.has_override(DuckDBTarget(), Intersects) is True
+        assert REGISTRY.resolve(DuckDBTarget(), Intersects) is expand_intersects_duckdb
 
 
 class TestTranspileExpanderDispatch:

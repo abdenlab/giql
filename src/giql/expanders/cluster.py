@@ -26,8 +26,9 @@ qualified star projection — emits the outer star as ``* EXCEPT (__giql_is_new_
 to hide the synthesized flag from the output (#184, #185).)
 
 This module is the AST-expansion replacement for the legacy
-:class:`giql.transformer.ClusterTransformer`, which ran as a pre-pass transformer
-on the raw parsed AST. It produces the same SQL; the existing CLUSTER
+``ClusterTransformer``, which ran as a pre-pass transformer on the raw parsed AST
+(in the former ``giql.transformer`` module, removed once every join rewrite became
+registry-driven — #144, #169). It produces the same SQL; the existing CLUSTER
 transpilation and bedtools oracle tests are the migration oracle.
 
 Unlike the node-local expanders for DISTANCE / NEAREST / DISJOIN — whose result

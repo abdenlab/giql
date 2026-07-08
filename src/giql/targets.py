@@ -8,17 +8,16 @@ This is step 1 of epic #137. The targets and capability descriptors defined
 here are the foundation that later steps build on — the operator-expander
 registry is keyed by ``(target, operator)`` and emission choices are
 capability lookups rather than scattered ``if dialect == ...`` branches.
-As of #143/#145 the model actively drives emission: the INTERSECTS join
-strategy (``range_join_strategy``), the NEAREST LATERAL-vs-window form
-(``supports_lateral``), and the coordinate-canonicalization wrapper and
-NEAREST/DISJOIN passthroughs (``supports_star_replace``) all read from the
-active target's capabilities.
+As of #143/#145 the model actively drives emission: the NEAREST LATERAL-vs-window
+form (``supports_lateral``) and the coordinate-canonicalization wrapper and
+NEAREST/DISJOIN passthroughs (``supports_star_replace``) read from the active
+target's capabilities. The INTERSECTS join strategy is instead selected by the
+operator-expander registry (#169): DuckDB registers a ``(DuckDBTarget, Intersects)``
+IEJoin override, and every other target falls back to the generic naive-predicate
+expander — no capability flag is consulted.
 """
 
 from dataclasses import dataclass
-from typing import Literal
-
-RangeJoinStrategy = Literal["naive", "iejoin"]
 
 
 @dataclass(frozen=True)
@@ -48,19 +47,11 @@ class Capabilities:
         Whether the engine supports the ``QUALIFY`` clause. Reserved: no
         emission path consumes it yet (a future window-function operator
         port would).
-    range_join_strategy : RangeJoinStrategy
-        The plan used for column-to-column INTERSECTS joins: ``"naive"``
-        emits the naive overlap predicate (a plain ``ON`` condition the engine
-        plans as a range join) via the ``(GenericTarget, Intersects)`` pass-3
-        expander; ``"iejoin"`` selects DuckDB's per-partition IEJoin pre-pass
-        plan. The IEJoin path covers INNER / SEMI / ANTI joins and falls back to
-        the naive predicate for the shapes it declines (#167).
     """
 
     supports_lateral: bool
     supports_star_replace: bool
     supports_qualify: bool
-    range_join_strategy: RangeJoinStrategy
 
 
 @dataclass(frozen=True)
@@ -111,7 +102,6 @@ class GenericTarget(Target):
         supports_lateral=True,
         supports_star_replace=False,
         supports_qualify=False,
-        range_join_strategy="naive",
     )
 
 
@@ -120,7 +110,9 @@ class DuckDBTarget(Target):
     """DuckDB target.
 
     Serializes through sqlglot's ``duckdb`` dialect and uses the IEJoin
-    per-partition plan for column-to-column INTERSECTS joins.
+    per-partition plan for column-to-column INTERSECTS joins, registered as the
+    ``(DuckDBTarget, Intersects)`` override in the operator-expander registry
+    (:mod:`giql.expanders.intersects_duckdb`, #169).
 
     Serializing through the ``duckdb`` dialect makes null ordering **explicit** on
     ``ORDER BY`` / window terms, emitting ``NULLS FIRST`` where the generic
@@ -138,7 +130,6 @@ class DuckDBTarget(Target):
         supports_lateral=True,
         supports_star_replace=True,
         supports_qualify=True,
-        range_join_strategy="iejoin",
     )
 
 
@@ -159,10 +150,11 @@ class DataFusionTarget(Target):
     so NEAREST takes the decorrelated window fallback), ``supports_star_replace=
     False`` (DataFusion supports ``* EXCEPT`` / ``* EXCLUDE`` but not
     ``* REPLACE``, so the canonicalizer and the NEAREST/DISJOIN passthroughs emit
-    the portable ``* EXCEPT`` form), ``supports_qualify=False``, and the naive
-    overlap-predicate range strategy (the column-to-column INTERSECTS join stays a
-    plain ``ON`` condition DataFusion plans as a hash join keyed on ``chrom`` with
-    the position inequalities as a residual join filter — #167).
+    the portable ``* EXCEPT`` form), and ``supports_qualify=False``. DataFusion
+    registers no INTERSECTS override, so a column-to-column INTERSECTS join falls
+    back to the generic naive overlap predicate — a plain ``ON`` condition
+    DataFusion plans as a hash join keyed on ``chrom`` with the position
+    inequalities as a residual join filter (#167).
 
     A ``SELECT *`` / ``SELECT b.*`` over a correlated NEAREST would otherwise expose
     the decorrelated fallback's reserved ``__giql_x_*`` rank/key columns; a statement
@@ -183,7 +175,6 @@ class DataFusionTarget(Target):
         supports_lateral=False,
         supports_star_replace=False,
         supports_qualify=False,
-        range_join_strategy="naive",
     )
 
 
