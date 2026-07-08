@@ -637,8 +637,10 @@ class TestTranspileDuckDBIEJoinSQLStructure:
         with pytest.raises(ValueError, match=r"[Uu]nknown dialect.*'postgres'"):
             transpile(query, tables=["peaks"], dialect="postgres")
 
-    def test_transpile_should_raise_when_select_has_unqualified_wildcard(self):
-        """Test that bare ``SELECT *`` is rejected under the DuckDB dialect.
+    def test_transpile_should_decline_bare_star_to_naive_plan_when_dialect_is_duckdb(
+        self,
+    ):
+        """Test that bare ``SELECT *`` declines to the naive-predicate plan.
 
         Given:
             A column-to-column INTERSECTS JOIN whose projection is a bare
@@ -646,8 +648,9 @@ class TestTranspileDuckDBIEJoinSQLStructure:
         When:
             ``transpile`` is called with ``dialect='duckdb'``.
         Then:
-            It should raise ``ValueError`` whose message mentions
-            "qualified" projections.
+            It should decline the IEJoin (no ``SET VARIABLE`` scaffolding)
+            so DuckDB expands the star against the live schema (#202),
+            rather than raising or silently narrowing the projection.
         """
         # Arrange
         query = """
@@ -656,9 +659,12 @@ class TestTranspileDuckDBIEJoinSQLStructure:
             JOIN genes b ON a.interval INTERSECTS b.interval
             """
 
-        # Act & assert
-        with pytest.raises(ValueError, match="qualified"):
-            transpile(query, tables=["peaks", "genes"], dialect="duckdb")
+        # Act
+        sql = transpile(query, tables=["peaks", "genes"], dialect="duckdb")
+
+        # Assert
+        assert "SET VARIABLE" not in sql.upper()
+        assert "getvariable" not in sql
 
     # --- DI-001..DI-009: new SQL-structure / contract tests --------------
 
@@ -1601,94 +1607,88 @@ class TestTranspileDuckDBIEJoinSQLStructure:
         # Assert
         assert "SET VARIABLE __giql_iejoin_" not in sql
 
-    def test_transpile_should_raise_with_window_specific_message_when_window_aggregate_in_select(
-        self,
-    ):
-        """Test that a window-aggregate projection raises with a targeted message.
+    def test_transpile_should_decline_window_aggregate_to_naive_plan(self):
+        """Test that a window-aggregate projection declines to the naive plan.
 
         Given:
             A SELECT list containing ``SUM(a.score) OVER (PARTITION BY
-            a.chrom)`` — a window aggregate, which the dispatcher does
-            not classify as ``exp.AggFunc``.
+            a.chrom)`` — a window aggregate over qualified columns the IEJoin
+            projection rebuild cannot express.
         When:
             ``transpile`` is called with ``dialect='duckdb'``.
         Then:
-            A ``ValueError`` is raised whose message names "window
-            aggregates" (rather than the generic "qualified
-            projections" message).
+            It should decline the IEJoin (no ``SET VARIABLE`` scaffolding) so
+            the naive-predicate plan evaluates the window aggregate (#205).
         """
-        # Act & assert
-        with pytest.raises(ValueError) as excinfo:
-            transpile(
-                "SELECT a.chrom AS c, "
-                "SUM(a.score) OVER (PARTITION BY a.chrom) AS s "
-                "FROM peaks a JOIN genes b "
-                "ON a.interval INTERSECTS b.interval",
-                tables=["peaks", "genes"],
-                dialect="duckdb",
-            )
-        assert "window" in str(excinfo.value).lower()
-
-    def test_transpile_should_raise_with_window_message_when_paren_wrapped_window_aggregate(
-        self,
-    ):
-        """Test that ``(SUM(a.score) OVER (...))`` gets the targeted window message.
-
-        Given:
-            A paren-wrapped window aggregate in the SELECT list. The
-            Paren wrapper hides the inner ``exp.Window`` from the
-            non-peeled type check that the diagnostic branches used to
-            rely on.
-        When:
-            ``transpile`` is called with ``dialect='duckdb'``.
-        Then:
-            The dispatcher peels the Paren and routes to the window
-            diagnostic branch, raising the dedicated window-aggregate
-            message rather than the generic
-            arithmetic-over-aggregate one.
-        """
-        # Act & assert
-        with pytest.raises(ValueError) as excinfo:
-            transpile(
-                "SELECT a.chrom AS c, "
-                "(SUM(a.score) OVER (PARTITION BY a.chrom)) AS s "
-                "FROM peaks a JOIN genes b "
-                "ON a.interval INTERSECTS b.interval",
-                tables=["peaks", "genes"],
-                dialect="duckdb",
-            )
-        assert "window" in str(excinfo.value).lower()
-
-    def test_transpile_should_raise_with_aggregate_in_expression_message_when_count_in_arithmetic(
-        self,
-    ):
-        """Test that arithmetic over an aggregate raises with a targeted message.
-
-        Given:
-            A SELECT list containing ``COUNT(*) * 2`` — arithmetic over
-            an aggregate, which the dispatcher does not classify as
-            ``exp.AggFunc``.
-        When:
-            ``transpile`` is called with ``dialect='duckdb'``.
-        Then:
-            A ``ValueError`` is raised whose message names aggregates
-            inside expressions (rather than the generic "qualified
-            projections" message).
-        """
-        # Act & assert
-        with pytest.raises(ValueError) as excinfo:
-            transpile(
-                "SELECT a.chrom AS c, COUNT(*) * 2 AS doubled "
-                "FROM peaks a JOIN genes b "
-                "ON a.interval INTERSECTS b.interval "
-                "GROUP BY a.chrom",
-                tables=["peaks", "genes"],
-                dialect="duckdb",
-            )
-        message = str(excinfo.value).lower()
-        assert "aggregate" in message and (
-            "expression" in message or "arithmetic" in message
+        # Act
+        sql = transpile(
+            "SELECT a.chrom AS c, "
+            "SUM(a.score) OVER (PARTITION BY a.chrom) AS s "
+            "FROM peaks a JOIN genes b "
+            "ON a.interval INTERSECTS b.interval",
+            tables=["peaks", "genes"],
+            dialect="duckdb",
         )
+
+        # Assert
+        assert "SET VARIABLE" not in sql.upper()
+        assert "getvariable" not in sql
+
+    def test_transpile_should_decline_paren_wrapped_window_aggregate_to_naive_plan(
+        self,
+    ):
+        """Test that ``(SUM(a.score) OVER (...))`` declines to the naive plan.
+
+        Given:
+            A paren-wrapped window aggregate over qualified columns in the
+            SELECT list.
+        When:
+            ``transpile`` is called with ``dialect='duckdb'``.
+        Then:
+            The dispatcher peels the Paren and declines the IEJoin (no ``SET
+            VARIABLE`` scaffolding) so the naive-predicate plan handles the
+            window aggregate (#205).
+        """
+        # Act
+        sql = transpile(
+            "SELECT a.chrom AS c, "
+            "(SUM(a.score) OVER (PARTITION BY a.chrom)) AS s "
+            "FROM peaks a JOIN genes b "
+            "ON a.interval INTERSECTS b.interval",
+            tables=["peaks", "genes"],
+            dialect="duckdb",
+        )
+
+        # Assert
+        assert "SET VARIABLE" not in sql.upper()
+        assert "getvariable" not in sql
+
+    def test_transpile_should_decline_aggregate_in_expression_to_naive_plan(self):
+        """Test that arithmetic over an aggregate declines to the naive plan.
+
+        Given:
+            A SELECT list containing ``COUNT(*) * 2`` — an aggregate nested in
+            an arithmetic expression the IEJoin projection rebuild cannot
+            express.
+        When:
+            ``transpile`` is called with ``dialect='duckdb'``.
+        Then:
+            It should decline the IEJoin (no ``SET VARIABLE`` scaffolding) so
+            the naive-predicate plan evaluates the expression (#205).
+        """
+        # Act
+        sql = transpile(
+            "SELECT a.chrom AS c, COUNT(*) * 2 AS doubled "
+            "FROM peaks a JOIN genes b "
+            "ON a.interval INTERSECTS b.interval "
+            "GROUP BY a.chrom",
+            tables=["peaks", "genes"],
+            dialect="duckdb",
+        )
+
+        # Assert
+        assert "SET VARIABLE" not in sql.upper()
+        assert "getvariable" not in sql
 
     def test_transpile_should_route_to_naive_predicate_plan_when_modifier_has_subquery(
         self,
@@ -1810,34 +1810,33 @@ class TestTranspileDuckDBIEJoinSQLStructure:
         assert "a.score" not in outer_select
         assert re.search(r"SUM\(__giql_p\d+\)", outer_select) is not None
 
-    def test_transpile_should_raise_with_subquery_specific_message_when_scalar_subquery_in_select(
-        self,
-    ):
-        """Test that a scalar subquery in SELECT gets a targeted error.
+    def test_transpile_should_decline_scalar_subquery_to_naive_plan(self):
+        """Test that a scalar subquery in the SELECT list declines to the naive plan.
 
         Given:
-            A SELECT list containing a scalar subquery that itself
-            contains an aggregate (``(SELECT SUM(score) FROM
-            other_table)``). Previously this hit the
-            arithmetic-over-aggregate message with misleading guidance.
+            A SELECT list containing a scalar subquery
+            (``(SELECT SUM(score) FROM peaks)``) — the subquery's columns
+            resolve against its own scope, and the IEJoin projection rebuild
+            cannot express it.
         When:
             ``transpile`` is called with ``dialect='duckdb'``.
         Then:
-            A ``ValueError`` whose message names the scalar-subquery
-            shape (rather than steering the user toward "do the
-            arithmetic in a wrapping query").
+            It should decline the IEJoin (no ``SET VARIABLE`` scaffolding) so
+            the naive-predicate plan evaluates the subquery (#205).
         """
-        # Act & assert
-        with pytest.raises(ValueError) as excinfo:
-            transpile(
-                "SELECT a.chrom AS c, "
-                "(SELECT SUM(score) FROM peaks) AS s "
-                "FROM peaks a JOIN genes b "
-                "ON a.interval INTERSECTS b.interval",
-                tables=["peaks", "genes"],
-                dialect="duckdb",
-            )
-        assert "subquer" in str(excinfo.value).lower()
+        # Act
+        sql = transpile(
+            "SELECT a.chrom AS c, "
+            "(SELECT SUM(score) FROM peaks) AS s "
+            "FROM peaks a JOIN genes b "
+            "ON a.interval INTERSECTS b.interval",
+            tables=["peaks", "genes"],
+            dialect="duckdb",
+        )
+
+        # Assert
+        assert "SET VARIABLE" not in sql.upper()
+        assert "getvariable" not in sql
 
     def test_transpile_should_route_to_naive_predicate_plan_when_query_has_distinct_on(
         self,
@@ -2138,17 +2137,17 @@ class TestTranspileDuckDBIEJoinSQLStructure:
         with pytest.raises(ValueError, match="[Uu]nknown.*qualifier|'c'"):
             transpile(query, tables=["peaks", "genes"], dialect="duckdb")
 
-    def test_transpile_should_raise_when_projection_uses_expression_form(self):
-        """Test that an arithmetic projection expression is rejected.
+    def test_transpile_should_decline_expression_form_projection_to_naive_plan(self):
+        """Test that an arithmetic projection expression declines to the naive plan.
 
         Given:
-            A SELECT list containing an expression
+            A SELECT list containing an expression over a qualified column
             (``a.start + 1``) rather than a bare qualified column.
         When:
             ``transpile`` is called with ``dialect='duckdb'``.
         Then:
-            It should raise ``ValueError`` whose message mentions
-            "qualified".
+            It should decline the IEJoin (no ``SET VARIABLE`` scaffolding) so
+            the naive-predicate plan evaluates the expression (#205).
         """
         # Arrange
         query = """
@@ -2157,18 +2156,17 @@ class TestTranspileDuckDBIEJoinSQLStructure:
             JOIN genes b ON a.interval INTERSECTS b.interval
             """
 
-        # Act & assert — message should echo the offending expression so
-        # the user can spot which projection to rewrite.
-        with pytest.raises(ValueError) as excinfo:
-            transpile(query, tables=["peaks", "genes"], dialect="duckdb")
-        message = str(excinfo.value)
-        assert "qualified" in message
-        assert "a.start + 1" in message or "a.start" in message
+        # Act
+        sql = transpile(query, tables=["peaks", "genes"], dialect="duckdb")
 
-    def test_transpile_should_raise_when_star_qualifier_references_unknown_table(
+        # Assert
+        assert "SET VARIABLE" not in sql.upper()
+        assert "getvariable" not in sql
+
+    def test_transpile_should_decline_star_with_unknown_qualifier_to_naive_plan(
         self,
     ):
-        """Test that ``c.*`` against an out-of-scope alias is rejected.
+        """Test that ``c.*`` against an out-of-scope alias declines to naive.
 
         Given:
             A SELECT list with a qualified-star projection ``c.*`` whose
@@ -2176,8 +2174,10 @@ class TestTranspileDuckDBIEJoinSQLStructure:
         When:
             ``transpile`` is called with ``dialect='duckdb'``.
         Then:
-            It should raise ``ValueError`` whose message names the
-            unknown qualifier.
+            It should decline the IEJoin (no ``SET VARIABLE`` scaffolding)
+            like every star (#202) and defer the out-of-scope qualifier to
+            DuckDB's binder, which rejects it at execution — matching the
+            naive-predicate plan rather than raising at transpile time.
         """
         # Arrange
         query = """
@@ -2186,9 +2186,12 @@ class TestTranspileDuckDBIEJoinSQLStructure:
             JOIN genes b ON a.interval INTERSECTS b.interval
             """
 
-        # Act & assert
-        with pytest.raises(ValueError, match="[Uu]nknown.*qualifier|'c'"):
-            transpile(query, tables=["peaks", "genes"], dialect="duckdb")
+        # Act
+        sql = transpile(query, tables=["peaks", "genes"], dialect="duckdb")
+
+        # Assert
+        assert "SET VARIABLE" not in sql.upper()
+        assert "getvariable" not in sql
 
     def test_transpile_should_use_unique_variable_names_across_interleaved_calls(
         self, conn
@@ -2689,34 +2692,34 @@ class TestTranspileDuckDBIEJoinSQLStructure:
         # Assert
         assert "SET VARIABLE __giql_iejoin_" not in sql
 
-    def test_transpile_should_raise_when_select_projects_a_literal(self):
-        """Test that a literal-only SELECT-list entry raises ``ValueError``.
+    def test_transpile_should_decline_literal_projection_to_naive_plan(self):
+        """Test that a literal-only SELECT-list entry declines to the naive plan.
 
         Given:
             A query whose SELECT list contains a bare integer literal
-            (``SELECT 100 FROM peaks a JOIN ...``).
+            (``SELECT 100 FROM peaks a JOIN ...``) — a constant projection
+            with no column the IEJoin projection rebuild handles.
         When:
             ``transpile`` is called with ``dialect='duckdb'``.
         Then:
-            A ``ValueError`` matching ``qualified`` should be raised
-            and the offending literal text should appear in the message.
+            It should decline the IEJoin (no ``SET VARIABLE`` scaffolding) so
+            the naive-predicate plan projects the literal (#205).
         """
-        # Act & assert
-        with pytest.raises(ValueError) as excinfo:
-            transpile(
-                "SELECT 100 FROM peaks a "
-                "JOIN genes b ON a.interval INTERSECTS b.interval",
-                tables=["peaks", "genes"],
-                dialect="duckdb",
-            )
-        message = str(excinfo.value)
-        assert "qualified" in message
-        assert "100" in message
+        # Act
+        sql = transpile(
+            "SELECT 100 FROM peaks a JOIN genes b ON a.interval INTERSECTS b.interval",
+            tables=["peaks", "genes"],
+            dialect="duckdb",
+        )
 
-    def test_transpile_should_raise_when_star_projection_carries_a_user_alias(
+        # Assert
+        assert "SET VARIABLE" not in sql.upper()
+        assert "getvariable" not in sql
+
+    def test_transpile_should_decline_aliased_star_to_naive_plan(
         self,
     ):
-        """Test that ``SELECT a.* AS x`` is rejected rather than silently stripped.
+        """Test that ``SELECT a.* AS x`` declines to the naive-predicate plan.
 
         Given:
             A query with a star projection that also has a user alias
@@ -2724,29 +2727,34 @@ class TestTranspileDuckDBIEJoinSQLStructure:
         When:
             ``transpile`` is called with ``dialect='duckdb'``.
         Then:
-            A ``ValueError`` should be raised mentioning the
-            unsupported alias and pointing at concrete alternatives
-            (drop the alias, or list columns explicitly).
+            It should decline the IEJoin (no ``SET VARIABLE`` scaffolding)
+            like every star (#202) and defer the aliased-star shape to
+            DuckDB — matching the naive-predicate plan rather than raising
+            at transpile time.
         """
-        # Act & assert
-        with pytest.raises(ValueError) as excinfo:
-            transpile(
-                "SELECT a.* AS x FROM peaks a "
-                "JOIN genes b ON a.interval INTERSECTS b.interval",
-                tables=["peaks", "genes"],
-                dialect="duckdb",
-            )
-        message = str(excinfo.value).lower()
-        assert "star" in message or "alias" in message
+        # Act
+        sql = transpile(
+            "SELECT a.* AS x FROM peaks a "
+            "JOIN genes b ON a.interval INTERSECTS b.interval",
+            tables=["peaks", "genes"],
+            dialect="duckdb",
+        )
+
+        # Assert
+        assert "SET VARIABLE" not in sql.upper()
+        assert "getvariable" not in sql
 
     def test_transpile_should_surface_value_error_for_unqualified_projection_under_dialect(
         self,
     ):
-        """Test that the dialect surfaces a plain ``ValueError`` on bare ``*``.
+        """Test that the dialect surfaces a plain ``ValueError`` on an unqualified column.
 
         Given:
             A query that triggers the dialect's unqualified-projection
-            rejection (bare ``SELECT *``).
+            rejection (an unqualified column ``SELECT score``). Bare
+            ``SELECT *`` no longer raises — stars decline to the naive
+            plan (#202) — so an unqualified column is the shape that still
+            exercises this contract.
         When:
             ``transpile`` is called with ``dialect='duckdb'``.
         Then:
@@ -2759,7 +2767,8 @@ class TestTranspileDuckDBIEJoinSQLStructure:
         # Act & assert
         with pytest.raises(ValueError) as excinfo:
             transpile(
-                "SELECT * FROM peaks a JOIN genes b ON a.interval INTERSECTS b.interval",
+                "SELECT score FROM peaks a "
+                "JOIN genes b ON a.interval INTERSECTS b.interval",
                 tables=["peaks", "genes"],
                 dialect="duckdb",
             )
@@ -3417,37 +3426,51 @@ class TestTranspileDuckDBIEJoinExecution:
 
     # --- DX-001..DX-011: behavioral truth tables -------------------------
 
-    def test_query_should_expand_qualified_star_when_dialect_is_duckdb(self, conn):
-        """Test that ``a.*, b.*`` expands to the genomic columns plus strand of each side.
+    def test_query_should_preserve_all_columns_for_qualified_star_when_dialect_is_duckdb(
+        self, conn
+    ):
+        """Test that ``a.*, b.*`` preserves every base-table column, matching the naive plan.
 
         Given:
-            A ``SELECT a.*, b.*`` projection over an INTERSECTS join.
+            A ``SELECT a.*, b.*`` projection over an INTERSECTS join, where
+            each table carries non-genomic columns (``name`` / ``score``)
+            beyond the configured chrom / start / end / strand.
         When:
-            The query is transpiled with ``dialect='duckdb'`` and executed.
+            The query is transpiled with ``dialect='duckdb'`` and executed,
+            and separately with ``dialect=None``.
         Then:
-            Each row should carry chrom / start / end plus strand from
-            both sides (the default Table config declares strand_col),
-            and the result should contain the expected overlap pair.
+            The DuckDB path should decline the IEJoin (#202) so the star
+            expands against the live schema — the result carries every
+            base-table column from both sides (not just the genomic subset),
+            identical in columns and rows to the naive-predicate plan.
         """
         # Arrange
         _make_table(conn, "peaks", [("chr1", 100, 200, "p1", 7, "+")])
         _make_table(conn, "genes", [("chr1", 150, 250, "g1", 9, "-")])
-        sql = transpile(
-            """
+        query = """
             SELECT a.*, b.*
             FROM peaks a
             JOIN genes b ON a.interval INTERSECTS b.interval
-            """,
-            tables=["peaks", "genes"],
-            dialect="duckdb",
-        )
+            """
+        sql_dd = transpile(query, tables=["peaks", "genes"], dialect="duckdb")
+        sql_naive = transpile(query, tables=["peaks", "genes"])
 
         # Act
-        result = conn.execute(sql)
-        rows = result.fetchall()
+        result_dd = conn.execute(sql_dd)
+        cols_dd = [d[0] for d in result_dd.description]
+        rows_dd = result_dd.fetchall()
+        result_naive = conn.execute(sql_naive)
+        cols_naive = [d[0] for d in result_naive.description]
+        rows_naive = result_naive.fetchall()
 
         # Assert
-        assert rows == [("chr1", 100, 200, "+", "chr1", 150, 250, "-")]
+        assert "SET VARIABLE" not in sql_dd.upper()
+        assert cols_dd == ["chrom", "start", "end", "name", "score", "strand"] * 2
+        assert rows_dd == [
+            ("chr1", 100, 200, "p1", 7, "+", "chr1", 150, 250, "g1", 9, "-")
+        ]
+        assert cols_dd == cols_naive
+        assert rows_dd == rows_naive
 
     def test_query_should_propagate_user_alias_on_qualified_column(self, conn):
         """Test that a ``a.start AS s`` alias survives the IEJoin rewrite.
@@ -6114,3 +6137,707 @@ class TestTranspileDuckDBIEJoinKwargs:
         message = str(excinfo.value)
         assert "Unknown dialect" in message
         assert "'postgres'" in message
+
+
+class TestTranspileDuckDBIEJoinLeftOnlyWhereIntersects:
+    """Regression tests for #201.
+
+    A ``SEMI`` / ``ANTI`` join whose column-to-column ``INTERSECTS`` lives in
+    the top-level ``WHERE`` (out of scope for the right table after a left-only
+    join) must decline the IEJoin rewrite so the naive-predicate plan surfaces
+    the same binder error the reference plans raise — rather than relocating
+    the predicate into the join and inventing anti/semi-overlap results.
+    """
+
+    @pytest.mark.parametrize("kind", ["ANTI", "SEMI"])
+    @pytest.mark.parametrize(
+        "on_clause", ["ON TRUE", "ON FALSE", "ON a.score > b.score"]
+    )
+    def test_transpile_should_decline_left_only_where_intersects_to_naive_plan(
+        self, kind, on_clause
+    ):
+        """Test that a SEMI/ANTI join with a WHERE-INTERSECTS declines to naive.
+
+        Given:
+            A ``SEMI`` / ``ANTI`` join carrying an arbitrary ``ON`` clause and
+            the column-to-column ``INTERSECTS`` in the top-level ``WHERE``.
+        When:
+            ``transpile`` is called with ``dialect='duckdb'``.
+        Then:
+            It should decline the IEJoin (no ``SET VARIABLE`` scaffolding) so
+            the naive-predicate plan handles the out-of-scope WHERE reference,
+            regardless of the ignored ``ON`` content.
+        """
+        # Arrange
+        query = (
+            f"SELECT a.name FROM peaks a {kind} JOIN genes b {on_clause} "
+            "WHERE a.interval INTERSECTS b.interval"
+        )
+
+        # Act
+        sql = transpile(query, tables=["peaks", "genes"], dialect="duckdb")
+
+        # Assert
+        assert "SET VARIABLE" not in sql.upper()
+        assert "getvariable" not in sql
+
+    @pytest.mark.parametrize("kind", ["ANTI", "SEMI"])
+    def test_query_should_raise_binder_error_for_where_intersects_like_naive_plan(
+        self, conn, kind
+    ):
+        """Test that DuckDB rejects the WHERE-INTERSECTS shape as the naive plan does.
+
+        Given:
+            A ``SEMI`` / ``ANTI`` join with ``ON TRUE`` and the ``INTERSECTS``
+            in the ``WHERE`` (right table out of scope), plus fixture data.
+        When:
+            The query is transpiled with ``dialect='duckdb'`` and with
+            ``dialect=None`` and both are executed.
+        Then:
+            Both should raise a DuckDB binder error naming the out-of-scope
+            right table — the dialect no longer diverges by silently inventing
+            results.
+        """
+        # Arrange
+        _make_table(conn, "peaks", [("chr1", 100, 200, "p1", 7, "+")])
+        _make_table(conn, "genes", [("chr1", 150, 250, "g1", 9, "-")])
+        query = (
+            f"SELECT a.name FROM peaks a {kind} JOIN genes b ON TRUE "
+            "WHERE a.interval INTERSECTS b.interval"
+        )
+        sql_dd = transpile(query, tables=["peaks", "genes"], dialect="duckdb")
+        sql_naive = transpile(query, tables=["peaks", "genes"])
+
+        # Act & assert
+        with pytest.raises(duckdb.Error, match='(?i)referenced table "?b"? not found'):
+            conn.execute(sql_dd)
+        with pytest.raises(duckdb.Error, match='(?i)referenced table "?b"? not found'):
+            conn.execute(sql_naive)
+
+    @pytest.mark.parametrize("kind", ["ANTI", "SEMI"])
+    def test_transpile_should_still_engage_iejoin_for_idiomatic_on_intersects(
+        self, kind
+    ):
+        """Test that the idiomatic SEMI/ANTI ON-INTERSECTS form still uses the IEJoin.
+
+        Given:
+            The well-formed shape with the ``INTERSECTS`` in the join's own
+            ``ON`` clause (the right table is legitimately in scope there).
+        When:
+            ``transpile`` is called with ``dialect='duckdb'``.
+        Then:
+            It should still engage the IEJoin path (``SET VARIABLE
+            __giql_iejoin_`` emitted) — the #201 decline must not over-reach
+            and disable the supported idiomatic form.
+        """
+        # Arrange
+        query = (
+            f"SELECT a.name FROM peaks a {kind} JOIN genes b "
+            "ON a.interval INTERSECTS b.interval"
+        )
+
+        # Act
+        sql = transpile(query, tables=["peaks", "genes"], dialect="duckdb")
+
+        # Assert
+        assert "SET VARIABLE __giql_iejoin_" in sql
+
+    def test_query_should_not_change_idiomatic_anti_result_after_decline_gate(
+        self, peaks_genes
+    ):
+        """Test that the idiomatic ANTI ON-INTERSECTS still returns correct rows.
+
+        Given:
+            The idiomatic ``ANTI JOIN ... ON a.interval INTERSECTS b.interval``
+            over the shared fixture (peaks with no overlapping gene survive).
+        When:
+            The query is transpiled with ``dialect='duckdb'`` and executed.
+        Then:
+            It should return exactly the left rows with no overlap, matching
+            the naive-predicate plan — confirming the new gate left the
+            supported path untouched.
+        """
+        # Arrange
+        conn = peaks_genes
+        query = (
+            "SELECT a.name FROM peaks a "
+            "ANTI JOIN genes b ON a.interval INTERSECTS b.interval"
+        )
+        sql_dd = transpile(query, tables=["peaks", "genes"], dialect="duckdb")
+        sql_naive = transpile(query, tables=["peaks", "genes"])
+
+        # Act
+        rows_dd = sorted(conn.execute(sql_dd).fetchall())
+        rows_naive = sorted(conn.execute(sql_naive).fetchall())
+
+        # Assert
+        assert "SET VARIABLE __giql_iejoin_" in sql_dd
+        assert rows_dd == rows_naive
+        assert rows_dd == [("p2",), ("p5",)]
+
+
+class TestTranspileDuckDBIEJoinStarProjectionFallback:
+    """Regression tests for #202.
+
+    Star projections (bare ``*``, ``a.*``, ``b.*``, ``a.* AS x``) must decline
+    the IEJoin rewrite so DuckDB expands the real star against the live schema,
+    keeping every base-table column and staying identical to the naive plan —
+    rather than silently narrowing the projection to the configured genomic
+    columns.
+    """
+
+    @pytest.mark.parametrize(
+        "projection",
+        ["a.*", "b.*", "a.*, b.*", "*", "a.* AS x", "a.chrom, b.*"],
+    )
+    def test_transpile_should_decline_star_projection_to_naive_plan(self, projection):
+        """Test that every star projection shape declines the IEJoin.
+
+        Given:
+            A column-to-column INTERSECTS INNER join whose SELECT list carries
+            a star in some form (bare, qualified, aliased, or mixed).
+        When:
+            ``transpile`` is called with ``dialect='duckdb'``.
+        Then:
+            It should decline the IEJoin (no ``SET VARIABLE`` scaffolding) so
+            the naive-predicate plan expands the star against the live schema.
+        """
+        # Arrange
+        query = (
+            f"SELECT {projection} FROM peaks a "
+            "JOIN genes b ON a.interval INTERSECTS b.interval"
+        )
+
+        # Act
+        sql = transpile(query, tables=["peaks", "genes"], dialect="duckdb")
+
+        # Assert
+        assert "SET VARIABLE" not in sql.upper()
+        assert "getvariable" not in sql
+
+    def test_query_should_match_naive_plan_for_a_star_under_anti(self, conn):
+        """Test the #202 repro: ``a.*`` under ANTI preserves every column.
+
+        Given:
+            The exact issue reproduction — ``SELECT a.*`` over an ANTI join
+            with one non-overlapping left row carrying ``name`` / ``score``
+            beyond the configured genomic columns.
+        When:
+            The query is transpiled with ``dialect='duckdb'`` and executed,
+            and separately with ``dialect=None``.
+        Then:
+            The DuckDB result should carry all six base-table columns
+            (``name`` / ``score`` no longer dropped) and equal the naive plan
+            in both columns and rows.
+        """
+        # Arrange
+        _make_table(
+            conn,
+            "peaks",
+            [("chr1", 100, 200, "p1", 7, "+"), ("chr1", 700, 800, "p3", 30, "+")],
+        )
+        _make_table(conn, "genes", [("chr1", 150, 250, "g1", 9, "-")])
+        query = (
+            "SELECT a.* FROM peaks a "
+            "ANTI JOIN genes b ON a.interval INTERSECTS b.interval"
+        )
+        sql_dd = transpile(query, tables=["peaks", "genes"], dialect="duckdb")
+        sql_naive = transpile(query, tables=["peaks", "genes"])
+
+        # Act
+        res_dd = conn.execute(sql_dd)
+        cols_dd = [d[0] for d in res_dd.description]
+        rows_dd = res_dd.fetchall()
+        res_naive = conn.execute(sql_naive)
+        cols_naive = [d[0] for d in res_naive.description]
+        rows_naive = res_naive.fetchall()
+
+        # Assert
+        assert "SET VARIABLE" not in sql_dd.upper()
+        assert cols_dd == ["chrom", "start", "end", "name", "score", "strand"]
+        assert rows_dd == [("chr1", 700, 800, "p3", 30, "+")]
+        assert cols_dd == cols_naive
+        assert rows_dd == rows_naive
+
+    def test_query_should_match_naive_plan_for_bare_star(self, conn):
+        """Test that bare ``SELECT *`` returns both tables' full columns.
+
+        Given:
+            A ``SELECT *`` over an INNER INTERSECTS join, each table carrying
+            non-genomic columns.
+        When:
+            The query is transpiled with ``dialect='duckdb'`` and executed,
+            and separately with ``dialect=None``.
+        Then:
+            The DuckDB result should carry all twelve columns (both tables'
+            full schema) and equal the naive plan in columns and rows.
+        """
+        # Arrange
+        _make_table(conn, "peaks", [("chr1", 100, 200, "p1", 7, "+")])
+        _make_table(conn, "genes", [("chr1", 150, 250, "g1", 9, "-")])
+        query = "SELECT * FROM peaks a JOIN genes b ON a.interval INTERSECTS b.interval"
+        sql_dd = transpile(query, tables=["peaks", "genes"], dialect="duckdb")
+        sql_naive = transpile(query, tables=["peaks", "genes"])
+
+        # Act
+        res_dd = conn.execute(sql_dd)
+        cols_dd = [d[0] for d in res_dd.description]
+        rows_dd = res_dd.fetchall()
+        res_naive = conn.execute(sql_naive)
+        cols_naive = [d[0] for d in res_naive.description]
+        rows_naive = res_naive.fetchall()
+
+        # Assert
+        assert "SET VARIABLE" not in sql_dd.upper()
+        assert cols_dd == ["chrom", "start", "end", "name", "score", "strand"] * 2
+        assert rows_dd == [
+            ("chr1", 100, 200, "p1", 7, "+", "chr1", 150, 250, "g1", 9, "-")
+        ]
+        assert cols_dd == cols_naive
+        assert rows_dd == rows_naive
+
+    def test_transpile_should_still_engage_iejoin_for_explicit_columns(self):
+        """Test that explicit (non-star) qualified projections still use the IEJoin.
+
+        Given:
+            A projection listing explicit qualified columns (no star).
+        When:
+            ``transpile`` is called with ``dialect='duckdb'``.
+        Then:
+            It should still engage the IEJoin path (``SET VARIABLE
+            __giql_iejoin_`` emitted) — the #202 star decline must not
+            over-reach and disable non-star projections.
+        """
+        # Arrange
+        query = (
+            "SELECT a.chrom, a.start, a.name, b.score FROM peaks a "
+            "JOIN genes b ON a.interval INTERSECTS b.interval"
+        )
+
+        # Act
+        sql = transpile(query, tables=["peaks", "genes"], dialect="duckdb")
+
+        # Assert
+        assert "SET VARIABLE __giql_iejoin_" in sql
+
+    def test_query_should_match_naive_plan_for_a_star_under_semi(self, conn):
+        """Test that ``a.*`` under SEMI preserves every column, matching the naive plan.
+
+        Given:
+            A ``SELECT a.*`` over a SEMI join, where the one matching left
+            row carries ``name`` / ``score`` beyond the genomic columns.
+        When:
+            The query is transpiled with ``dialect='duckdb'`` and executed,
+            and separately with ``dialect=None``.
+        Then:
+            The DuckDB result should carry all six base-table columns and
+            equal the naive plan in both columns and rows — the star decline
+            preserves the full projection under SEMI just as under ANTI/INNER.
+        """
+        # Arrange
+        _make_table(conn, "peaks", [("chr1", 100, 200, "p1", 7, "+")])
+        _make_table(conn, "genes", [("chr1", 150, 250, "g1", 9, "-")])
+        query = (
+            "SELECT a.* FROM peaks a "
+            "SEMI JOIN genes b ON a.interval INTERSECTS b.interval"
+        )
+        sql_dd = transpile(query, tables=["peaks", "genes"], dialect="duckdb")
+        sql_naive = transpile(query, tables=["peaks", "genes"])
+
+        # Act
+        res_dd = conn.execute(sql_dd)
+        cols_dd = [d[0] for d in res_dd.description]
+        rows_dd = res_dd.fetchall()
+        res_naive = conn.execute(sql_naive)
+        cols_naive = [d[0] for d in res_naive.description]
+        rows_naive = res_naive.fetchall()
+
+        # Assert
+        assert "SET VARIABLE" not in sql_dd.upper()
+        assert cols_dd == ["chrom", "start", "end", "name", "score", "strand"]
+        assert rows_dd == [("chr1", 100, 200, "p1", 7, "+")]
+        assert cols_dd == cols_naive
+        assert rows_dd == rows_naive
+
+    def test_query_should_match_naive_plan_for_aliased_star(self, conn):
+        """Test that ``a.* AS x`` executes to the same result as the naive plan.
+
+        Given:
+            A ``SELECT a.* AS x`` projection over an INNER INTERSECTS join.
+        When:
+            The query is transpiled with ``dialect='duckdb'`` and executed,
+            and separately with ``dialect=None``.
+        Then:
+            The declined DuckDB plan should be genuinely executable and
+            produce the same columns and rows as the naive plan (DuckDB
+            applies the alias uniformly across the expanded star), confirming
+            the fallback is not a broken shape.
+        """
+        # Arrange
+        _make_table(conn, "peaks", [("chr1", 100, 200, "p1", 7, "+")])
+        _make_table(conn, "genes", [("chr1", 150, 250, "g1", 9, "-")])
+        query = (
+            "SELECT a.* AS x FROM peaks a "
+            "JOIN genes b ON a.interval INTERSECTS b.interval"
+        )
+        sql_dd = transpile(query, tables=["peaks", "genes"], dialect="duckdb")
+        sql_naive = transpile(query, tables=["peaks", "genes"])
+
+        # Act
+        res_dd = conn.execute(sql_dd)
+        cols_dd = [d[0] for d in res_dd.description]
+        rows_dd = res_dd.fetchall()
+        res_naive = conn.execute(sql_naive)
+        cols_naive = [d[0] for d in res_naive.description]
+        rows_naive = res_naive.fetchall()
+
+        # Assert
+        assert "SET VARIABLE" not in sql_dd.upper()
+        assert cols_dd == cols_naive
+        assert rows_dd == rows_naive
+        assert rows_dd == [("chr1", 100, 200, "p1", 7, "+")]
+
+    @pytest.mark.parametrize("kind", ["ANTI", "SEMI"])
+    def test_query_should_raise_for_right_star_under_left_only_join_like_naive_plan(
+        self, conn, kind
+    ):
+        """Test that a right-side ``b.*`` under SEMI/ANTI errors as the naive plan does.
+
+        Given:
+            A ``SELECT b.*`` projection over a SEMI / ANTI join — the right
+            table is out of scope in a left-only join's output.
+        When:
+            The query is transpiled with ``dialect='duckdb'`` and with
+            ``dialect=None`` and both are executed.
+        Then:
+            Both should raise the same DuckDB binder error naming the
+            out-of-scope right table — the star decline defers the rejection
+            to DuckDB rather than raising a bespoke transpile-time error.
+        """
+        # Arrange
+        _make_table(conn, "peaks", [("chr1", 100, 200, "p1", 7, "+")])
+        _make_table(conn, "genes", [("chr1", 150, 250, "g1", 9, "-")])
+        query = (
+            f"SELECT b.* FROM peaks a {kind} JOIN genes b "
+            "ON a.interval INTERSECTS b.interval"
+        )
+        sql_dd = transpile(query, tables=["peaks", "genes"], dialect="duckdb")
+        sql_naive = transpile(query, tables=["peaks", "genes"])
+
+        # Act & assert
+        assert "SET VARIABLE" not in sql_dd.upper()
+        with pytest.raises(duckdb.Error, match='(?i)referenced table "?b"? not found'):
+            conn.execute(sql_dd)
+        with pytest.raises(duckdb.Error, match='(?i)referenced table "?b"? not found'):
+            conn.execute(sql_naive)
+
+    def test_query_should_raise_for_unknown_qualifier_star_like_naive_plan(self, conn):
+        """Test that ``c.*`` errors at execution as the naive plan does.
+
+        Given:
+            A ``SELECT c.*`` projection whose qualifier ``c`` is not one of
+            the join's two tables.
+        When:
+            The query is transpiled with ``dialect='duckdb'`` and with
+            ``dialect=None`` and both are executed.
+        Then:
+            Both should raise the same DuckDB binder error naming the unknown
+            table — the star decline defers the rejection to DuckDB rather
+            than raising at transpile time.
+        """
+        # Arrange
+        _make_table(conn, "peaks", [("chr1", 100, 200, "p1", 7, "+")])
+        _make_table(conn, "genes", [("chr1", 150, 250, "g1", 9, "-")])
+        query = (
+            "SELECT c.* FROM peaks a JOIN genes b ON a.interval INTERSECTS b.interval"
+        )
+        sql_dd = transpile(query, tables=["peaks", "genes"], dialect="duckdb")
+        sql_naive = transpile(query, tables=["peaks", "genes"])
+
+        # Act & assert
+        assert "SET VARIABLE" not in sql_dd.upper()
+        with pytest.raises(duckdb.Error, match='(?i)referenced table "?c"? not found'):
+            conn.execute(sql_dd)
+        with pytest.raises(duckdb.Error, match='(?i)referenced table "?c"? not found'):
+            conn.execute(sql_naive)
+
+
+class TestTranspileDuckDBIEJoinUnsupportedProjectionFallback:
+    """Regression tests for #204 and #205.
+
+    Projections the naive-predicate plan compiles but the IEJoin projection
+    rebuild cannot express — expressions (``a.start + 1``), window aggregates,
+    ``FILTER`` clauses, scalar subqueries, aggregates nested in expressions
+    (``COUNT(*) * 2``), and stars nested in an aggregate argument
+    (``COUNT(a.*)`` / ``MIN(COLUMNS(*))``) — must decline the IEJoin and fall
+    back to the naive plan, keeping ``dialect="duckdb"`` consistent with every
+    other backend rather than hard-erroring (#205) or miscompiling (#204). A
+    projection with an out-of-scope column reference stays a clean transpile
+    error (the naive plan rejects it too).
+    """
+
+    @pytest.mark.parametrize(
+        "projection",
+        [
+            "COUNT(a.*)",
+            "COUNT(b.*)",
+            "COUNT(a.* EXCLUDE (name))",
+            "MIN(COLUMNS(*))",
+            "a.start + 1",
+            "SUM(a.score) OVER ()",
+            "SUM(a.score) FILTER (WHERE a.score > 0)",
+            "COUNT(*) * 2",
+            "(SELECT 1) AS s",
+            "100",
+            "a.name, COUNT(a.*)",
+        ],
+    )
+    def test_transpile_should_decline_unsupported_projection_to_naive_plan(
+        self, projection
+    ):
+        """Test that every unsupported-but-naive-valid projection declines.
+
+        Given:
+            A column-to-column INTERSECTS INNER join whose SELECT list carries
+            a projection the IEJoin cannot rebuild but the naive plan handles.
+        When:
+            ``transpile`` is called with ``dialect='duckdb'``.
+        Then:
+            It should decline the IEJoin (no ``SET VARIABLE`` scaffolding) so
+            the naive-predicate plan compiles the projection.
+        """
+        # Arrange
+        query = (
+            f"SELECT {projection} FROM peaks a "
+            "JOIN genes b ON a.interval INTERSECTS b.interval"
+        )
+
+        # Act
+        sql = transpile(query, tables=["peaks", "genes"], dialect="duckdb")
+
+        # Assert
+        assert "SET VARIABLE" not in sql.upper()
+        assert "getvariable" not in sql
+
+    def test_query_should_match_naive_plan_for_count_qualified_star(self, conn):
+        """Test the #204 repro: ``COUNT(a.*)`` returns the naive count, not a crash.
+
+        Given:
+            A ``SELECT COUNT(a.*)`` over an INTERSECTS join with one
+            overlapping pair.
+        When:
+            The query is transpiled with ``dialect='duckdb'`` and executed,
+            and separately with ``dialect=None``.
+        Then:
+            The DuckDB result should equal the naive plan's count instead of
+            crashing with a binder error on a synthesized ``a."*"`` column.
+        """
+        # Arrange
+        _make_table(conn, "peaks", [("chr1", 100, 200, "p1", 7, "+")])
+        _make_table(conn, "genes", [("chr1", 150, 250, "g1", 9, "-")])
+        query = (
+            "SELECT COUNT(a.*) FROM peaks a "
+            "JOIN genes b ON a.interval INTERSECTS b.interval"
+        )
+        sql_dd = transpile(query, tables=["peaks", "genes"], dialect="duckdb")
+        sql_naive = transpile(query, tables=["peaks", "genes"])
+
+        # Act
+        rows_dd = conn.execute(sql_dd).fetchall()
+        rows_naive = conn.execute(sql_naive).fetchall()
+
+        # Assert
+        assert "SET VARIABLE" not in sql_dd.upper()
+        assert rows_dd == rows_naive
+        assert rows_dd == [(1,)]
+
+    def test_query_should_match_naive_plan_for_min_columns_star(self, conn):
+        """Test the #204 repro: ``MIN(COLUMNS(*))`` matches the naive per-column min.
+
+        Given:
+            A ``SELECT MIN(COLUMNS(*))`` over an INTERSECTS join.
+        When:
+            The query is transpiled with ``dialect='duckdb'`` and executed,
+            and separately with ``dialect=None``.
+        Then:
+            The DuckDB result should equal the naive plan's per-column min
+            across both tables' columns, not the previous bogus single scalar.
+        """
+        # Arrange
+        _make_table(conn, "peaks", [("chr1", 100, 200, "p1", 7, "+")])
+        _make_table(conn, "genes", [("chr1", 150, 250, "g1", 9, "-")])
+        query = (
+            "SELECT MIN(COLUMNS(*)) FROM peaks a "
+            "JOIN genes b ON a.interval INTERSECTS b.interval"
+        )
+        sql_dd = transpile(query, tables=["peaks", "genes"], dialect="duckdb")
+        sql_naive = transpile(query, tables=["peaks", "genes"])
+
+        # Act
+        res_dd = conn.execute(sql_dd)
+        cols_dd = [d[0] for d in res_dd.description]
+        rows_dd = res_dd.fetchall()
+        res_naive = conn.execute(sql_naive)
+        cols_naive = [d[0] for d in res_naive.description]
+        rows_naive = res_naive.fetchall()
+
+        # Assert
+        assert "SET VARIABLE" not in sql_dd.upper()
+        assert len(cols_dd) == 12
+        assert cols_dd == cols_naive
+        assert rows_dd == rows_naive
+
+    @pytest.mark.parametrize(
+        "projection, expected",
+        [
+            ("a.start + 1", [(101,)]),
+            ("SUM(a.score) OVER ()", [(7,)]),
+            ("SUM(a.score) FILTER (WHERE a.score > 0)", [(7,)]),
+            ("COUNT(*) * 2", [(2,)]),
+            ("(SELECT 1) AS s", [(1,)]),
+            ("COUNT(a.*)", [(1,)]),
+        ],
+    )
+    def test_query_should_match_naive_plan_for_unsupported_projection(
+        self, conn, projection, expected
+    ):
+        """Test that a declined unsupported projection executes like the naive plan.
+
+        Given:
+            A projection the IEJoin cannot rebuild but the naive plan handles —
+            an expression, a window aggregate, a FILTER clause, an
+            arithmetic-over-aggregate, a scalar subquery, or an aggregate over a
+            qualified star — over an INTERSECTS join with one overlapping pair.
+        When:
+            The query is transpiled with ``dialect='duckdb'`` and executed, and
+            separately with ``dialect=None``.
+        Then:
+            The declined DuckDB plan should return the same rows as the naive
+            plan (#204, #205), confirming the fallback is genuinely executable.
+        """
+        # Arrange
+        _make_table(conn, "peaks", [("chr1", 100, 200, "p1", 7, "+")])
+        _make_table(conn, "genes", [("chr1", 150, 250, "g1", 9, "-")])
+        query = (
+            f"SELECT {projection} FROM peaks a "
+            "JOIN genes b ON a.interval INTERSECTS b.interval"
+        )
+        sql_dd = transpile(query, tables=["peaks", "genes"], dialect="duckdb")
+        sql_naive = transpile(query, tables=["peaks", "genes"])
+
+        # Act
+        rows_dd = conn.execute(sql_dd).fetchall()
+        rows_naive = conn.execute(sql_naive).fetchall()
+
+        # Assert
+        assert "SET VARIABLE" not in sql_dd.upper()
+        assert rows_dd == rows_naive
+        assert rows_dd == expected
+
+    @pytest.mark.parametrize(
+        "projection",
+        [
+            "score + 1",
+            "SUM(score) OVER ()",
+            "SUM(score) FILTER (WHERE score > 0)",
+        ],
+    )
+    def test_transpile_should_raise_when_unsupported_wrapper_has_unqualified_column(
+        self, projection
+    ):
+        """Test that an unqualified column inside an unsupported wrapper raises.
+
+        Given:
+            An expression / window aggregate / FILTER clause whose argument
+            references an unqualified column the dialect cannot attribute to a
+            join side.
+        When:
+            ``transpile`` is called with ``dialect='duckdb'``.
+        Then:
+            It should raise ``ValueError`` guiding the user to qualify the
+            column (rather than declining) — every wrapper kind reaches the same
+            diagnostic.
+        """
+        # Act & assert
+        with pytest.raises(ValueError, match="qualified"):
+            transpile(
+                f"SELECT {projection} FROM peaks a "
+                "JOIN genes b ON a.interval INTERSECTS b.interval",
+                tables=["peaks", "genes"],
+                dialect="duckdb",
+            )
+
+    @pytest.mark.parametrize("kind", ["SEMI", "ANTI"])
+    def test_transpile_should_raise_left_side_only_for_right_ref_in_wrapper(self, kind):
+        """Test that a right-side column in a wrapper names the left-only rule.
+
+        Given:
+            A ``SUM(b.score) OVER ()`` projection under a SEMI / ANTI join — a
+            right-side reference the left-only output cannot resolve.
+        When:
+            ``transpile`` is called with ``dialect='duckdb'``.
+        Then:
+            It should raise the dedicated left-side-only ``ValueError`` (naming
+            the right side) rather than the generic "qualify the column"
+            message, which would steer the user toward another invalid form.
+        """
+        # Act & assert
+        with pytest.raises(ValueError, match="left-side"):
+            transpile(
+                f"SELECT SUM(b.score) OVER () FROM peaks a {kind} JOIN genes b "
+                "ON a.interval INTERSECTS b.interval",
+                tables=["peaks", "genes"],
+                dialect="duckdb",
+            )
+
+    @pytest.mark.parametrize("kind", ["SEMI", "ANTI"])
+    def test_transpile_should_decline_unsupported_projection_under_left_only_join(
+        self, kind
+    ):
+        """Test that an unsupported projection under SEMI/ANTI declines to naive.
+
+        Given:
+            An ``a.start + 1`` expression projection under a SEMI / ANTI join.
+        When:
+            ``transpile`` is called with ``dialect='duckdb'``.
+        Then:
+            It should decline the IEJoin (no ``SET VARIABLE`` scaffolding) so
+            the naive-predicate plan handles it — the decline applies under
+            left-only joins as under INNER.
+        """
+        # Arrange
+        query = (
+            f"SELECT a.start + 1 FROM peaks a {kind} JOIN genes b "
+            "ON a.interval INTERSECTS b.interval"
+        )
+
+        # Act
+        sql = transpile(query, tables=["peaks", "genes"], dialect="duckdb")
+
+        # Assert
+        assert "SET VARIABLE" not in sql.upper()
+        assert "getvariable" not in sql
+
+    def test_transpile_should_still_engage_iejoin_for_plain_aggregate(self):
+        """Test that a plain qualified aggregate still engages the IEJoin.
+
+        Given:
+            A supported ``SUM(a.score)`` aggregate projection (no window,
+            FILTER, expression wrapper, or star argument).
+        When:
+            ``transpile`` is called with ``dialect='duckdb'``.
+        Then:
+            It should still engage the IEJoin path (``SET VARIABLE
+            __giql_iejoin_`` emitted) — the #204 / #205 declines must not
+            over-reach and disable plain aggregates.
+        """
+        # Act
+        sql = transpile(
+            "SELECT SUM(a.score) FROM peaks a "
+            "JOIN genes b ON a.interval INTERSECTS b.interval",
+            tables=["peaks", "genes"],
+            dialect="duckdb",
+        )
+
+        # Assert
+        assert "SET VARIABLE __giql_iejoin_" in sql
