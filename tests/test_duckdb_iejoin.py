@@ -3368,6 +3368,130 @@ class TestTranspileDuckDBIEJoinCountOverlaps:
         # Assert
         assert "__giql_counts" not in sql
 
+    def test_transpile_should_decline_count_overlaps_when_group_by_exceeds_projection(
+        self,
+    ):
+        """Test that a GROUP BY with keys beyond the projection declines to naive.
+
+        Given:
+            A LEFT-join COUNT that groups by ``a.chrom, a.start`` but projects
+            only ``a.chrom``.
+        When:
+            ``transpile`` is called with ``dialect='duckdb'``.
+        Then:
+            It should decline the fast path (no ``__giql_counts`` wrapper),
+            because the extra group key produces more rows than the distinct
+            projected keys, which the zero-fill base cannot reproduce.
+        """
+        # Arrange
+        query = (
+            "SELECT a.chrom, COUNT(b.chrom) AS n "
+            "FROM a LEFT JOIN b ON a.interval INTERSECTS b.interval "
+            'GROUP BY a.chrom, a."start"'
+        )
+
+        # Act
+        sql = transpile(query, tables=["a", "b"], dialect="duckdb")
+
+        # Assert
+        assert "__giql_counts" not in sql
+
+    def test_transpile_should_decline_count_overlaps_when_output_names_collide(self):
+        """Test that a key/count output-name collision declines to naive.
+
+        Given:
+            A LEFT-join COUNT whose projected key column and count alias share
+            the output name ``n``.
+        When:
+            ``transpile`` is called with ``dialect='duckdb'``.
+        Then:
+            It should decline the fast path (no ``__giql_counts`` wrapper),
+            because the zero-fill USING / COALESCE would bind to the wrong
+            duplicately-named column.
+        """
+        # Arrange
+        query = (
+            "SELECT a.n, COUNT(b.chrom) AS n "
+            "FROM a LEFT JOIN b ON a.interval INTERSECTS b.interval GROUP BY a.n"
+        )
+
+        # Act
+        sql = transpile(query, tables=["a", "b"], dialect="duckdb")
+
+        # Assert
+        assert "__giql_counts" not in sql
+
+    def test_transpile_should_decline_count_overlaps_when_where_present(self):
+        """Test that a top-level WHERE declines the count fast path to naive.
+
+        Given:
+            A LEFT-join COUNT carrying a top-level ``WHERE`` filter.
+        When:
+            ``transpile`` is called with ``dialect='duckdb'``.
+        Then:
+            It should decline the fast path (no ``__giql_counts`` wrapper);
+            post-join filters are out of scope for v1.
+        """
+        # Arrange
+        query = (
+            "SELECT a.chrom, COUNT(b.chrom) AS n "
+            "FROM a LEFT JOIN b ON a.interval INTERSECTS b.interval "
+            "WHERE a.start >= 0 GROUP BY a.chrom"
+        )
+
+        # Act
+        sql = transpile(query, tables=["a", "b"], dialect="duckdb")
+
+        # Assert
+        assert "__giql_counts" not in sql
+
+    def test_count_overlaps_should_match_naive_plan_when_count_distinct(self, conn):
+        """Test that COUNT(DISTINCT b.col) matches the naive plan when executed.
+
+        Given:
+            Peaks and genes where a peak overlaps multiple genes sharing a
+            name (so DISTINCT collapses them) plus a non-overlapping peak.
+        When:
+            A ``COUNT(DISTINCT b.name)`` LEFT-join fast path is executed.
+        Then:
+            The rows should equal the naive-predicate plan, including the
+            zero-filled non-overlapping peak.
+        """
+        # Arrange
+        conn.execute(
+            'CREATE TABLE peaks (chrom VARCHAR, "start" INTEGER, "end" INTEGER)'
+        )
+        conn.execute(
+            "CREATE TABLE genes "
+            '(chrom VARCHAR, "start" INTEGER, "end" INTEGER, name VARCHAR)'
+        )
+        conn.executemany(
+            "INSERT INTO peaks VALUES (?, ?, ?)",
+            [("chr1", 100, 200), ("chr1", 900, 950)],
+        )
+        conn.executemany(
+            "INSERT INTO genes VALUES (?, ?, ?, ?)",
+            [
+                ("chr1", 120, 130, "g1"),
+                ("chr1", 140, 150, "g1"),
+                ("chr1", 160, 170, "g2"),
+            ],
+        )
+        query = (
+            'SELECT a.chrom, a.start, a."end", COUNT(DISTINCT b.name) AS n '
+            "FROM peaks a LEFT JOIN genes b ON a.interval INTERSECTS b.interval "
+            'GROUP BY a.chrom, a.start, a."end"'
+        )
+        fast_sql = transpile(query, tables=["peaks", "genes"], dialect="duckdb")
+        naive_sql = transpile(query, tables=["peaks", "genes"])
+
+        # Act
+        fast_rows = sorted(conn.execute(fast_sql).fetchall())
+        naive_rows = sorted(conn.execute(naive_sql).fetchall())
+
+        # Assert
+        assert fast_rows == naive_rows
+
     @settings(
         max_examples=25,
         deadline=None,
