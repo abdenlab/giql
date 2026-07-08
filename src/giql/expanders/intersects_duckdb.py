@@ -44,7 +44,6 @@ from giql.expressions import Contains
 from giql.expressions import Intersects
 from giql.expressions import SpatialSetPredicate
 from giql.expressions import Within
-from giql.table import Table
 from giql.table import Tables
 from giql.targets import DuckDBTarget
 
@@ -53,13 +52,36 @@ class _UnqualifiedProjectionError(Exception):
     """Signal an unrecoverable projection-resolution failure in the DuckDB IEJoin path.
 
     Raised by :class:`IntersectsDuckDBIEJoinTransformer` when a query engages
-    the dialect path but contains a SELECT-list shape the dialect cannot
-    translate (bare ``*``, unqualified column, expression-form projection,
-    unknown table qualifier, ``a.* AS x``, window aggregate, ``FILTER`` clause,
-    arithmetic over an aggregate, or a scalar subquery in the projection list),
-    or an extras predicate that references an unqualified or unknown-aliased
-    column. Caught and re-raised as :class:`ValueError` at the dialect's public
+    the dialect path but contains a SELECT-list shape the rebuild cannot
+    attribute to a join side: an unqualified column, an unknown table
+    qualifier, an aggregate over an unqualified column, or a right-side
+    reference under a SEMI / ANTI join, plus an extras predicate that
+    references an unqualified or unknown-aliased column. The unknown-table,
+    aggregate-of-unqualified, and right-side cases are also rejected by the
+    naive plan; a *bare* unqualified column may in fact be naive-valid when it
+    is unambiguous, but the dialect has no live schema to attribute it to a
+    side, so it surfaces a clean transpile-time error rather than guessing.
+    Caught and re-raised as :class:`ValueError` at the dialect's public
     boundary.
+
+    Shapes the naive plan *accepts* but the IEJoin cannot rebuild do NOT raise
+    — star projections (#202), and expressions / window aggregates / ``FILTER``
+    clauses / scalar subqueries / aggregate-nested stars (#204, #205) — they
+    signal :class:`_DeclineIEJoin` and fall back to the naive plan instead.
+    """
+
+
+class _DeclineIEJoin(Exception):
+    """Signal that the IEJoin should decline a valid query to the naive plan.
+
+    Distinct from :class:`_UnqualifiedProjectionError`: this is not a user
+    error but a shape the naive-predicate plan compiles for free while the
+    IEJoin projection rebuild cannot express it (an expression, a window
+    aggregate, a ``FILTER`` clause, a scalar subquery, an aggregate nested in
+    an expression, or a star nested in an aggregate argument — #204, #205).
+    Caught in :meth:`IntersectsDuckDBIEJoinTransformer.transform_to_sql`, which
+    returns ``None`` so the generic naive-predicate plan handles the query,
+    keeping ``dialect="duckdb"`` consistent with every other backend.
     """
 
 
@@ -130,6 +152,141 @@ def _has_outer_join_intersects(query: exp.Select) -> bool:
     if where and _find_column_intersects_in(where.this):
         return True
     return False
+
+
+def _has_left_only_join_where_intersects(query: exp.Select) -> bool:
+    """Return True if a SEMI/ANTI join carries its INTERSECTS in the WHERE.
+
+    A left-only (``SEMI`` / ``ANTI``) join's right table is out of scope in
+    the top-level ``WHERE`` — the reference plans (``dialect=None`` /
+    ``"datafusion"``) reject a right-referencing ``WHERE`` predicate with a
+    binder error. The dialect's ``WHERE``-branch (which exists to support the
+    legitimate implicit comma/cross-join idiom, an ``INNER`` join whose right
+    table *is* in scope in the ``WHERE``) would instead relocate that
+    ``INTERSECTS`` into the join ``ON`` and invent anti/semi-overlap results,
+    diverging from every other backend (#201). Decline whenever an explicit
+    ``SEMI`` / ``ANTI`` join is present and a column-to-column ``INTERSECTS``
+    sits in the top-level ``WHERE`` (necessarily out of scope), so the naive
+    plan surfaces the same binder error the reference plans raise. The
+    ``INTERSECTS`` search recurses (via ``find_all``), so a column-to-column
+    ``INTERSECTS`` nested inside a ``WHERE`` subquery also declines here;
+    that is a harmless over-decline (it only ever routes to the correct
+    naive plan) and such shapes already decline via other gates.
+    """
+    if not isinstance(query, exp.Select):
+        return False
+    has_left_only_join = any(
+        (join.args.get("kind") or "").upper() in ("SEMI", "ANTI")
+        for join in query.args.get("joins") or []
+    )
+    if not has_left_only_join:
+        return False
+    where = query.args.get("where")
+    return bool(where and _find_column_intersects_in(where.this))
+
+
+def _has_star_projection(query: exp.Select) -> bool:
+    """Return True if the SELECT list contains any star projection.
+
+    The IEJoin rewrite restructures the query into per-chromosome subqueries
+    that project **explicitly-named** ``__giql_p<n>`` columns up through a
+    wrapper relation, so building that dynamic SQL requires enumerating the
+    star's columns at transpile time. But GIQL only knows the genomic columns
+    declared in the :class:`~giql.table.Table` config (chrom / start / end /
+    strand) — it has no view of the live table schema, so it cannot see
+    arbitrary base-table columns (``name`` / ``score`` / ...). Expanding
+    ``a.*`` here would silently drop them, narrowing the result relative to
+    every other backend (#202). Decline any star projection (bare ``*`` or
+    qualified ``t.*``, with or without a user alias) so the naive-predicate
+    plan expands it against DuckDB's live schema at bind time, keeping the
+    projection identical across backends.
+    """
+    if not isinstance(query, exp.Select):
+        return False
+    for sel in query.expressions:
+        target = sel.this if isinstance(sel, exp.Alias) else sel
+        while isinstance(target, exp.Paren):
+            target = target.this
+        if isinstance(target, exp.Star):
+            return True
+        if isinstance(target, exp.Column) and isinstance(target.this, exp.Star):
+            return True
+    return False
+
+
+def _projection_declines_to_naive(
+    target: exp.Expression,
+    l_alias: str,
+    r_alias: str,
+    is_left_only: bool,
+) -> bool:
+    """Return True if *target* is a projection the IEJoin should decline to naive.
+
+    The IEJoin projection rebuild only handles a qualified column (``a.col``)
+    or a plain aggregate over qualified columns (``SUM(a.score)`` / ``COUNT(*)``);
+    it emits explicitly-named ``__giql_p<n>`` inner columns and reconstructs the
+    outer SELECT from them. Any other shape the naive-predicate plan compiles
+    for free — an expression (``a.start + 1``), a window aggregate, a ``FILTER``
+    clause, a scalar subquery, an aggregate nested in an expression
+    (``COUNT(*) * 2``), or a star nested in an aggregate argument
+    (``COUNT(a.*)`` / ``MIN(COLUMNS(*))``) — should decline so ``dialect="duckdb"``
+    stays consistent with every other backend instead of hard-erroring or, for
+    the aggregate-nested star, miscompiling (#204, #205).
+
+    A projection that references a column **in its own scope** the rebuild
+    cannot attribute to a join side (unqualified, an unknown table, or the
+    right side under a SEMI / ANTI join) does NOT decline — the dispatch raises
+    a clean :class:`_UnqualifiedProjectionError` instead. The unknown-table and
+    right-side cases are rejected by the naive plan too; a bare unqualified
+    column may be naive-valid when unambiguous, but the dialect has no live
+    schema to pick a side, so a transpile-time error is more actionable than
+    guessing. Columns inside a nested subquery resolve against that subquery,
+    not the join, so they are ignored by this test.
+    """
+    # A qualified, non-star column is rebuilt directly — never declines here.
+    if (
+        isinstance(target, exp.Column)
+        and target.table
+        and not isinstance(target.this, exp.Star)
+    ):
+        return False
+    # An aggregate is decided here in full (it never falls through to the
+    # column scan below — an unqualified aggregate argument like ``SUM(score)``
+    # is diagnosed in ``render_aggregate``, not treated as a decline). A star
+    # nested in an aggregate argument (``COUNT(a.*)`` / ``MIN(COLUMNS(*))`` /
+    # ``COUNT(a.* EXCLUDE (name))``) cannot be enumerated, so it declines
+    # regardless of any EXCLUDE / REPLACE modifier columns (#204); a plain
+    # aggregate over qualified columns (``COUNT(*)`` / ``SUM(a.score)`` /
+    # ``COUNT(DISTINCT a.col)``) is rebuilt directly.
+    if isinstance(target, exp.AggFunc):
+        has_star_arg = any(
+            isinstance(col.this, exp.Star) for col in target.find_all(exp.Column)
+        )
+        return has_star_arg or target.find(exp.Columns) is not None
+    # Unsupported by the rebuild. Decline to naive unless an own-scope column
+    # is out of scope (a user error the naive plan rejects too — let the
+    # dispatch raise instead).
+    for col in target.find_all(exp.Column):
+        if isinstance(col.this, exp.Star):
+            continue  # qualified star — declinable, not a plain column ref
+        # Skip a column inside a nested subquery within *target* (it resolves
+        # against that subquery, not the join). *target* is an ancestor of
+        # *col*, so walking up from ``col.parent`` reaches it; a Select /
+        # Subquery strictly between them is a nested scope. When ``col`` IS
+        # ``target`` (a bare column projection), there is no interior to walk.
+        in_subquery = False
+        node = col.parent if col is not target else target
+        while node is not None and node is not target:
+            if isinstance(node, (exp.Select, exp.Subquery)):
+                in_subquery = True
+                break
+            node = node.parent
+        if in_subquery:
+            continue
+        tbl = _normalize_alias(col.table) if col.table else ""
+        if tbl not in (l_alias, r_alias) or (is_left_only and tbl == r_alias):
+            return False
+    return True
 
 
 def _strip_intersects(
@@ -273,17 +430,29 @@ class IntersectsDuckDBIEJoinTransformer:
 
     Notes:
 
-    - ``a.*`` / ``b.*`` star projections expand to the genomic columns
-      declared by the corresponding :class:`~giql.table.Table` config
-      (chrom / start / end, plus strand when set). This narrows the result
-      schema relative to the generic naive-predicate plan, which delegates star expansion
-      to DuckDB and projects every base-table column. Users with additional
-      non-genomic columns should list them explicitly.
+    - Star projections (bare ``*`` and ``a.*`` / ``b.*``) decline to the
+      generic naive-predicate plan, which delegates star expansion to DuckDB
+      and projects every base-table column against the live schema. The
+      dialect cannot enumerate a star at transpile time — it only knows the
+      :class:`~giql.table.Table` config's genomic columns (chrom / start /
+      end / strand), not arbitrary user columns — so declining keeps the
+      projection identical across backends rather than silently narrowing
+      it (#202).
+    - A projection the rebuild cannot express but the naive plan handles —
+      an expression (``a.start + 1``), a window aggregate, a ``FILTER``
+      clause, a scalar subquery, an aggregate nested in an expression
+      (``COUNT(*) * 2``), or a star nested in an aggregate argument
+      (``COUNT(a.*)`` / ``MIN(COLUMNS(*))``) — also declines to the naive
+      plan, keeping ``dialect="duckdb"`` consistent with every backend
+      rather than hard-erroring or miscompiling (#204, #205). Only a
+      genuine out-of-scope column reference (unqualified / unknown-table /
+      right-side) still raises.
     - ``SEMI JOIN`` and ``ANTI JOIN`` outputs are left-side only. Any
-      ``b.col`` / ``b.*`` reference in the outer SELECT, aggregate
-      arguments, GROUP BY, HAVING, or ORDER BY raises
-      :class:`_UnqualifiedProjectionError` (wrapped to :class:`ValueError`
-      at the public boundary).
+      ``b.col`` reference in the outer SELECT, aggregate arguments, GROUP BY,
+      HAVING, or ORDER BY raises :class:`_UnqualifiedProjectionError`
+      (wrapped to :class:`ValueError` at the public boundary). A right-side
+      ``b.*`` under SEMI / ANTI declines to the naive plan with every other
+      star (which then rejects the out-of-scope right table at bind time).
     - ``ANTI JOIN`` partitions on the left table's distinct chromosomes
       only (not the chromosome INTERSECT used by INNER / SEMI) so that
       left rows on chromosomes absent from the right table are preserved.
@@ -305,10 +474,16 @@ class IntersectsDuckDBIEJoinTransformer:
         query(getvariable(...))``, so any top-level clause :meth:`_build_sql`
         does not read would be silently dropped. The check below is a
         whitelist: engage the dialect path only for a query that is
-        exactly ``SELECT <qualified projections> FROM <registered base
-        table> [JOIN <registered base table>] {ON|WHERE} <one
-        column-to-column INTERSECTS>`` with no other top-level clause.
-        Everything else returns ``None`` so the generic naive-predicate plan handles it.
+        exactly ``SELECT <qualified columns / plain aggregates> FROM
+        <registered base table> [JOIN <registered base table>] {ON|WHERE}
+        <one column-to-column INTERSECTS>`` with no other top-level clause.
+        Star projections (schema-less enumeration would narrow them, #202),
+        projections the rebuild cannot express but the naive plan handles —
+        expressions / window aggregates / FILTER clauses / scalar subqueries /
+        aggregate-nested stars (#204, #205) — and a ``SEMI`` / ``ANTI`` join
+        whose ``INTERSECTS`` sits out of scope in the ``WHERE`` (#201) also
+        decline. Everything else returns ``None`` so the generic
+        naive-predicate plan handles it.
         """
         if not isinstance(query, exp.Select):
             return None
@@ -328,6 +503,20 @@ class IntersectsDuckDBIEJoinTransformer:
         if _has_outer_join_intersects(query):
             return None
 
+        # A SEMI / ANTI join whose INTERSECTS lives in the top-level WHERE
+        # (out of scope for the right table) diverges from the reference
+        # plans, which reject it with a binder error. Decline so the naive
+        # plan surfaces that error instead of inventing results (#201).
+        if _has_left_only_join_where_intersects(query):
+            return None
+
+        # Star projections (bare ``*`` or ``a.*`` / ``b.*``) need column
+        # enumeration the schema-less transpile cannot do without silently
+        # narrowing to the configured genomic columns. Decline so the naive
+        # plan expands the real star against DuckDB's live schema (#202).
+        if _has_star_projection(query):
+            return None
+
         if _count_column_intersects(query) != 1:
             return None
 
@@ -337,11 +526,11 @@ class IntersectsDuckDBIEJoinTransformer:
         # wrapper-relation aliases that don't exist in the subquery's own
         # scope. Reject those shapes here. ``EXISTS (SELECT ...)`` parses
         # as ``Exists(Select(...))`` without an ``exp.Subquery`` wrapper,
-        # so we also check ``exp.Select`` directly. Bare scalar subqueries
-        # in the SELECT list (``SELECT (SELECT SUM(x) FROM ...)``) get a
-        # targeted error from :meth:`_resolve_projections` rather than a
-        # silent fallback — only subqueries hidden inside aggregate args
-        # fall back here.
+        # so we also check ``exp.Select`` directly. A bare scalar subquery
+        # in the SELECT list (``SELECT (SELECT SUM(x) FROM ...)``) is not
+        # gated here — it declines to the naive plan later via the
+        # :meth:`_resolve_projections` projection pre-scan (#205), since its
+        # columns resolve against its own scope.
         for clause_key in ("group", "having", "order"):
             modifier = query.args.get(clause_key)
             if modifier is None:
@@ -448,6 +637,11 @@ class IntersectsDuckDBIEJoinTransformer:
         # uniform.
         try:
             return self._build_sql(query, intersects, sides, the_join)
+        except _DeclineIEJoin:
+            # A projection the naive plan handles but the IEJoin cannot rebuild
+            # (expression / window / FILTER / scalar subquery / aggregate-nested
+            # star) — fall back to the naive-predicate plan (#204, #205).
+            return None
         except _UnqualifiedProjectionError as exc:
             raise ValueError(str(exc)) from exc
 
@@ -744,10 +938,13 @@ class IntersectsDuckDBIEJoinTransformer:
         Returns ``None`` when a soft-fallback condition fires (the residual
         of the join carries a shape the naive-predicate plan can handle but the
         dialect cannot inline, or a single-column USING references a column
-        that is not both tables' ``chrom_col``). Raises
-        :class:`_UnqualifiedProjectionError` when a user-mistake condition
-        fires; callers translating to the public surface wrap the raise to
-        :class:`ValueError`.
+        that is not both tables' ``chrom_col``). May propagate
+        :class:`_DeclineIEJoin` from the :meth:`_resolve_projections` projection
+        pre-scan (a naive-valid projection the rebuild cannot express — #204,
+        #205); :meth:`transform_to_sql` catches it and declines to the naive
+        plan. Raises :class:`_UnqualifiedProjectionError` when a user-mistake
+        condition fires; callers translating to the public surface wrap the
+        raise to :class:`ValueError`.
         """
         on_residuals, where_residuals = self._extract_extra_predicates(query, intersects)
         all_residuals = on_residuals + where_residuals
@@ -804,10 +1001,6 @@ class IntersectsDuckDBIEJoinTransformer:
         ) = self._resolve_projections(
             query,
             sides,
-            l_table,
-            r_table,
-            (l_chrom, l_start, l_end),
-            (r_chrom, r_start, r_end),
             outer_where_residuals,
         )
 
@@ -986,10 +1179,6 @@ class IntersectsDuckDBIEJoinTransformer:
         self,
         query: exp.Select,
         sides: "_IEJoinSides",
-        l_table: Table | None,
-        r_table: Table | None,
-        l_cols: tuple[str, str, str],
-        r_cols: tuple[str, str, str],
         outer_where_residuals: list[exp.Expression] | None = None,
     ) -> tuple[list[str], list[str], dict[tuple[str, str], str]]:
         """Resolve the SELECT list (and any modifier-referenced columns).
@@ -1007,40 +1196,46 @@ class IntersectsDuckDBIEJoinTransformer:
           list — every column the query touches in any clause, projected
           once each under a unique ``__giql_p<n>`` alias.
         * ``outer_projections`` is the outer SELECT's projection list,
-          rendered using the inner aliases (qualified columns, aggregate
-          calls, ``a.*``/``b.*`` expansions including ``strand_col`` when
-          the corresponding :class:`~giql.table.Table` config declares one).
+          rendered using the inner aliases (qualified columns and plain
+          aggregate calls). Star projections never reach here — they decline
+          upstream (#202) — nor do the naive-valid shapes the projection
+          pre-scan declines (expressions, window aggregates, FILTER clauses,
+          scalar subqueries, aggregate-nested stars — #204, #205).
         * ``projection_map`` binds each ``(normalized_alias, column_name)``
           referenced anywhere in the query to its inner alias name so the
           wrapper-relation rewriter and aggregate-argument rewriting can
           translate user-written references to the wrapper relation.
 
-        Raises :class:`_UnqualifiedProjectionError` for SELECT-list shapes
-        the dialect cannot translate (bare ``*``, unqualified column,
-        unknown table qualifier, ``a.* AS x``, window aggregate, ``FILTER``
-        clause, scalar subquery, arithmetic over an aggregate, aggregate
-        over an unqualified column), and (when ``sides.is_left_only_join``)
-        any reference to the right side of the join.
+        Raises :class:`_DeclineIEJoin` (caught upstream, declining to the naive
+        plan) for a SELECT-list shape the naive plan handles but the rebuild
+        cannot express. Raises :class:`_UnqualifiedProjectionError` only for a
+        genuine user error the naive plan also rejects — an unqualified column,
+        an unknown table qualifier, an aggregate over an unqualified column, or
+        (when ``sides.is_left_only_join``) a reference to the right side.
         """
-        l_chrom, l_start, l_end = l_cols
-        r_chrom, r_start, r_end = r_cols
         q = self._sql_quote_ident
         l_alias = sides.left_user_alias
         r_alias = sides.right_user_alias
 
-        def star_columns(
-            table: Table | None, defaults: tuple[str, str, str]
-        ) -> tuple[str, ...]:
-            """Expand ``a.*`` / ``b.*`` to the genomic columns declared by
-            the :class:`~giql.table.Table` config (chrom / start / end, plus
-            ``strand_col`` when set). Without this, ``strand_col`` would
-            silently disappear under ``dialect='duckdb'`` even when the
-            user has registered it.
-            """
-            chrom, start, end = defaults
-            if table is not None and table.strand_col:
-                return (chrom, start, end, table.strand_col)
-            return (chrom, start, end)
+        # Decline (fall back to the naive-predicate plan) for any projection the
+        # IEJoin cannot rebuild but the naive plan handles — an expression, a
+        # window aggregate, a FILTER clause, a scalar subquery, an aggregate
+        # nested in an expression, or a star nested in an aggregate argument
+        # (#204, #205). Run before any allocation so an aggregate-nested star
+        # (COUNT(a.*)) declines rather than allocating a bogus ``a."*"`` column.
+        # A projection with an out-of-scope column reference is a user error the
+        # naive plan also rejects, so it is left to the dispatch below to raise.
+        for sel in query.expressions:
+            target = sel.this if isinstance(sel, exp.Alias) else sel
+            while isinstance(target, exp.Paren):
+                target = target.this
+            if _projection_declines_to_naive(
+                target, l_alias, r_alias, sides.is_left_only_join
+            ):
+                raise _DeclineIEJoin(
+                    f"dialect='duckdb' cannot rebuild projection {target.sql()!r}; "
+                    "deferring to the naive-predicate plan."
+                )
 
         inner_projections: list[str] = []
         projection_map: dict[tuple[str, str], str] = {}
@@ -1156,51 +1351,17 @@ class IntersectsDuckDBIEJoinTransformer:
         for sel in query.expressions:
             target = sel.this if isinstance(sel, exp.Alias) else sel
             user_alias = sel.alias if isinstance(sel, exp.Alias) else None
-            # Peel paren wrappers at the top of dispatch so paren-wrapped
-            # aggregates like ``(SUM(a.score)) AS s`` route through the
-            # AggFunc branch below, and paren-wrapped diagnostic shapes
-            # (``(SUM(a.score) OVER (...))``) hit the targeted error
-            # branches below rather than the generic catch-all.
+            # Peel paren wrappers at the top of dispatch so a paren-wrapped
+            # aggregate like ``(SUM(a.score)) AS s`` routes through the AggFunc
+            # branch below rather than the generic catch-all.
             while isinstance(target, exp.Paren):
                 target = target.this
 
-            if isinstance(target, exp.Star) and not isinstance(sel, exp.Column):
-                raise _UnqualifiedProjectionError(
-                    "dialect='duckdb' requires qualified projections; bare '*' "
-                    "is not supported. Use 'a.*', 'b.*', or qualified columns."
-                )
-
-            if isinstance(target, exp.Column) and isinstance(target.this, exp.Star):
-                # Reject ``a.* AS x`` — most SQL engines reject
-                # star-with-alias outright, and the dialect has no
-                # reasonable interpretation (apply ``x`` as a prefix?
-                # as a single composite column name?).
-                if user_alias is not None:
-                    raise _UnqualifiedProjectionError(
-                        "dialect='duckdb' does not support star projections "
-                        f"with a user alias; got {sel.sql()!r}. Either drop "
-                        "the alias (use ``a.*``) or list the columns "
-                        "explicitly with per-column aliases."
-                    )
-                tbl = _normalize_alias(target.table) if target.table else ""
-                if tbl == l_alias:
-                    cols = star_columns(l_table, (l_chrom, l_start, l_end))
-                elif tbl == r_alias:
-                    cols = star_columns(r_table, (r_chrom, r_start, r_end))
-                else:
-                    raise _UnqualifiedProjectionError(
-                        f"Unknown table qualifier {target.table!r} in projection; "
-                        f"expected {l_alias!r} or {r_alias!r}."
-                    )
-                reject_right_side_if_left_only(tbl, sel.sql())
-                # Expand to the genomic columns the Table config knows
-                # about; arbitrary additional columns require explicit
-                # listing since schema introspection isn't available at
-                # transpile time.
-                for col in cols:
-                    alias = allocate(tbl, col)
-                    outer_projections.append(f"{alias} AS {q(col)}")
-                continue
+            # Star projections (bare ``*`` and ``a.*`` / ``b.*``) never reach
+            # here — :func:`_has_star_projection` declines them upstream (#202) —
+            # and neither do the naive-valid shapes the projection pre-scan
+            # above declined (expressions / window aggregates / FILTER clauses /
+            # scalar subqueries / aggregate-nested stars — #204, #205).
 
             if isinstance(target, exp.AggFunc):
                 render_aggregate(target, user_alias)
@@ -1215,61 +1376,26 @@ class IntersectsDuckDBIEJoinTransformer:
                 outer_projections.append(f"{alias} AS {q(outer_name)}")
                 continue
 
-            # Diagnostic branches for shapes the dialect deliberately
-            # rejects. Specialize the error message when we can recognize
-            # the unsupported shape so the user isn't told "use a
-            # qualified column" when they actually wrote an aggregate
-            # variant the dispatcher couldn't classify. Direct-isinstance
-            # branches catch bare shapes; the ``target.find(...)`` branches
-            # below catch nested forms (``CAST(SUM(a.x) OVER (...) AS
-            # DOUBLE)`` etc.) before they fall through to the generic
-            # AggFunc-found catch-all.
-            if isinstance(target, exp.Window):
-                raise _UnqualifiedProjectionError(
-                    "dialect='duckdb' does not support window aggregates "
-                    f"in the SELECT list; got {target.sql()!r}. Either "
-                    "drop the OVER (...) clause, or omit dialect='duckdb' "
-                    "to use the generic naive-predicate plan."
-                )
-            if isinstance(target, exp.Filter):
-                raise _UnqualifiedProjectionError(
-                    "dialect='duckdb' does not support FILTER (WHERE ...) "
-                    f"clauses on aggregates; got {target.sql()!r}. Either "
-                    "rewrite the FILTER as a WHERE predicate alongside "
-                    "the INTERSECTS, or omit dialect='duckdb'."
-                )
-            if isinstance(target, exp.Subquery):
-                # A scalar subquery in the SELECT list (e.g.
-                # ``(SELECT SUM(x) FROM other_table)``) is shaped like an
-                # aggregate but doesn't fit the dialect's projection rules.
-                raise _UnqualifiedProjectionError(
-                    "dialect='duckdb' does not support scalar subqueries in "
-                    f"the SELECT list; got {target.sql()!r}. Either rewrite "
-                    "without the subquery, or omit dialect='duckdb' to use "
-                    "the generic naive-predicate plan."
-                )
-            if target.find(exp.Window) is not None:
-                raise _UnqualifiedProjectionError(
-                    "dialect='duckdb' does not support window aggregates "
-                    f"in the SELECT list; got {target.sql()!r}. Either "
-                    "drop the OVER (...) clause, or omit dialect='duckdb' "
-                    "to use the generic naive-predicate plan."
-                )
-            if target.find(exp.Filter) is not None:
-                raise _UnqualifiedProjectionError(
-                    "dialect='duckdb' does not support FILTER (WHERE ...) "
-                    f"clauses on aggregates; got {target.sql()!r}. Either "
-                    "rewrite the FILTER as a WHERE predicate alongside "
-                    "the INTERSECTS, or omit dialect='duckdb'."
-                )
-            if target.find(exp.AggFunc) is not None:
-                raise _UnqualifiedProjectionError(
-                    "dialect='duckdb' does not support aggregates inside "
-                    f"arithmetic or function expressions; got {target.sql()!r}. "
-                    "Project the underlying aggregate as its own column and "
-                    "do the arithmetic in a wrapping query, or omit "
-                    "dialect='duckdb'."
-                )
+            # Everything reaching here is an unsupported wrapper (an
+            # expression, a window aggregate, a FILTER clause, or an aggregate
+            # nested in an expression) that the pre-scan did NOT decline because
+            # it references an out-of-scope column — an unqualified column, an
+            # unknown table, or the right side under a SEMI / ANTI join (e.g.
+            # ``SUM(score) OVER (...)``, ``score + 1``). A plain aggregate with
+            # an unqualified argument (``SUM(score)``) is diagnosed earlier in
+            # ``render_aggregate``.
+            #
+            # A right-side column wrapped in an unsupported shape under a
+            # left-only join gets the dedicated left-side-only message rather
+            # than the generic "qualify the column" one, which would steer the
+            # user toward another invalid form (``b.col`` is never valid here).
+            for col in target.find_all(exp.Column):
+                col_table = _normalize_alias(col.table) if col.table else ""
+                reject_right_side_if_left_only(col_table, target.sql())
+            # Otherwise the fault is an unqualified / unknown-table column; the
+            # accurate guidance is to qualify it (once qualified, the wrapper
+            # itself declines to the naive plan — #204, #205 — rather than
+            # erroring).
             raise _UnqualifiedProjectionError(
                 "dialect='duckdb' requires qualified projections; got "
                 f"{target.sql()!r}. Use a qualified column reference like "
