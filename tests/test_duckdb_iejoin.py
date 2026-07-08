@@ -5609,20 +5609,19 @@ class TestTranspileDuckDBIEJoinExecution:
             max_size=6,
         ),
     )
-    def test_query_should_match_naive_predicate_plan_for_semi_join_random_inputs(
+    def test_query_should_match_python_native_semi_overlap_for_narrow_random_inputs(
         self, conn, peaks, genes
     ):
-        """Test that SEMI JOIN under the dialect matches the naive-predicate plan.
+        """Test SEMI JOIN under the dialect against a Python-native reference.
 
         Given:
             A Hypothesis-generated pair of small interval lists.
         When:
-            The same SEMI JOIN INTERSECTS query is transpiled with
-            ``dialect=None`` (naive predicate) and ``dialect='duckdb'`` and
-            executed.
+            A ``SEMI JOIN ... ON a.interval INTERSECTS b.interval`` is
+            transpiled with ``dialect='duckdb'`` and executed.
         Then:
-            Both plans should return the same multiset of distinct
-            left rows.
+            The set of returned rows should equal the Python reference of
+            distinct left rows with at least one overlapping right row.
         """
         # Arrange
         peak_rows = [(c, s, s + length) for (c, s, length) in peaks]
@@ -5644,15 +5643,14 @@ class TestTranspileDuckDBIEJoinExecution:
             "FROM peaks a "
             "SEMI JOIN genes b ON a.interval INTERSECTS b.interval"
         )
-        sql_default = transpile(query, tables=["peaks", "genes"])
         sql_duckdb = transpile(query, tables=["peaks", "genes"], dialect="duckdb")
 
         # Act
-        rows_default = sorted(set(conn.execute(sql_default).fetchall()))
         rows_duckdb = sorted(set(conn.execute(sql_duckdb).fetchall()))
+        expected = _python_semi_overlap(peak_rows, gene_rows)
 
         # Assert
-        assert rows_default == rows_duckdb
+        assert rows_duckdb == expected
 
     @settings(
         max_examples=25,
@@ -5750,22 +5748,21 @@ class TestTranspileDuckDBIEJoinExecution:
             max_size=6,
         ),
     )
-    def test_query_should_match_naive_predicate_plan_for_anti_join_random_inputs(
+    def test_query_should_match_python_native_anti_overlap_for_narrow_random_inputs(
         self, conn, peaks, genes
     ):
-        """Test that ANTI JOIN under the dialect matches the naive-predicate plan.
+        """Test ANTI JOIN under the dialect against a Python-native reference.
 
         Given:
             A Hypothesis-generated pair of small interval lists.
         When:
-            The same ANTI JOIN INTERSECTS query is transpiled with
-            ``dialect=None`` (naive predicate) and ``dialect='duckdb'``
-            and executed.
+            An ``ANTI JOIN ... ON a.interval INTERSECTS b.interval`` is
+            transpiled with ``dialect='duckdb'`` and executed.
         Then:
-            Both plans should return the same multiset of distinct left
-            rows, including left rows on chromosomes absent from the
-            right table and every left row when the right table is empty
-            (standard ``ANTI JOIN ... ON <predicate>`` semantics).
+            The set of returned rows should equal the Python reference of
+            distinct left rows with no overlapping right row, including
+            rows on chromosomes absent from the right table and every left
+            row when the right table is empty.
         """
         # Arrange
         peak_rows = [(c, s, s + length) for (c, s, length) in peaks]
@@ -5787,15 +5784,14 @@ class TestTranspileDuckDBIEJoinExecution:
             "FROM peaks a "
             "ANTI JOIN genes b ON a.interval INTERSECTS b.interval"
         )
-        sql_default = transpile(query, tables=["peaks", "genes"])
         sql_duckdb = transpile(query, tables=["peaks", "genes"], dialect="duckdb")
 
         # Act
-        rows_default = sorted(set(conn.execute(sql_default).fetchall()))
         rows_duckdb = sorted(set(conn.execute(sql_duckdb).fetchall()))
+        expected = _python_anti_overlap(peak_rows, gene_rows)
 
         # Assert
-        assert rows_default == rows_duckdb
+        assert rows_duckdb == expected
 
     def test_query_should_match_naive_plan_for_anti_join_with_where_residual(self, conn):
         """Test that an ANTI-join WHERE residual filters without inverting the join.
@@ -5961,21 +5957,21 @@ class TestTranspileDuckDBIEJoinExecution:
             max_size=6,
         ),
     )
-    def test_query_should_match_naive_plan_for_anti_join_where_residual_random_inputs(
+    def test_query_should_match_python_native_anti_overlap_with_where_residual_random_inputs(
         self, conn, peaks, genes
     ):
-        """Test ANTI JOIN with a WHERE residual against the naive plan over random inputs.
+        """Test ANTI JOIN with a WHERE residual against a Python-native reference.
 
         Given:
             A Hypothesis-generated pair of small interval lists.
         When:
             An ``ANTI JOIN ... ON INTERSECTS ... WHERE a.start >= 50`` is
-            transpiled with ``dialect=None`` and ``dialect='duckdb'`` and
-            executed.
+            transpiled with ``dialect='duckdb'`` and executed.
         Then:
-            Both plans return the same rows for every input — the WHERE
-            filter never resurrects an anti-excluded row on either side of
-            the 50 threshold (#200).
+            The set of returned rows should equal the Python anti-overlap
+            reference filtered to ``start >= 50`` — the WHERE filter never
+            resurrects an anti-excluded row on either side of the 50
+            threshold (#200).
         """
         # Arrange
         peak_rows = [(c, s, s + length) for (c, s, length) in peaks]
@@ -5998,15 +5994,16 @@ class TestTranspileDuckDBIEJoinExecution:
             "ANTI JOIN genes b ON a.interval INTERSECTS b.interval "
             "WHERE a.start >= 50"
         )
-        sql_default = transpile(query, tables=["peaks", "genes"])
         sql_duckdb = transpile(query, tables=["peaks", "genes"], dialect="duckdb")
 
         # Act
-        rows_default = sorted(set(conn.execute(sql_default).fetchall()))
         rows_duckdb = sorted(set(conn.execute(sql_duckdb).fetchall()))
+        expected = sorted(
+            row for row in _python_anti_overlap(peak_rows, gene_rows) if row[1] >= 50
+        )
 
         # Assert
-        assert rows_default == rows_duckdb
+        assert rows_duckdb == expected
 
     def test_query_should_inline_anti_join_on_residual_referencing_right_side(
         self, conn
