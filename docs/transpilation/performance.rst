@@ -410,6 +410,20 @@ path — the correlated form reaches the fast path while preserving exact
 semantics (#208). Expect large speedups over the naive predicate for all
 three variants at scale.
 
+**count_overlaps.** The idiomatic per-interval overlap count — ``SELECT
+a.cols, COUNT(b.col) FROM a LEFT JOIN b ON a.interval INTERSECTS
+b.interval GROUP BY a.cols`` — is also accelerated (#209). A plain
+``LEFT JOIN`` inequality overlap would decline to the naive predicate (a
+``HASH_JOIN`` on ``chrom`` with the position inequalities as a residual
+filter, quadratic when the chromosome key has low cardinality). Instead
+the dialect computes the counts through the INNER ``IE_JOIN`` path and
+wraps them in a zero-fill ``LEFT JOIN`` back onto the distinct left keys,
+so left intervals with no overlap report ``0``. This covers a single
+``COUNT(<right column>)`` (or ``COUNT(DISTINCT <right column>)``) with a
+``GROUP BY`` on the projected left columns; ``COUNT(*)``, non-COUNT
+aggregates, ``ORDER BY`` / ``LIMIT`` / ``HAVING``, and other outer-join
+shapes still take the naive-predicate plan.
+
 On top of the core shape the dialect also absorbs several common
 decorations:
 
