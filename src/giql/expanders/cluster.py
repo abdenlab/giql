@@ -278,11 +278,14 @@ def _transform_for_cluster(
         expression=exp.column(start_col, quoted=True),
     )
 
-    # An optional predicate further restricts which adjacent intervals
-    # are kept together: a row stays in the current cluster only when it
-    # is adjacent to its predecessor AND the predicate holds between them.
-    # ``PREV(col)`` references in the predicate resolve to the predecessor
-    # row via LAG over the same partition/order as the adjacency window.
+    # An optional predicate further restricts which adjacent intervals are kept
+    # together: a row stays in the current cluster only when it is adjacent to the
+    # cluster's running-max edge AND the predicate holds against its immediate
+    # sorted predecessor. ``PREV(col)`` references in the predicate resolve to that
+    # predecessor row via LAG over the same partition/order. Note the two notions
+    # can reference different rows under containment -- adjacency comes from an
+    # earlier, wider interval while the predicate compares to the immediate
+    # predecessor -- matching the documented immediate-predecessor semantics (#214).
     predicate_expr = cluster_expr.args.get("predicate")
     if predicate_expr is not None:
         rewritten_predicate = _rewrite_predecessor_refs(
