@@ -62,7 +62,7 @@ class TestGenomicColumnResolution:
 
         # Assert
         assert 'PARTITION BY "ch" ORDER BY "s" NULLS LAST' in sql
-        assert 'LAG("e")' in sql
+        assert 'MAX("e")' in sql
         assert '"chrom"' not in sql and '"start"' not in sql and '"end"' not in sql
 
     def test_transpile_should_emit_custom_aggregation_when_merge_over_derived_table(
@@ -285,7 +285,7 @@ class TestGenomicColumnResolution:
 
         # Assert
         assert 'PARTITION BY "rc" ORDER BY "rs" NULLS LAST' in sql
-        assert 'LAG("re_")' in sql
+        assert 'MAX("re_")' in sql
         assert '"ch"' not in sql
 
     def test_transpile_should_resolve_partial_custom_mapping_through_derived_table(self):
@@ -309,7 +309,7 @@ class TestGenomicColumnResolution:
 
         # Assert
         assert 'PARTITION BY "ch" ORDER BY "start" NULLS LAST' in sql
-        assert 'LAG("end")' in sql
+        assert 'MAX("end")' in sql
 
     def test_transpile_should_partition_by_custom_strand_when_stranded_over_derived(
         self,
