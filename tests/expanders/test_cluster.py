@@ -131,19 +131,19 @@ class TestClusterExpander:
 
         # Assert
         assert 'PARTITION BY "ch", "st" ORDER BY "s"' in sql
-        assert 'LAG("e")' in sql
+        assert 'MAX("e")' in sql
         assert '"chrom"' not in sql and '"start"' not in sql
 
-    def test_transpile_should_add_distance_offset_to_lag_when_distance_positive(self):
-        """Test that a positive CLUSTER distance offsets the adjacency LAG.
+    def test_transpile_should_offset_running_edge_when_distance_positive(self):
+        """Test that a positive CLUSTER distance offsets the running cluster edge.
 
         Given:
             A CLUSTER with a positive distance.
         When:
             Transpiling the query.
         Then:
-            The adjacency should add the distance to the LAG before comparing to
-            start.
+            The adjacency should add the distance to the running max end before
+            comparing to start.
         """
         # Arrange
         query = "SELECT *, CLUSTER(interval, 100) AS cid FROM peaks"
@@ -152,10 +152,13 @@ class TestClusterExpander:
         sql = transpile(query, tables=["peaks"])
 
         # Assert
-        window = 'OVER (PARTITION BY "chrom" ORDER BY "start" NULLS LAST)'
-        assert f'LAG("end") {window} + 100 >= "start"' in sql
+        window = (
+            'OVER (PARTITION BY "chrom" ORDER BY "start" NULLS LAST '
+            "ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING)"
+        )
+        assert f'MAX("end") {window} + 100 >= "start"' in sql
 
-    def test_transpile_should_not_offset_lag_when_no_distance(self):
+    def test_transpile_should_not_offset_running_edge_when_no_distance(self):
         """Test that a CLUSTER without distance uses a bare adjacency.
 
         Given:
@@ -163,7 +166,8 @@ class TestClusterExpander:
         When:
             Transpiling the query.
         Then:
-            The adjacency should compare the bare LAG to start with no offset.
+            The adjacency should compare the bare running max end to start with no
+            offset.
         """
         # Arrange
         query = "SELECT *, CLUSTER(interval) AS cid FROM peaks"
@@ -172,8 +176,11 @@ class TestClusterExpander:
         sql = transpile(query, tables=["peaks"])
 
         # Assert
-        window = 'OVER (PARTITION BY "chrom" ORDER BY "start" NULLS LAST)'
-        assert f'LAG("end") {window} >= "start"' in sql
+        window = (
+            'OVER (PARTITION BY "chrom" ORDER BY "start" NULLS LAST '
+            "ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING)"
+        )
+        assert f'MAX("end") {window} >= "start"' in sql
         assert f"{window} + " not in sql
 
     def test_transpile_should_split_clauses_between_lag_calc_and_outer_query(self):
@@ -1362,7 +1369,7 @@ class TestClusterExpander:
         When:
             Transpiling for DuckDB and executing it.
         Then:
-            The cluster ids should stay correct — the inner ``LAG("end")`` window must
+            The cluster ids should stay correct — the inner ``MAX("end")`` window must
             bind to the real ``end`` column, not the shadowing ``0``, because the sibling
             is materialized under a reserved name rather than ``end`` (#190).
         """

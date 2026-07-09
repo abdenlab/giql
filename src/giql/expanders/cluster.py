@@ -3,8 +3,8 @@
 CLUSTER assigns a cluster id to every interval, grouping each run of mutually
 adjacent intervals (optionally within a maximum gap, strand-aware, and gated by a
 pairwise predicate) under one id. It cannot be a single window function because it
-needs a window over a window (``SUM`` over a ``LAG``-derived flag), so the
-expansion restructures the enclosing query into a two-level form::
+needs a window over a window (``SUM`` over a running-edge-derived boundary flag),
+so the expansion restructures the enclosing query into a two-level form::
 
     SELECT *, CLUSTER(interval) AS cluster_id FROM features
 
@@ -15,15 +15,20 @@ becomes::
                AS cluster_id
     FROM (
         SELECT *,
-               CASE WHEN LAG(end) OVER (...) >= start THEN 0 ELSE 1 END
+               CASE WHEN MAX(end) OVER (...) >= start THEN 0 ELSE 1 END
                     AS __giql_is_new_cluster
         FROM features
     ) AS __giql_lag_calc
 
+The boundary flag keys off the running maximum end of the preceding rows (the
+cluster's right edge so far), not the immediately preceding row's end, so a later
+interval contained within an earlier wider one is not spuriously split (#214).
+
 (The ``becomes::`` form is simplified for readability; the emitted SQL quotes
-identifiers, appends ``NULLS LAST`` to the window ORDER BY, and — for a bare or
-qualified star projection — emits the outer star as ``* EXCEPT (__giql_is_new_cluster)``
-to hide the synthesized flag from the output (#184, #185).)
+identifiers, appends ``NULLS LAST`` to the window ORDER BY and a ``ROWS BETWEEN
+UNBOUNDED PRECEDING AND 1 PRECEDING`` frame, and — for a bare or qualified star
+projection — emits the outer star as ``* EXCEPT (__giql_is_new_cluster)`` to hide
+the synthesized flag from the output (#184, #185).)
 
 This module is the AST-expansion replacement for the legacy
 ``ClusterTransformer``, which ran as a pre-pass transformer on the raw parsed AST
@@ -242,32 +247,45 @@ def _transform_for_cluster(
     # Build ORDER BY for window
     order_by = [exp.Ordered(this=exp.column(start_col, quoted=True))]
 
-    # Create LAG window spec
-    lag_window = exp.Window(
-        this=exp.Anonymous(this="LAG", expressions=[exp.column(end_col, quoted=True)]),
+    # Cluster boundaries key off the running maximum end of the preceding rows --
+    # the cluster's right edge so far -- NOT the immediately preceding row's end.
+    # LAG(end) would spuriously split a later interval that still overlaps a
+    # cluster whose previous row is a contained interval ending early (#214).
+    running_max_end = exp.Window(
+        this=exp.Max(this=exp.column(end_col, quoted=True)),
         partition_by=partition_cols,
         order=exp.Order(expressions=order_by),
+        spec=exp.WindowSpec(
+            kind="ROWS",
+            start="UNBOUNDED",
+            start_side="PRECEDING",
+            end="1",
+            end_side="PRECEDING",
+        ),
     )
 
     # Add distance offset if specified
     if distance > 0:
-        lag_with_distance = exp.Add(
-            this=lag_window, expression=exp.Literal.number(distance)
+        edge_with_distance = exp.Add(
+            this=running_max_end, expression=exp.Literal.number(distance)
         )
     else:
-        lag_with_distance = lag_window
+        edge_with_distance = running_max_end
 
-    # Build the adjacency condition (predecessor end >= current start).
+    # Build the adjacency condition (running cluster edge >= current start).
     adjacency = exp.GTE(
-        this=lag_with_distance,
+        this=edge_with_distance,
         expression=exp.column(start_col, quoted=True),
     )
 
-    # An optional predicate further restricts which adjacent intervals
-    # are kept together: a row stays in the current cluster only when it
-    # is adjacent to its predecessor AND the predicate holds between them.
-    # ``PREV(col)`` references in the predicate resolve to the predecessor
-    # row via LAG over the same partition/order as the adjacency window.
+    # An optional predicate further restricts which adjacent intervals are kept
+    # together: a row stays in the current cluster only when it is adjacent to the
+    # cluster's running-max edge AND the predicate holds against its immediate
+    # sorted predecessor. ``PREV(col)`` references in the predicate resolve to that
+    # predecessor row via LAG over the same partition/order. Note the two notions
+    # can reference different rows under containment -- adjacency comes from an
+    # earlier, wider interval while the predicate compares to the immediate
+    # predecessor -- matching the documented immediate-predecessor semantics (#214).
     predicate_expr = cluster_expr.args.get("predicate")
     if predicate_expr is not None:
         rewritten_predicate = _rewrite_predecessor_refs(
