@@ -27,7 +27,6 @@ was dropped in favor of the naive predicate earlier (#167).
 from dataclasses import dataclass
 from typing import ClassVar
 from typing import Literal
-from uuid import uuid4
 
 from sqlglot import exp
 
@@ -38,6 +37,10 @@ from giql.constants import DEFAULT_END_COL
 from giql.constants import DEFAULT_START_COL
 from giql.expander import ExpansionContext
 from giql.expander import register
+from giql.expanders._per_chrom import CHROM_LITERAL
+from giql.expanders._per_chrom import dynamic_relation
+from giql.expanders._per_chrom import new_variable_name
+from giql.expanders._per_chrom import set_variable_statement
 from giql.expanders.intersects import SPATIAL_PREDICATE_META
 from giql.expanders.intersects import _expand_spatial_op
 from giql.expressions import Contains
@@ -1209,13 +1212,7 @@ class IntersectsDuckDBIEJoinTransformer:
             outer_where_residuals,
         )
 
-        # Per-call random token (full uuid4 hex = 128 bits) so the SET
-        # VARIABLE name is collision-resistant even across many transpile()
-        # calls interleaved in one DuckDB session. DuckDB session variables
-        # are global session state, so token collision would silently
-        # rebind the wrapper query to a different intersection.
-        token = uuid4().hex
-        var_name = f"__giql_iejoin_{token}"
+        var_name = new_variable_name("__giql_iejoin")
 
         # Canonicalize endpoints to 0-based half-open and use strict
         # operators. Mixing inclusive operators with raw closed-closed
@@ -1250,7 +1247,7 @@ class IntersectsDuckDBIEJoinTransformer:
         # doubled because the result is itself an SQL string literal that
         # contains SQL. The chromosome literal is interpolated twice — once
         # into the left partition filter, once into the right.
-        chrom_literal = "'''' || replace(chrom, '''', '''''') || ''''"
+        chrom_literal = CHROM_LITERAL
         esc = self._sql_escape
         inner_select_list = ", ".join(inner_projections)
 
@@ -1332,14 +1329,8 @@ class IntersectsDuckDBIEJoinTransformer:
                 f"FROM {r_table_ident}"
             )
 
-        set_var_stmt = (
-            f"SET VARIABLE {var_name} = COALESCE((\n"
-            f"  SELECT string_agg(\n"
-            f"    {per_chrom_sql_expr},\n"
-            f"    ' UNION ALL '\n"
-            f"  )\n"
-            f"  FROM ({chrom_partition_subquery})\n"
-            f"), '{esc(empty_schema)}')"
+        set_var_stmt = set_variable_statement(
+            var_name, per_chrom_sql_expr, chrom_partition_subquery, empty_schema
         )
 
         # Constant wrapper alias — uniqueness is provided by the
@@ -1350,7 +1341,7 @@ class IntersectsDuckDBIEJoinTransformer:
         distinct_kw = "DISTINCT " if query.args.get("distinct") else ""
         outer_select_parts = [
             f"SELECT {distinct_kw}{outer_projection} "
-            f"FROM query(getvariable('{var_name}')) AS {wrapper_alias}"
+            f"FROM {dynamic_relation(var_name, wrapper_alias)}"
         ]
 
         # WHERE residuals for the left-only (SEMI / ANTI) shapes are applied
