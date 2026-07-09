@@ -72,6 +72,38 @@ def test_merge_overlapping_intervals(duckdb_connection):
     assert comparison.match, comparison.failure_message()
 
 
+def test_merge_contained_intervals(duckdb_connection):
+    """
+    GIVEN a wide interval that contains a later narrower one which ends before a
+    third interval still inside the wide one
+    WHEN MERGE operator is applied
+    THEN all three merge into the single wide region, matching bedtools (#214 --
+    the boundary must key off the running max end, not the previous row's end)
+    """
+    intervals = [
+        GenomicInterval("chr1", 0, 1000, "i1", 100, "+"),
+        GenomicInterval("chr1", 100, 200, "i2", 150, "+"),  # contained in i1
+        GenomicInterval("chr1", 300, 400, "i3", 200, "+"),  # in i1, after i2's end
+    ]
+
+    load_intervals(
+        duckdb_connection,
+        "intervals",
+        [i.to_tuple() for i in intervals],
+    )
+
+    bedtools_result = merge([i.to_tuple() for i in intervals])
+
+    sql = transpile(
+        "SELECT MERGE(interval) FROM intervals",
+        tables=["intervals"],
+    )
+    giql_result = duckdb_connection.execute(sql).fetchall()
+
+    comparison = compare_results(giql_result, bedtools_result)
+    assert comparison.match, comparison.failure_message()
+
+
 def test_merge_separated_intervals(duckdb_connection):
     """
     GIVEN intervals with gaps between them

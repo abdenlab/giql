@@ -1708,9 +1708,8 @@ class TestClusterMergeExpansion:
         windows = list(result.find_all(exp.Window))
         assert any(isinstance(w.this, exp.Sum) for w in windows)  # outer cluster id
         assert any(
-            isinstance(w.this, exp.Anonymous) and w.this.name.upper() == "LAG"
-            for w in windows
-        )  # inner adjacency LAG
+            isinstance(w.this, exp.Max) for w in windows
+        )  # inner adjacency running-max edge
         assert any(
             isinstance(a, exp.Alias) and a.alias == "__giql_is_new_cluster"
             for a in result.find_all(exp.Alias)

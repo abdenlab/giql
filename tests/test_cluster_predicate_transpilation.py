@@ -31,8 +31,9 @@ class TestClusterPredicateTranspilation:
 
         # Assert
         assert (
-            'CASE WHEN LAG("end") OVER (PARTITION BY "chrom" ORDER BY "start" '
-            'NULLS LAST) >= "start" THEN 0 ELSE 1 END' in sql
+            'CASE WHEN MAX("end") OVER (PARTITION BY "chrom" ORDER BY "start" '
+            "NULLS LAST ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) "
+            '>= "start" THEN 0 ELSE 1 END' in sql
         )
 
     def test_transpile_with_predicate_ands_into_case(self):
@@ -179,8 +180,9 @@ class TestMergePredicateTranspilation:
 
         # Assert
         assert (
-            'CASE WHEN LAG("end") OVER (PARTITION BY "chrom" ORDER BY "start" '
-            'NULLS LAST) >= "start" THEN 0 ELSE 1 END' in sql
+            'CASE WHEN MAX("end") OVER (PARTITION BY "chrom" ORDER BY "start" '
+            "NULLS LAST ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) "
+            '>= "start" THEN 0 ELSE 1 END' in sql
         )
 
     def test_transpile_predicate_inherited_through_cluster(self):

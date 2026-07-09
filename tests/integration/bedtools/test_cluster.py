@@ -66,6 +66,46 @@ def test_cluster_basic(duckdb_connection):
     )
 
 
+def test_cluster_contained(duckdb_connection):
+    """
+    GIVEN a wide interval that contains a later narrower one which ends before a
+    third interval still inside the wide one
+    WHEN CLUSTER operator is applied via GIQL
+    THEN all three share one cluster_id, matching the single bedtools merge region
+    (#214 -- the boundary must key off the running max end, not the previous row)
+    """
+    intervals = [
+        GenomicInterval("chr1", 0, 1000, "i1", 100, "+"),
+        GenomicInterval("chr1", 100, 200, "i2", 150, "+"),  # contained in i1
+        GenomicInterval("chr1", 300, 400, "i3", 200, "+"),  # in i1, after i2's end
+    ]
+
+    load_intervals(
+        duckdb_connection,
+        "intervals",
+        [i.to_tuple() for i in intervals],
+    )
+
+    bedtools_merged = merge([i.to_tuple() for i in intervals])
+
+    sql = transpile(
+        """
+        SELECT *, CLUSTER(interval) AS cluster_id
+        FROM intervals
+        """,
+        tables=["intervals"],
+        dialect="duckdb",
+    )
+    giql_result = duckdb_connection.execute(sql).fetchall()
+
+    assert len(giql_result) == len(intervals)
+    cluster_ids = {row[-1] for row in giql_result}
+    assert len(cluster_ids) == len(bedtools_merged) == 1, (
+        "All contained intervals should share one cluster, matching the single "
+        "bedtools merge region"
+    )
+
+
 def test_cluster_separated(duckdb_connection):
     """
     GIVEN non-overlapping intervals with gaps
