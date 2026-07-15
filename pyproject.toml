@@ -44,6 +44,7 @@ dev = [
     "pytest>=7.0.0",
     "ruff>=0.1.0",
     "datafusion>=52.3.0",
+    "pytest-manifest>=1.0",
 ]
 docs = [
     "sphinx>=7.0",
@@ -57,6 +58,10 @@ path = "build-hooks/metadata.py"
 
 [tool.pytest.ini_options]
 addopts = "--cov --cov-config=.coveragerc"
+markers = [
+    "integration: end-to-end tests that execute generated SQL against a real database",
+    "usage: the canonical query-usage pattern (giql.tests usage_patterns) a test exercises",
+]
 
 [tool.ruff]
 line-length = 89
@@ -89,3 +94,8 @@ pandas = ">=2.0.0"
 sqlglot = ">=20.0.0,<30"
 pip = "*"
 hypothesis = ">=6.148.2,<7"
+
+[tool.pixi.pypi-dependencies]
+# pytest-manifest has no conda-forge package; the test suite's snapshot
+# fixtures need it, so install it from PyPI into the pixi environment.
+pytest-manifest = ">=1.0"

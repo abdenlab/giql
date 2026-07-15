@@ -98,6 +98,24 @@ Combine and cluster genomic intervals.
 
 See :doc:`aggregation-operators` for detailed documentation.
 
+Set Operations
+--------------
+
+Split genomic intervals against another set of intervals.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 20 50 30
+
+   * - Operator
+     - Description
+     - Example
+   * - :ref:`DISJOIN <disjoin-operator>`
+     - Split intervals at reference breakpoints into sub-intervals
+     - ``SELECT * FROM DISJOIN(features, reference := mask)``
+
+See :doc:`set-operators` for detailed documentation.
+
 Set Quantifiers
 ---------------
 
@@ -127,4 +145,5 @@ See :doc:`quantifiers` for detailed documentation.
 ..    spatial-operators
 ..    distance-operators
 ..    aggregation-operators
+..    set-operators
 ..    quantifiers

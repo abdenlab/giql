@@ -184,10 +184,10 @@ class TestListOperators:
         """
         GIVEN the GIQL MCP server
         WHEN list_operators is called
-        THEN it returns all 9 operators
+        THEN it returns all 10 operators
         """
         result = list_operators()
-        assert len(result) == 9
+        assert len(result) == 10
 
     def test_each_has_required_fields(self):
         """

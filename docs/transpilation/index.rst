@@ -207,7 +207,7 @@ conventions yield the same numeric distance.
          FROM (
              SELECT
                  *,
-                 SUM(is_new_cluster) OVER (
+                 SUM(__giql_is_new_cluster) OVER (
                      PARTITION BY "chrom"
                      ORDER BY "start" NULLS LAST
                  ) AS __giql_cluster_id
@@ -220,9 +220,9 @@ conventions yield the same numeric distance.
                              ORDER BY "start" NULLS LAST
                          ) >= "start" THEN 0
                          ELSE 1
-                     END AS is_new_cluster
+                     END AS __giql_is_new_cluster
                  FROM features
-             ) AS lag_calc
-         ) AS clustered
-         GROUP BY chrom, __giql_cluster_id
+             ) AS __giql_lag_calc
+         ) AS __giql_clustered
+         GROUP BY "chrom", __giql_cluster_id
          ORDER BY "chrom" NULLS LAST, "start" NULLS LAST

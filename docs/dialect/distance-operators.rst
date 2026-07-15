@@ -16,10 +16,11 @@ Description
 ~~~~~~~~~~~
 
 The ``DISTANCE`` operator returns the number of base pairs separating two genomic
-intervals. It follows standard genomic distance conventions:
+intervals, matching ``bedtools closest -d`` semantics:
 
 - **Overlapping intervals**: Returns ``0``
-- **Non-overlapping intervals**: Returns the gap in base pairs (positive integer)
+- **Book-ended (adjacent) intervals** (``A.end == B.start`` in half-open coordinates): Returns ``1``
+- **Non-overlapping intervals**: Returns the half-open gap plus one (a raw gap of ``N`` bases reports ``N + 1``)
 - **Different chromosomes**: Returns ``NULL``
 
 Syntax
@@ -42,7 +43,8 @@ Return Value
 ~~~~~~~~~~~~
 
 - ``0`` for overlapping intervals
-- Positive integer (gap in base pairs) for non-overlapping same-chromosome intervals
+- ``1`` for book-ended (adjacent) intervals, matching ``bedtools closest -d``
+- Positive integer (half-open gap ``+ 1``) for non-overlapping same-chromosome intervals
 - ``NULL`` for intervals on different chromosomes
 
 Examples
@@ -306,6 +308,15 @@ Find nearby same-strand features within distance constraints:
    ) AS nearest
    WHERE nearest.distance BETWEEN -10000 AND 10000
    ORDER BY peaks.name, ABS(nearest.distance)
+
+Target support
+~~~~~~~~~~~~~~
+
+A correlated ``NEAREST`` (its reference is an outer-row column) runs on lateral-capable engines — DuckDB and the generic target — via a correlated ``LATERAL`` subquery, and on Apache DataFusion, which has no correlated-``LATERAL`` physical plan, via a decorrelated window-function rewrite. The two forms return the same result set, including under ``SELECT *`` / ``SELECT b.*`` (on DataFusion the internal helper columns are projected away — see the note below): the ``(start, end)`` tiebreaker orders rows tied at the k-th distance the same way on every engine, deterministically whenever ``(start, end)`` distinguishes the tied candidates. A trailing top-level ``ORDER BY`` is preserved as a top-level ordering except under the DataFusion star-projection wrapper, which sinks it into the wrapped subquery — there, and only there, rely on the *row set* rather than its order (an explicitly-projected query gets no wrapper on any target, so its ordering is preserved). The helper columns are hidden even in the composed cases — two correlated ``NEAREST`` fallbacks in one query, and a correlated ``NEAREST`` whose reserved columns are re-surfaced by an enclosing ``SELECT *`` *outside* its own SELECT (e.g. a wrapping ``CLUSTER``) — because the wrapper re-locates its target join by a reserved marker that survives the CLUSTER/MERGE rewrite and mints its reserved column names per fallback (#172). A standalone ``NEAREST`` with a literal reference is uncorrelated and uses the same ordered, limited subquery on every target.
+
+.. note::
+
+   ``SELECT *`` **/** ``SELECT b.*`` **over a correlated NEAREST on DataFusion.** The decorrelated window-function rewrite must expose its reference-key and rank columns (``__giql_x_<n>_rk_*``, ``__giql_x_<n>_rn``, minted per fallback) on the rewritten join for the equi-join to resolve. To keep them out of user output, the DataFusion path wraps the enclosing ``SELECT`` in ``SELECT * EXCEPT (<reference-key and rank columns>) FROM (...)`` (the ``EXCEPT`` list is the explicit reserved column names) when a ``SELECT *`` / ``SELECT b.*`` would surface them, so those projections return the same columns as the DuckDB LATERAL form (#160). The wrapper finds its target join by a reserved ``meta`` marker rather than a captured reference, so it still fires when a later ``CLUSTER`` / ``MERGE`` rewrite transplants the join into a rebuilt query; and because each fallback's reserved columns carry a per-fallback tag, two correlated ``NEAREST`` in one query each get their own ``* EXCEPT`` (#172). Explicitly-projected queries never surface the reserved columns and get no wrapper.
 
 Notes
 ~~~~~

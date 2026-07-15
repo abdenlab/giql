@@ -1,6 +1,9 @@
-"""Tests for BaseGIQLGenerator.
+"""Tests for the stock serialization of expanded GIQL ASTs.
 
-Test specification: specs/test_base.md
+Coordinate canonicalization and every operator now expand to standard AST in the
+normalization passes; final SQL is produced by the stock sqlglot serializer
+(``ast.sql()``) rather than a custom generator (epic #137, #146). These tests
+pin that expanded output.
 """
 
 import pytest
@@ -8,14 +11,40 @@ from hypothesis import HealthCheck
 from hypothesis import given
 from hypothesis import settings
 from hypothesis import strategies as st
-from sqlglot import exp
 from sqlglot import parse_one
 
+import giql.expanders  # noqa: F401  (registers built-in expanders)
 from giql import Table
+from giql import transpile
+from giql.canonicalizer import canonicalize_coordinates
 from giql.dialect import GIQLDialect
-from giql.expressions import GIQLNearest
-from giql.generators import BaseGIQLGenerator
+from giql.expander import ExpandOperators
+from giql.resolver import resolve_operator_refs
 from giql.table import Tables
+from giql.targets import GenericTarget
+
+
+def _generate_through_passes(sql: str, tables: Tables) -> str:
+    """Parse, run normalization passes 1-3, then generate SQL.
+
+    Coordinate canonicalization for operator operands moved out of the emitter and
+    into the CanonicalizeCoordinates pass (issue #123), and DISTANCE (#140), the
+    spatial / set predicates (#141), and NEAREST (#142) moved onto the registry's
+    ExpandOperators pass (epic #137). Emitter-level tests that pin canonicalized /
+    expanded output must therefore run all three passes before generating, exactly
+    as :func:`giql.transpile.transpile` does, rather than calling ``generate`` on a
+    bare parsed AST. This helper runs the passes in isolation to pin the expanded
+    emitter output on the generic target directly. There is no pre-pass join
+    rewrite anymore: a column-to-column ``INTERSECTS`` join expands to the naive
+    overlap predicate right here in pass 3 (the binned pre-pass was dropped in #167,
+    and the DuckDB IEJoin pre-pass was relocated into the ``(DuckDBTarget,
+    Intersects)`` registry override in #169, which only fires on the duckdb target).
+    """
+    ast = parse_one(sql, dialect=GIQLDialect)
+    ast = resolve_operator_refs(ast, tables)
+    ast = canonicalize_coordinates(ast)
+    ast = ExpandOperators(GenericTarget(), tables).transform(ast)
+    return ast.sql()
 
 
 @pytest.fixture
@@ -75,70 +104,18 @@ def tables_mixed_conventions():
     return tables
 
 
-class TestBaseGIQLGenerator:
-    """Tests for BaseGIQLGenerator class."""
-
-    def test_instantiation_defaults(self):
-        """
-        GIVEN no tables provided
-        WHEN Generator is instantiated with defaults
-        THEN Generator has empty Tables and SUPPORTS_LATERAL is True.
-        """
-        generator = BaseGIQLGenerator()
-
-        assert generator.tables is not None
-        assert "variants" not in generator.tables
-        assert generator.SUPPORTS_LATERAL is True
-
-    def test_instantiation_with_tables(self, tables_info):
-        """
-        GIVEN a valid Tables object with table definitions
-        WHEN Generator is instantiated with tables
-        THEN Generator stores tables and can resolve column references.
-        """
-        generator = BaseGIQLGenerator(tables=tables_info)
-
-        assert generator.tables is tables_info
-        assert "variants" in generator.tables
-
-    def test_instantiation_kwargs_forwarding(self):
-        """
-        GIVEN Generator with custom kwargs
-        WHEN Generator is instantiated with **kwargs
-        THEN Generator passes kwargs to parent class.
-        """
-        # The parent Generator class accepts various kwargs like 'pretty'
-        generator = BaseGIQLGenerator(pretty=True)
-
-        # If kwargs forwarding works, generator should have pretty attribute
-        assert generator.pretty is True
-
-    def test_select_sql_basic(self, tables_info):
-        """
-        GIVEN a SELECT expression with FROM clause containing a table
-        WHEN select_sql is called
-        THEN Table context is tracked and alias mapping is built.
-        """
-        sql = "SELECT * FROM variants"
-        ast = parse_one(sql, dialect=GIQLDialect)
-
-        generator = BaseGIQLGenerator(tables=tables_info)
-        output = generator.generate(ast)
-
-        expected = "SELECT * FROM variants"
-        assert output == expected
+class TestGeneratedSQL:
+    """Tests for the SQL produced by expanding + stock-serializing GIQL ASTs."""
 
     def test_select_sql_with_alias(self, tables_info):
         """
-        GIVEN a SELECT with aliased table (e.g., FROM table AS t)
-        WHEN select_sql is called
-        THEN Alias-to-table mapping includes the alias.
+        GIVEN an aliased-table INTERSECTS predicate (FROM variants AS v)
+        WHEN it is expanded and serialized
+        THEN the predicate expands to alias-qualified range checks.
         """
         sql = "SELECT * FROM variants AS v WHERE v.interval INTERSECTS 'chr1:1000-2000'"
-        ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(tables=tables_info)
-        output = generator.generate(ast)
+        output = _generate_through_passes(sql, tables_info)
 
         expected = (
             "SELECT * FROM variants AS v WHERE "
@@ -147,32 +124,15 @@ class TestBaseGIQLGenerator:
         )
         assert output == expected
 
-    def test_select_sql_with_joins(self, tables_with_two_tables):
-        """
-        GIVEN a SELECT with JOINs
-        WHEN select_sql is called
-        THEN All joined tables and aliases are tracked.
-        """
-        sql = "SELECT * FROM features_a AS a JOIN features_b AS b ON a.id = b.id"
-        ast = parse_one(sql, dialect=GIQLDialect)
-
-        generator = BaseGIQLGenerator(tables=tables_with_two_tables)
-        output = generator.generate(ast)
-
-        expected = "SELECT * FROM features_a AS a JOIN features_b AS b ON a.id = b.id"
-        assert output == expected
-
     def test_intersects_sql_with_literal(self):
         """
         GIVEN an Intersects expression with literal range 'chr1:1000-2000'
-        WHEN intersects_sql is called
+        WHEN it is expanded and serialized
         THEN SQL with chrom = 'chr1' AND start < 2000 AND end > 1000 is generated.
         """
         sql = "SELECT * FROM variants WHERE interval INTERSECTS 'chr1:1000-2000'"
-        ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator()
-        output = generator.generate(ast)
+        output = _generate_through_passes(sql, Tables())
 
         expected = (
             "SELECT * FROM variants WHERE "
@@ -184,17 +144,18 @@ class TestBaseGIQLGenerator:
         """
         GIVEN an Intersects expression with column-to-column
             (a.interval INTERSECTS b.interval)
-        WHEN intersects_sql is called
+        WHEN it is expanded and serialized
         THEN SQL with column-to-column comparison is generated.
         """
         sql = (
             "SELECT * FROM features_a AS a CROSS JOIN features_b AS b "
             "WHERE a.interval INTERSECTS b.interval"
         )
-        ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(tables=tables_with_two_tables)
-        output = generator.generate(ast)
+        # A column-to-column INTERSECTS join expands to the naive overlap predicate
+        # in pass 3; run passes 1-3 directly to pin the predicate expander's
+        # column-join branch in isolation.
+        output = _generate_through_passes(sql, tables_with_two_tables)
 
         expected = (
             "SELECT * FROM features_a AS a CROSS JOIN features_b AS b WHERE "
@@ -218,9 +179,7 @@ class TestBaseGIQLGenerator:
         end = start + length
         sql = f"SELECT * FROM variants WHERE interval INTERSECTS '{chrom}:{start}-{end}'"
 
-        ast = parse_one(sql, dialect=GIQLDialect)
-        generator = BaseGIQLGenerator()
-        output = generator.generate(ast)
+        output = _generate_through_passes(sql, Tables())
 
         # Verify we can parse the output SQL (proves it's syntactically valid)
         parsed = parse_one(output)
@@ -229,14 +188,12 @@ class TestBaseGIQLGenerator:
     def test_contains_sql_point_query(self):
         """
         GIVEN a Contains expression with point query 'chr1:1000'
-        WHEN contains_sql is called
+        WHEN it is expanded and serialized
         THEN SQL with start <= 1000 AND end > 1000 is generated.
         """
         sql = "SELECT * FROM variants WHERE interval CONTAINS 'chr1:1500'"
-        ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator()
-        output = generator.generate(ast)
+        output = _generate_through_passes(sql, Tables())
 
         expected = (
             "SELECT * FROM variants WHERE "
@@ -247,14 +204,12 @@ class TestBaseGIQLGenerator:
     def test_contains_sql_range_query(self):
         """
         GIVEN a Contains expression with range query 'chr1:1000-2000'
-        WHEN contains_sql is called
+        WHEN it is expanded and serialized
         THEN SQL with start <= 1000 AND end >= 2000 is generated.
         """
         sql = "SELECT * FROM variants WHERE interval CONTAINS 'chr1:1500-2000'"
-        ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator()
-        output = generator.generate(ast)
+        output = _generate_through_passes(sql, Tables())
 
         expected = (
             "SELECT * FROM variants WHERE "
@@ -266,17 +221,15 @@ class TestBaseGIQLGenerator:
     def test_contains_sql_column_join(self, tables_with_two_tables):
         """
         GIVEN a Contains expression with column-to-column join
-        WHEN contains_sql is called
+        WHEN it is expanded and serialized
         THEN SQL with left contains right comparison is generated.
         """
         sql = (
             "SELECT * FROM features_a AS a CROSS JOIN features_b AS b "
             "WHERE a.interval CONTAINS b.interval"
         )
-        ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(tables=tables_with_two_tables)
-        output = generator.generate(ast)
+        output = _generate_through_passes(sql, tables_with_two_tables)
 
         expected = (
             "SELECT * FROM features_a AS a CROSS JOIN features_b AS b WHERE "
@@ -300,9 +253,7 @@ class TestBaseGIQLGenerator:
         end = start + length
         sql = f"SELECT * FROM variants WHERE interval CONTAINS '{chrom}:{start}-{end}'"
 
-        ast = parse_one(sql, dialect=GIQLDialect)
-        generator = BaseGIQLGenerator()
-        output = generator.generate(ast)
+        output = _generate_through_passes(sql, Tables())
 
         # Verify we can parse the output SQL (proves it's syntactically valid)
         parsed = parse_one(output)
@@ -314,14 +265,12 @@ class TestBaseGIQLGenerator:
     def test_within_sql_with_literal(self):
         """
         GIVEN a Within expression with literal range 'chr1:1000-2000'
-        WHEN within_sql is called
+        WHEN it is expanded and serialized
         THEN SQL with start >= 1000 AND end <= 2000 is generated.
         """
         sql = "SELECT * FROM variants WHERE interval WITHIN 'chr1:1000-5000'"
-        ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator()
-        output = generator.generate(ast)
+        output = _generate_through_passes(sql, Tables())
 
         expected = (
             "SELECT * FROM variants WHERE "
@@ -332,17 +281,15 @@ class TestBaseGIQLGenerator:
     def test_within_sql_column_join(self, tables_with_two_tables):
         """
         GIVEN a Within expression with column-to-column join
-        WHEN within_sql is called
+        WHEN it is expanded and serialized
         THEN SQL with left within right comparison is generated.
         """
         sql = (
             "SELECT * FROM features_a AS a CROSS JOIN features_b AS b "
             "WHERE a.interval WITHIN b.interval"
         )
-        ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(tables=tables_with_two_tables)
-        output = generator.generate(ast)
+        output = _generate_through_passes(sql, tables_with_two_tables)
 
         expected = (
             "SELECT * FROM features_a AS a CROSS JOIN features_b AS b WHERE "
@@ -354,17 +301,15 @@ class TestBaseGIQLGenerator:
     def test_spatialsetpredicate_sql_any(self):
         """
         GIVEN a SpatialSetPredicate with ANY quantifier and multiple ranges
-        WHEN spatialsetpredicate_sql is called
+        WHEN it is expanded and serialized
         THEN SQL with OR-combined conditions is generated.
         """
         sql = (
             "SELECT * FROM variants "
             "WHERE interval INTERSECTS ANY('chr1:1000-2000', 'chr1:5000-6000')"
         )
-        ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator()
-        output = generator.generate(ast)
+        output = _generate_through_passes(sql, Tables())
 
         expected = (
             "SELECT * FROM variants WHERE "
@@ -376,17 +321,15 @@ class TestBaseGIQLGenerator:
     def test_spatialsetpredicate_sql_all(self):
         """
         GIVEN a SpatialSetPredicate with ALL quantifier and multiple ranges
-        WHEN spatialsetpredicate_sql is called
+        WHEN it is expanded and serialized
         THEN SQL with AND-combined conditions is generated.
         """
         sql = (
             "SELECT * FROM variants "
             "WHERE interval INTERSECTS ALL('chr1:1000-2000', 'chr1:1500-1800')"
         )
-        ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator()
-        output = generator.generate(ast)
+        output = _generate_through_passes(sql, Tables())
 
         expected = (
             "SELECT * FROM variants WHERE "
@@ -395,81 +338,76 @@ class TestBaseGIQLGenerator:
         )
         assert output == expected
 
-    def test_giqlnearest_sql_standalone(self, tables_with_peaks_and_genes):
+    def test_expand_nearest_should_emit_ordered_limit_subquery_when_standalone(
+        self, tables_with_peaks_and_genes
+    ):
         """
         GIVEN a GIQLNearest in standalone mode with literal reference
-        WHEN giqlnearest_sql is called
+        WHEN the NEAREST expander runs
         THEN Subquery with ORDER BY distance LIMIT k is generated.
         """
         sql = "SELECT * FROM NEAREST(genes, reference := 'chr1:1000-2000', k := 3)"
-        ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(tables=tables_with_peaks_and_genes)
-        output = generator.generate(ast)
+        output = _generate_through_passes(sql, tables_with_peaks_and_genes)
 
+        # NEAREST now expands via its registered expander (#142): a two-level
+        # subquery — an inner SELECT that materializes ``distance`` and an outer
+        # wrapper that orders on the materialized ``__giql_x_0."distance"`` plus a
+        # deterministic ``(start, end)`` tiebreaker (#142 A5). Splitting the
+        # distance computation from the ordering keeps DuckDB's correlated-LATERAL
+        # binder and DataFusion's planner both happy while staying result-
+        # equivalent to the legacy single-level emitter.
         expected = (
-            "SELECT * FROM (\n"
-            "                SELECT genes.*, "
-            "CASE WHEN 'chr1' != genes.\"chrom\" THEN NULL "
+            "SELECT * FROM (SELECT * FROM (SELECT genes.*, "
+            "CASE WHEN 'chr1' <> genes.\"chrom\" THEN NULL "
             'WHEN 1000 < genes."end" AND 2000 > genes."start" THEN 0 '
-            'WHEN 2000 <= genes."start" '
-            'THEN (genes."start" - 2000) '
-            'ELSE (1000 - genes."end") END AS distance\n'
-            "                FROM genes\n"
-            "                WHERE 'chr1' = genes.\"chrom\"\n"
-            "                ORDER BY ABS("
-            "CASE WHEN 'chr1' != genes.\"chrom\" THEN NULL "
-            'WHEN 1000 < genes."end" AND 2000 > genes."start" THEN 0 '
-            'WHEN 2000 <= genes."start" '
-            'THEN (genes."start" - 2000) '
-            'ELSE (1000 - genes."end") END)\n'
-            "                LIMIT 3\n"
-            "            )"
+            'WHEN 2000 <= genes."start" THEN (genes."start" - 2000 + 1) '
+            'ELSE (1000 - genes."end" + 1) END AS distance '
+            "FROM genes WHERE 'chr1' = genes.\"chrom\") AS __giql_x_0 "
+            'ORDER BY ABS(__giql_x_0."distance"), '
+            '__giql_x_0."start", __giql_x_0."end" LIMIT 3)'
         )
         assert output == expected
 
-    def test_giqlnearest_sql_correlated(self, tables_with_peaks_and_genes):
+    def test_expand_nearest_should_emit_lateral_subquery_when_correlated(
+        self, tables_with_peaks_and_genes
+    ):
         """
         GIVEN a GIQLNearest in correlated mode (LATERAL join context)
-        WHEN giqlnearest_sql is called
+        WHEN the NEAREST expander runs on a lateral-capable target
         THEN LATERAL-compatible subquery is generated.
         """
         sql = (
             "SELECT * FROM peaks "
             "CROSS JOIN LATERAL NEAREST(genes, reference := peaks.interval, k := 3)"
         )
-        ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(tables=tables_with_peaks_and_genes)
-        output = generator.generate(ast)
+        output = _generate_through_passes(sql, tables_with_peaks_and_genes)
 
+        # Reserialized by the #142 expander as a two-level subquery: the inner
+        # SELECT materializes ``distance`` (CASE and WHERE semantically unchanged)
+        # and the outer wrapper orders on the materialized
+        # ``__giql_x_0."distance"`` plus a deterministic ``(start, end)``
+        # tiebreaker (#142 A5).
         expected = (
-            "SELECT * FROM peaks CROSS JOIN LATERAL (\n"
-            "                SELECT genes.*, "
-            'CASE WHEN peaks."chrom" != genes."chrom" THEN NULL '
-            'WHEN peaks."start" < genes."end" '
-            'AND peaks."end" > genes."start" THEN 0 '
-            'WHEN peaks."end" <= genes."start" '
-            'THEN (genes."start" - peaks."end") '
-            'ELSE (peaks."start" - genes."end") END AS distance\n'
-            "                FROM genes\n"
-            '                WHERE peaks."chrom" = genes."chrom"\n'
-            "                ORDER BY ABS("
-            'CASE WHEN peaks."chrom" != genes."chrom" THEN NULL '
-            'WHEN peaks."start" < genes."end" '
-            'AND peaks."end" > genes."start" THEN 0 '
-            'WHEN peaks."end" <= genes."start" '
-            'THEN (genes."start" - peaks."end") '
-            'ELSE (peaks."start" - genes."end") END)\n'
-            "                LIMIT 3\n"
-            "            )"
+            "SELECT * FROM peaks CROSS JOIN LATERAL (SELECT * FROM (SELECT genes.*, "
+            'CASE WHEN peaks."chrom" <> genes."chrom" THEN NULL '
+            'WHEN peaks."start" < genes."end" AND peaks."end" > genes."start" '
+            'THEN 0 WHEN peaks."end" <= genes."start" '
+            'THEN (genes."start" - peaks."end" + 1) '
+            'ELSE (peaks."start" - genes."end" + 1) END AS distance '
+            'FROM genes WHERE peaks."chrom" = genes."chrom") AS __giql_x_0 '
+            'ORDER BY ABS(__giql_x_0."distance"), '
+            '__giql_x_0."start", __giql_x_0."end" LIMIT 3)'
         )
         assert output == expected
 
-    def test_giqlnearest_sql_with_max_distance(self, tables_with_peaks_and_genes):
+    def test_expand_nearest_should_filter_on_max_distance(
+        self, tables_with_peaks_and_genes
+    ):
         """
         GIVEN a GIQLNearest with max_distance parameter
-        WHEN giqlnearest_sql is called
+        WHEN the NEAREST expander runs
         THEN WHERE clause includes distance filter.
         """
         sql = (
@@ -477,45 +415,38 @@ class TestBaseGIQLGenerator:
             "CROSS JOIN LATERAL NEAREST("
             "genes, reference := peaks.interval, k := 5, max_distance := 100000)"
         )
-        ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(tables=tables_with_peaks_and_genes)
-        output = generator.generate(ast)
+        output = _generate_through_passes(sql, tables_with_peaks_and_genes)
 
+        # Reserialized by the #142 expander as a two-level subquery; the
+        # max_distance filter on ABS of the distance CASE stays in the inner
+        # SELECT's WHERE and the outer wrapper orders on the materialized
+        # ``__giql_x_0."distance"`` plus the deterministic ``(start, end)``
+        # tiebreaker (#142 A5).
         expected = (
-            "SELECT * FROM peaks CROSS JOIN LATERAL (\n"
-            "                SELECT genes.*, "
-            'CASE WHEN peaks."chrom" != genes."chrom" THEN NULL '
-            'WHEN peaks."start" < genes."end" '
-            'AND peaks."end" > genes."start" THEN 0 '
-            'WHEN peaks."end" <= genes."start" '
-            'THEN (genes."start" - peaks."end") '
-            'ELSE (peaks."start" - genes."end") END AS distance\n'
-            "                FROM genes\n"
-            '                WHERE peaks."chrom" = genes."chrom" '
-            "AND (ABS("
-            'CASE WHEN peaks."chrom" != genes."chrom" THEN NULL '
-            'WHEN peaks."start" < genes."end" '
-            'AND peaks."end" > genes."start" THEN 0 '
-            'WHEN peaks."end" <= genes."start" '
-            'THEN (genes."start" - peaks."end") '
-            'ELSE (peaks."start" - genes."end") END)) <= 100000\n'
-            "                ORDER BY ABS("
-            'CASE WHEN peaks."chrom" != genes."chrom" THEN NULL '
-            'WHEN peaks."start" < genes."end" '
-            'AND peaks."end" > genes."start" THEN 0 '
-            'WHEN peaks."end" <= genes."start" '
-            'THEN (genes."start" - peaks."end") '
-            'ELSE (peaks."start" - genes."end") END)\n'
-            "                LIMIT 5\n"
-            "            )"
+            "SELECT * FROM peaks CROSS JOIN LATERAL (SELECT * FROM (SELECT genes.*, "
+            'CASE WHEN peaks."chrom" <> genes."chrom" THEN NULL '
+            'WHEN peaks."start" < genes."end" AND peaks."end" > genes."start" '
+            'THEN 0 WHEN peaks."end" <= genes."start" '
+            'THEN (genes."start" - peaks."end" + 1) '
+            'ELSE (peaks."start" - genes."end" + 1) END AS distance '
+            'FROM genes WHERE peaks."chrom" = genes."chrom" '
+            'AND (ABS(CASE WHEN peaks."chrom" <> genes."chrom" THEN NULL '
+            'WHEN peaks."start" < genes."end" AND peaks."end" > genes."start" '
+            'THEN 0 WHEN peaks."end" <= genes."start" '
+            'THEN (genes."start" - peaks."end" + 1) '
+            'ELSE (peaks."start" - genes."end" + 1) END)) <= 100000) '
+            'AS __giql_x_0 ORDER BY ABS(__giql_x_0."distance"), '
+            '__giql_x_0."start", __giql_x_0."end" LIMIT 5)'
         )
         assert output == expected
 
-    def test_giqlnearest_sql_stranded(self, tables_with_peaks_and_genes):
+    def test_expand_nearest_should_match_strand_when_stranded(
+        self, tables_with_peaks_and_genes
+    ):
         """
         GIVEN a GIQLNearest with stranded := true
-        WHEN giqlnearest_sql is called
+        WHEN the NEAREST expander runs
         THEN Strand matching is included in WHERE clause.
         """
         sql = (
@@ -523,53 +454,65 @@ class TestBaseGIQLGenerator:
             "CROSS JOIN LATERAL NEAREST("
             "genes, reference := peaks.interval, k := 3, stranded := true)"
         )
-        ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(tables=tables_with_peaks_and_genes)
-        output = generator.generate(ast)
+        output = _generate_through_passes(sql, tables_with_peaks_and_genes)
 
+        # Reserialized by the #142 expander as a two-level subquery; the stranded
+        # distance CASE and the ``peaks.strand = genes.strand`` match in the inner
+        # WHERE are semantically unchanged, with the outer wrapper ordering on the
+        # materialized ``__giql_x_0."distance"`` plus the ``(start, end)``
+        # tiebreaker (#142 A5).
         expected = (
-            "SELECT * FROM peaks CROSS JOIN LATERAL (\n"
-            "                SELECT genes.*, "
-            'CASE WHEN peaks."chrom" != genes."chrom" THEN NULL '
+            "SELECT * FROM peaks CROSS JOIN LATERAL (SELECT * FROM (SELECT genes.*, "
+            'CASE WHEN peaks."chrom" <> genes."chrom" THEN NULL '
             'WHEN peaks."strand" IS NULL OR genes."strand" IS NULL THEN NULL '
             "WHEN peaks.\"strand\" = '.' OR peaks.\"strand\" = '?' THEN NULL "
             "WHEN genes.\"strand\" = '.' OR genes.\"strand\" = '?' THEN NULL "
-            'WHEN peaks."start" < genes."end" '
-            'AND peaks."end" > genes."start" THEN 0 '
-            'WHEN peaks."end" <= genes."start" '
+            'WHEN peaks."start" < genes."end" AND peaks."end" > genes."start" '
+            'THEN 0 WHEN peaks."end" <= genes."start" '
             "THEN CASE WHEN peaks.\"strand\" = '-' "
-            'THEN -(genes."start" - peaks."end") '
-            'ELSE (genes."start" - peaks."end") END '
+            'THEN -(genes."start" - peaks."end" + 1) '
+            'ELSE (genes."start" - peaks."end" + 1) END '
             "ELSE CASE WHEN peaks.\"strand\" = '-' "
-            'THEN -(peaks."start" - genes."end") '
-            'ELSE (peaks."start" - genes."end") END END AS distance\n'
-            "                FROM genes\n"
-            '                WHERE peaks."chrom" = genes."chrom" '
-            'AND peaks."strand" = genes."strand"\n'
-            "                ORDER BY ABS("
-            'CASE WHEN peaks."chrom" != genes."chrom" THEN NULL '
-            'WHEN peaks."strand" IS NULL OR genes."strand" IS NULL THEN NULL '
-            "WHEN peaks.\"strand\" = '.' OR peaks.\"strand\" = '?' THEN NULL "
-            "WHEN genes.\"strand\" = '.' OR genes.\"strand\" = '?' THEN NULL "
-            'WHEN peaks."start" < genes."end" '
-            'AND peaks."end" > genes."start" THEN 0 '
-            'WHEN peaks."end" <= genes."start" '
-            "THEN CASE WHEN peaks.\"strand\" = '-' "
-            'THEN -(genes."start" - peaks."end") '
-            'ELSE (genes."start" - peaks."end") END '
-            "ELSE CASE WHEN peaks.\"strand\" = '-' "
-            'THEN -(peaks."start" - genes."end") '
-            'ELSE (peaks."start" - genes."end") END END)\n'
-            "                LIMIT 3\n"
-            "            )"
+            'THEN -(peaks."start" - genes."end" + 1) '
+            'ELSE (peaks."start" - genes."end" + 1) END END AS distance '
+            'FROM genes WHERE peaks."chrom" = genes."chrom" '
+            'AND peaks."strand" = genes."strand") AS __giql_x_0 '
+            'ORDER BY ABS(__giql_x_0."distance"), '
+            '__giql_x_0."start", __giql_x_0."end" LIMIT 3)'
         )
         assert output == expected
 
-    def test_giqlnearest_sql_signed(self, tables_with_peaks_and_genes):
+    def test_expand_nearest_should_skip_strand_when_outer_has_no_strand_column(self):
+        """
+        GIVEN a stranded NEAREST whose implicit-outer table declares no strand
+            column
+        WHEN the query is generated
+        THEN no strand filtering is emitted, preserving the divergence between
+            the explicit-column and implicit-outer reference paths.
+        """
+        # Arrange
+        tables = Tables()
+        tables.register("nostr", Table("nostr", strand_col=None))
+        tables.register("genes", Table("genes"))
+        sql = (
+            "SELECT * FROM nostr "
+            "CROSS JOIN LATERAL NEAREST(genes, k := 1, stranded := true)"
+        )
+
+        # Act
+        output = _generate_through_passes(sql, tables)
+
+        # Assert
+        assert "strand" not in output
+        assert 'nostr."chrom" = genes."chrom"' in output
+
+    def test_expand_nearest_should_emit_signed_distance_when_signed(
+        self, tables_with_peaks_and_genes
+    ):
         """
         GIVEN a GIQLNearest with signed := true
-        WHEN giqlnearest_sql is called
+        WHEN the NEAREST expander runs
         THEN Distance expression includes signed calculation.
         """
         sql = (
@@ -577,60 +520,40 @@ class TestBaseGIQLGenerator:
             "CROSS JOIN LATERAL NEAREST("
             "genes, reference := peaks.interval, k := 3, signed := true)"
         )
-        ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(tables=tables_with_peaks_and_genes)
-        output = generator.generate(ast)
+        output = _generate_through_passes(sql, tables_with_peaks_and_genes)
 
+        # Reserialized by the #142 expander as a two-level subquery; the signed
+        # distance CASE (negated ELSE branch for upstream) is semantically
+        # unchanged in the inner SELECT, with the outer wrapper ordering on the
+        # materialized ``__giql_x_0."distance"`` plus the ``(start, end)``
+        # tiebreaker (#142 A5).
         expected = (
-            "SELECT * FROM peaks CROSS JOIN LATERAL (\n"
-            "                SELECT genes.*, "
-            'CASE WHEN peaks."chrom" != genes."chrom" THEN NULL '
-            'WHEN peaks."start" < genes."end" '
-            'AND peaks."end" > genes."start" THEN 0 '
-            'WHEN peaks."end" <= genes."start" '
-            'THEN (genes."start" - peaks."end") '
-            'ELSE -(peaks."start" - genes."end") END AS distance\n'
-            "                FROM genes\n"
-            '                WHERE peaks."chrom" = genes."chrom"\n'
-            "                ORDER BY ABS("
-            'CASE WHEN peaks."chrom" != genes."chrom" THEN NULL '
-            'WHEN peaks."start" < genes."end" '
-            'AND peaks."end" > genes."start" THEN 0 '
-            'WHEN peaks."end" <= genes."start" '
-            'THEN (genes."start" - peaks."end") '
-            'ELSE -(peaks."start" - genes."end") END)\n'
-            "                LIMIT 3\n"
-            "            )"
+            "SELECT * FROM peaks CROSS JOIN LATERAL (SELECT * FROM (SELECT genes.*, "
+            'CASE WHEN peaks."chrom" <> genes."chrom" THEN NULL '
+            'WHEN peaks."start" < genes."end" AND peaks."end" > genes."start" '
+            'THEN 0 WHEN peaks."end" <= genes."start" '
+            'THEN (genes."start" - peaks."end" + 1) '
+            'ELSE -(peaks."start" - genes."end" + 1) END AS distance '
+            'FROM genes WHERE peaks."chrom" = genes."chrom") AS __giql_x_0 '
+            'ORDER BY ABS(__giql_x_0."distance"), '
+            '__giql_x_0."start", __giql_x_0."end" LIMIT 3)'
         )
         assert output == expected
 
-    def test_giqlnearest_sql_no_lateral_support(self, tables_with_peaks_and_genes):
-        """
-        GIVEN a GIQLNearest on a generator with SUPPORTS_LATERAL=False
-        WHEN giqlnearest_sql is called in correlated mode
-        THEN ValueError is raised with helpful message.
-        """
-
-        # Create a generator subclass without LATERAL support
-        class NoLateralGenerator(BaseGIQLGenerator):
-            SUPPORTS_LATERAL = False
-
-        # Use query without explicit reference to trigger correlated mode
-        sql = "SELECT * FROM peaks CROSS JOIN LATERAL NEAREST(genes, k := 3)"
-        ast = parse_one(sql, dialect=GIQLDialect)
-
-        generator = NoLateralGenerator(tables=tables_with_peaks_and_genes)
-
-        with pytest.raises(ValueError, match="LATERAL"):
-            generator.generate(ast)
+    # The legacy ``SUPPORTS_LATERAL=False`` generator-level error path was removed
+    # with ``giqlnearest_sql`` (#142): lateral support is now a target capability,
+    # and a target without it (DataFusion) gets the decorrelated window-function
+    # fallback rather than a hard error. That fallback's result-identity with the
+    # LATERAL form is verified by the cross-target oracle
+    # (tests/integration/datafusion/test_cross_target_oracle.py).
 
     @settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
     @given(
         k=st.integers(min_value=1, max_value=100),
         max_distance=st.integers(min_value=1, max_value=10_000_000),
     )
-    def test_giqlnearest_sql_parameter_handling_property(
+    def test_expand_nearest_should_carry_k_and_max_distance_property(
         self, tables_with_peaks_and_genes, k, max_distance
     ):
         """
@@ -642,10 +565,8 @@ class TestBaseGIQLGenerator:
             f"SELECT * FROM NEAREST("
             f"genes, reference := 'chr1:1000-2000', k := {k}, max_distance := {max_distance})"
         )
-        ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(tables=tables_with_peaks_and_genes)
-        output = generator.generate(ast)
+        output = _generate_through_passes(sql, tables_with_peaks_and_genes)
 
         # k should appear in LIMIT
         assert f"LIMIT {k}" in output
@@ -655,24 +576,22 @@ class TestBaseGIQLGenerator:
     def test_giqldistance_sql_basic(self, tables_with_two_tables):
         """
         GIVEN a GIQLDistance with two column references
-        WHEN giqldistance_sql is called
+        WHEN the DISTANCE node is expanded
         THEN CASE expression for distance calculation is generated.
         """
         sql = (
             "SELECT DISTANCE(a.interval, b.interval) as dist "
             "FROM features_a a CROSS JOIN features_b b"
         )
-        ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(tables=tables_with_two_tables)
-        output = generator.generate(ast)
+        output = _generate_through_passes(sql, tables_with_two_tables)
 
         expected = (
-            'SELECT CASE WHEN a."chrom" != b."chrom" THEN NULL '
+            'SELECT CASE WHEN a."chrom" <> b."chrom" THEN NULL '
             'WHEN a."start" < b."end" AND a."end" > b."start" '
             'THEN 0 WHEN a."end" <= b."start" '
-            'THEN (b."start" - a."end") '
-            'ELSE (a."start" - b."end") END AS dist '
+            'THEN (b."start" - a."end" + 1) '
+            'ELSE (a."start" - b."end" + 1) END AS dist '
             "FROM features_a AS a CROSS JOIN features_b AS b"
         )
         assert output == expected
@@ -680,20 +599,18 @@ class TestBaseGIQLGenerator:
     def test_giqldistance_sql_stranded(self, tables_with_two_tables):
         """
         GIVEN a GIQLDistance with stranded := true
-        WHEN giqldistance_sql is called
+        WHEN the DISTANCE node is expanded
         THEN Strand-aware distance CASE expression is generated.
         """
         sql = (
             "SELECT DISTANCE(a.interval, b.interval, stranded := true) as dist "
             "FROM features_a a CROSS JOIN features_b b"
         )
-        ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(tables=tables_with_two_tables)
-        output = generator.generate(ast)
+        output = _generate_through_passes(sql, tables_with_two_tables)
 
         expected = (
-            'SELECT CASE WHEN a."chrom" != b."chrom" THEN NULL '
+            'SELECT CASE WHEN a."chrom" <> b."chrom" THEN NULL '
             'WHEN a."strand" IS NULL OR b."strand" IS NULL THEN NULL '
             "WHEN a.\"strand\" = '.' OR a.\"strand\" = '?' THEN NULL "
             "WHEN b.\"strand\" = '.' OR b.\"strand\" = '?' THEN NULL "
@@ -701,11 +618,11 @@ class TestBaseGIQLGenerator:
             'AND a."end" > b."start" THEN 0 '
             'WHEN a."end" <= b."start" '
             "THEN CASE WHEN a.\"strand\" = '-' "
-            'THEN -(b."start" - a."end") '
-            'ELSE (b."start" - a."end") END '
+            'THEN -(b."start" - a."end" + 1) '
+            'ELSE (b."start" - a."end" + 1) END '
             "ELSE CASE WHEN a.\"strand\" = '-' "
-            'THEN -(a."start" - b."end") '
-            'ELSE (a."start" - b."end") END END AS dist '
+            'THEN -(a."start" - b."end" + 1) '
+            'ELSE (a."start" - b."end" + 1) END END AS dist '
             "FROM features_a AS a CROSS JOIN features_b AS b"
         )
         assert output == expected
@@ -713,24 +630,22 @@ class TestBaseGIQLGenerator:
     def test_giqldistance_sql_signed(self, tables_with_two_tables):
         """
         GIVEN a GIQLDistance with signed := true
-        WHEN giqldistance_sql is called
+        WHEN the DISTANCE node is expanded
         THEN Signed distance CASE expression is generated.
         """
         sql = (
             "SELECT DISTANCE(a.interval, b.interval, signed := true) as dist "
             "FROM features_a a CROSS JOIN features_b b"
         )
-        ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(tables=tables_with_two_tables)
-        output = generator.generate(ast)
+        output = _generate_through_passes(sql, tables_with_two_tables)
 
         expected = (
-            'SELECT CASE WHEN a."chrom" != b."chrom" THEN NULL '
+            'SELECT CASE WHEN a."chrom" <> b."chrom" THEN NULL '
             'WHEN a."start" < b."end" AND a."end" > b."start" '
             'THEN 0 WHEN a."end" <= b."start" '
-            'THEN (b."start" - a."end") '
-            'ELSE -(a."start" - b."end") END AS dist '
+            'THEN (b."start" - a."end" + 1) '
+            'ELSE -(a."start" - b."end" + 1) END AS dist '
             "FROM features_a AS a CROSS JOIN features_b AS b"
         )
         assert output == expected
@@ -738,7 +653,7 @@ class TestBaseGIQLGenerator:
     def test_giqldistance_sql_stranded_and_signed(self, tables_with_two_tables):
         """
         GIVEN a GIQLDistance with both stranded and signed := true
-        WHEN giqldistance_sql is called
+        WHEN the DISTANCE node is expanded
         THEN Combined stranded+signed distance expression is generated.
         """
         sql = (
@@ -746,13 +661,11 @@ class TestBaseGIQLGenerator:
             "DISTANCE(a.interval, b.interval, stranded := true, signed := true) as dist "
             "FROM features_a a CROSS JOIN features_b b"
         )
-        ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(tables=tables_with_two_tables)
-        output = generator.generate(ast)
+        output = _generate_through_passes(sql, tables_with_two_tables)
 
         expected = (
-            'SELECT CASE WHEN a."chrom" != b."chrom" THEN NULL '
+            'SELECT CASE WHEN a."chrom" <> b."chrom" THEN NULL '
             'WHEN a."strand" IS NULL OR b."strand" IS NULL THEN NULL '
             "WHEN a.\"strand\" = '.' OR a.\"strand\" = '?' THEN NULL "
             "WHEN b.\"strand\" = '.' OR b.\"strand\" = '?' THEN NULL "
@@ -760,27 +673,28 @@ class TestBaseGIQLGenerator:
             'AND a."end" > b."start" THEN 0 '
             'WHEN a."end" <= b."start" '
             "THEN CASE WHEN a.\"strand\" = '-' "
-            'THEN -(b."start" - a."end") '
-            'ELSE (b."start" - a."end") END '
+            'THEN -(b."start" - a."end" + 1) '
+            'ELSE (b."start" - a."end" + 1) END '
             "ELSE CASE WHEN a.\"strand\" = '-' "
-            'THEN (a."start" - b."end") '
-            'ELSE -(a."start" - b."end") END END AS dist '
+            'THEN (a."start" - b."end" + 1) '
+            'ELSE -(a."start" - b."end" + 1) END END AS dist '
             "FROM features_a AS a CROSS JOIN features_b AS b"
         )
         assert output == expected
 
-    def test_giqldistance_should_not_apply_gap_plus_one_for_closed_intervals(
+    def test_giqldistance_canonicalizes_closed_ends_apart_from_gap_parity(
         self, tables_with_closed_intervals
     ):
-        """Test DISTANCE on closed-interval tables omits "+1" gap counting.
+        """Test DISTANCE on closed-interval tables keeps encoding and gap "+1" separate.
 
         Given:
             Two 0-based closed-interval tables and DISTANCE.
         When:
-            giqldistance_sql is called.
+            the DISTANCE node is expanded.
         Then:
-            It should canonicalize each table-side end as (end + 1) but omit
-            any "+1" from the gap branches.
+            It should canonicalize each table-side end as (end + 1) for the
+            closed->half-open conversion, distinct from the bedtools-parity
+            + 1 the gap branches add to the canonical gap.
         """
         # Arrange
         tables_with_closed_intervals.register(
@@ -790,272 +704,257 @@ class TestBaseGIQLGenerator:
             "SELECT DISTANCE(a.interval, b.interval) as dist "
             "FROM bed_features a CROSS JOIN bed_features_b b"
         )
-        ast = parse_one(sql, dialect=GIQLDialect)
-        generator = BaseGIQLGenerator(tables=tables_with_closed_intervals)
 
-        # Act
-        output = generator.generate(ast)
+        # Act — canonicalization for DISTANCE operands now lives in the
+        # CanonicalizeCoordinates pass (#123), so run both passes via the helper.
+        output = _generate_through_passes(sql, tables_with_closed_intervals)
 
         # Assert
         expected = (
-            'SELECT CASE WHEN a."chrom" != b."chrom" THEN NULL '
+            'SELECT CASE WHEN a."chrom" <> b."chrom" THEN NULL '
             'WHEN a."start" < (b."end" + 1) '
             'AND (a."end" + 1) > b."start" THEN 0 '
             'WHEN (a."end" + 1) <= b."start" '
-            'THEN (b."start" - (a."end" + 1)) '
-            'ELSE (a."start" - (b."end" + 1)) END AS dist '
+            'THEN (b."start" - (a."end" + 1) + 1) '
+            'ELSE (a."start" - (b."end" + 1) + 1) END AS dist '
             "FROM bed_features AS a CROSS JOIN bed_features_b AS b"
         )
         assert output == expected
 
-    def test_error_handling_invalid_range(self):
+    def test_expand_intersects_should_raise_when_invalid_range(self):
         """
         GIVEN invalid genomic range string in Intersects
-        WHEN intersects_sql is called
+        WHEN the INTERSECTS predicate is expanded
         THEN ValueError with descriptive message is raised.
         """
         sql = "SELECT * FROM variants WHERE interval INTERSECTS 'invalid'"
-        ast = parse_one(sql, dialect=GIQLDialect)
-
-        generator = BaseGIQLGenerator()
 
         with pytest.raises(ValueError, match="Could not parse genomic range"):
-            generator.generate(ast)
+            _generate_through_passes(sql, Tables())
 
-    def test_error_handling_unknown_operation(self):
+    def test_expand_intersects_should_raise_when_nonnumeric_range_bounds(self):
         """
-        GIVEN unknown operation type in spatial operations
-        WHEN a spatial operation with unknown op_type is attempted
-        THEN ValueError is raised.
+        GIVEN an INTERSECTS range whose start/end bounds are non-numeric
+        WHEN the INTERSECTS predicate is expanded
+        THEN ValueError is raised from the range parse failure.
 
-        Note: This test verifies internal error handling by directly calling
-        a method with invalid input, which would only occur through code errors.
+        Note: 'chr:a-b' parses as a range shape but its bounds are not integers,
+        so the underlying RangeParser raises and the expander wraps it. (The
+        former "unknown operation" guard this exercised is now unreachable —
+        dispatch is closed over the three known op types — so this pins the
+        remaining reachable failure: a parse error on the literal range.)
         """
-        # This is an indirect test - we verify the generator raises ValueError
-        # when given malformed range strings as that's how errors surface
         sql = "SELECT * FROM variants WHERE interval INTERSECTS 'chr:a-b'"
-        ast = parse_one(sql, dialect=GIQLDialect)
-
-        generator = BaseGIQLGenerator()
 
         with pytest.raises(ValueError):
-            generator.generate(ast)
+            _generate_through_passes(sql, Tables())
 
-    def test_select_sql_join_without_alias(self, tables_with_two_tables):
-        """
-        GIVEN a SELECT with JOIN where joined table has no alias
-        WHEN select_sql is called
-        THEN Table name is used directly in alias mapping.
-        """
-        sql = "SELECT * FROM features_a JOIN features_b ON features_a.id = features_b.id"
-        ast = parse_one(sql, dialect=GIQLDialect)
-
-        generator = BaseGIQLGenerator(tables=tables_with_two_tables)
-        output = generator.generate(ast)
-
-        expected = (
-            "SELECT * FROM features_a JOIN features_b ON features_a.id = features_b.id"
-        )
-        assert output == expected
-
-    def test_giqlnearest_sql_stranded_literal_with_strand(
+    def test_expand_nearest_should_use_literal_strand_when_stranded(
         self, tables_with_peaks_and_genes
     ):
         """
         GIVEN a GIQLNearest with stranded := true and literal reference containing strand
-        WHEN giqlnearest_sql is called
+        WHEN the NEAREST expander runs
         THEN Strand from literal range is parsed and used in filtering.
         """
         sql = (
             "SELECT * FROM NEAREST("
             "genes, reference := 'chr1:1000-2000:+', k := 3, stranded := true)"
         )
-        ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(tables=tables_with_peaks_and_genes)
-        output = generator.generate(ast)
+        output = _generate_through_passes(sql, tables_with_peaks_and_genes)
 
         # Should contain strand literal '+' and strand filtering
         assert "'+'" in output
         assert 'genes."strand"' in output
 
-    def test_giqlnearest_sql_stranded_implicit_reference(
+    def test_expand_nearest_should_resolve_outer_strand_when_implicit_reference(
         self, tables_with_peaks_and_genes
     ):
         """
         GIVEN a GIQLNearest in correlated mode with implicit reference and stranded := true
-        WHEN giqlnearest_sql is called
+        WHEN the NEAREST expander runs
         THEN Strand column is resolved from outer table and used.
         """
         sql = "SELECT * FROM peaks CROSS JOIN LATERAL NEAREST(genes, k := 3, stranded := true)"
-        ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(tables=tables_with_peaks_and_genes)
-        output = generator.generate(ast)
+        output = _generate_through_passes(sql, tables_with_peaks_and_genes)
 
         # Should have strand columns from both tables
         assert 'peaks."strand"' in output
         assert 'genes."strand"' in output
 
-    def test_giqlnearest_should_not_apply_gap_plus_one_for_closed_intervals(
+    def test_giqlnearest_canonicalizes_closed_end_in_wrapper_apart_from_gap_parity(
         self,
     ):
-        """Test NEAREST on a closed-interval target omits "+1" gap counting.
+        """Test NEAREST on a closed-interval target keeps encoding and gap "+1" separate.
 
         Given:
             A 0-based closed-interval target table and NEAREST.
         When:
-            giqlnearest_sql is called.
+            The query is transpiled.
         Then:
-            It should canonicalize the target end as (target."end" + 1) but
-            omit any "+1" from the gap branches.
+            It should canonicalize the target end as (end + 1) inside the
+            wrapper CTE, distinct from the bedtools-parity + 1 the distance gap
+            branches add to the canonical gap.
         """
         # Arrange
-        tables = Tables()
-        tables.register("genes_closed", Table("genes_closed", interval_type="closed"))
         sql = (
-            "SELECT * FROM NEAREST("
-            "genes_closed, reference := 'chr1:1000-2000', k := 3)"
+            "SELECT * FROM NEAREST(genes_closed, reference := 'chr1:1000-2000', k := 3)"
         )
-        ast = parse_one(sql, dialect=GIQLDialect)
-        generator = BaseGIQLGenerator(tables=tables)
+
+        # Act — the target's coordinate canonicalization now lives in the
+        # CanonicalizeCoordinates pass (#123): a non-canonical target is wrapped
+        # in a __giql_canon_* CTE, so the (end + 1) arithmetic appears there and
+        # the distance CASE reads the bare canonical columns.
+        output = transpile(sql, tables=[Table("genes_closed", interval_type="closed")])
+
+        # Assert — the wrapper carries the closed->half-open (end + 1); the gap
+        # branches read the canonical columns and add the bedtools-parity + 1.
+        assert '("end" + 1) AS "end"' in output
+        assert 'THEN (__giql_canon_0."start" - 2000 + 1)' in output
+        assert 'ELSE (1000 - __giql_canon_0."end" + 1)' in output
+
+    def test_giqlnearest_closed_interval_does_not_double_count_plus_one(self):
+        """Test NEAREST on a closed target never fuses the two +1 terms.
+
+        Given:
+            A 0-based closed-interval target table and NEAREST.
+        When:
+            The query is transpiled.
+        Then:
+            It should keep the encoding (end + 1) and the gap-parity + 1 as
+            separate terms — never collapsing them into a `+ 1 + 1` /
+            `(end + 1 + 1)` that would double-count the off-by-one.
+        """
+        # Arrange
+        sql = (
+            "SELECT * FROM NEAREST(genes_closed, reference := 'chr1:1000-2000', k := 3)"
+        )
 
         # Act
-        output = generator.generate(ast)
+        output = transpile(sql, tables=[Table("genes_closed", interval_type="closed")])
 
-        # Assert — canonicalization is applied, but neither gap branch carries
-        # a trailing "+ 1".
-        assert '(genes_closed."end" + 1)' in output
-        assert 'THEN (genes_closed."start" - 2000)' in output
-        assert 'ELSE (1000 - (genes_closed."end" + 1))' in output
-        assert '(genes_closed."start" - 2000 + 1)' not in output
-        assert '(1000 - (genes_closed."end" + 1) + 1)' not in output
+        # Assert
+        assert "+ 1 + 1" not in output
+        assert '("end" + 1 + 1)' not in output
+        assert '("start" + 1 + 1)' not in output
 
     def test_giqldistance_sql_literal_first_arg_error(self, tables_with_two_tables):
         """
         GIVEN a GIQLDistance with literal range as first argument
-        WHEN giqldistance_sql is called
+        WHEN the DISTANCE node is expanded
         THEN ValueError is raised indicating literals not supported.
         """
         sql = "SELECT DISTANCE('chr1:1000-2000', b.interval) as dist FROM features_b b"
         ast = parse_one(sql, dialect=GIQLDialect)
+        ast = resolve_operator_refs(ast, tables_with_two_tables)
+        ast = canonicalize_coordinates(ast)
 
-        generator = BaseGIQLGenerator(tables=tables_with_two_tables)
+        expander = ExpandOperators(GenericTarget(), tables_with_two_tables)
 
         with pytest.raises(ValueError, match="Literal range as first argument"):
-            generator.generate(ast)
+            expander.transform(ast)
 
     def test_giqldistance_sql_literal_second_arg_error(self, tables_with_two_tables):
         """
         GIVEN a GIQLDistance with literal range as second argument
-        WHEN giqldistance_sql is called
+        WHEN the DISTANCE node is expanded
         THEN ValueError is raised indicating literals not supported.
         """
         sql = "SELECT DISTANCE(a.interval, 'chr1:1000-2000') as dist FROM features_a a"
         ast = parse_one(sql, dialect=GIQLDialect)
+        ast = resolve_operator_refs(ast, tables_with_two_tables)
+        ast = canonicalize_coordinates(ast)
 
-        generator = BaseGIQLGenerator(tables=tables_with_two_tables)
+        expander = ExpandOperators(GenericTarget(), tables_with_two_tables)
 
         with pytest.raises(ValueError, match="Literal range as second argument"):
-            generator.generate(ast)
+            expander.transform(ast)
 
-    def test_giqlnearest_sql_missing_outer_table_error(
+    def test_expand_nearest_should_raise_when_outer_table_unresolvable(
         self, tables_with_peaks_and_genes
     ):
         """
-        GIVEN a GIQLNearest in correlated mode without reference where outer table
-            cannot be found
-        WHEN giqlnearest_sql is called
-        THEN ValueError is raised with helpful message about specifying reference.
+        GIVEN a GIQLNearest without a reference and no resolvable outer table
+        WHEN the NEAREST expander runs
+        THEN ValueError is raised with a helpful message about specifying reference.
         """
+        # Arrange — no reference and no LATERAL outer relation to infer one from.
+        sql = "SELECT * FROM NEAREST(genes, k := 3)"
 
-        nearest = GIQLNearest(
-            this=exp.Table(this=exp.Identifier(this="genes")),
-            k=exp.Literal.number(3),
-        )
-
-        generator = BaseGIQLGenerator(tables=tables_with_peaks_and_genes)
-
+        # Act & assert
         with pytest.raises(ValueError, match="Could not find outer table"):
-            generator.giqlnearest_sql(nearest)
+            _generate_through_passes(sql, tables_with_peaks_and_genes)
 
-    def test_giqlnearest_sql_outer_table_not_in_tables(self):
+    def test_expand_nearest_should_raise_when_outer_table_unregistered(self):
         """
-        GIVEN a GIQLNearest in correlated mode where outer table is not registered
-        WHEN giqlnearest_sql is called
+        GIVEN a NEAREST whose implicit-outer relation is found but not registered
+        WHEN the query is generated
         THEN ValueError is raised listing the issue.
         """
         tables = Tables()
         tables.register("genes", Table("genes"))
 
-        nearest = GIQLNearest(
-            this=exp.Table(this=exp.Identifier(this="genes")),
-            k=exp.Literal.number(3),
-        )
-
-        generator = BaseGIQLGenerator(tables=tables)
-        generator._alias_to_table = {"unknown_table": "unknown_table"}
-        generator._find_outer_table_in_lateral_join = lambda x: "unknown_table"
+        # The outer relation (unknown_table) is present in the LATERAL context
+        # but is not a registered table, so the implicit-outer reference defers.
+        sql = "SELECT * FROM unknown_table CROSS JOIN LATERAL NEAREST(genes, k := 3)"
 
         with pytest.raises(ValueError, match="not found in tables"):
-            generator.giqlnearest_sql(nearest)
+            _generate_through_passes(sql, tables)
 
-    def test_giqlnearest_sql_invalid_reference_range(self, tables_with_peaks_and_genes):
+    def test_expand_nearest_should_raise_when_reference_range_unparseable(
+        self, tables_with_peaks_and_genes
+    ):
         """
         GIVEN a GIQLNearest with invalid/unparseable reference range string
-        WHEN giqlnearest_sql is called
+        WHEN the NEAREST expander runs
         THEN ValueError is raised with parse error details.
         """
         sql = "SELECT * FROM NEAREST(genes, reference := 'invalid_range', k := 3)"
-        ast = parse_one(sql, dialect=GIQLDialect)
-
-        generator = BaseGIQLGenerator(tables=tables_with_peaks_and_genes)
 
         with pytest.raises(ValueError, match="Could not parse reference genomic range"):
-            generator.generate(ast)
+            _generate_through_passes(sql, tables_with_peaks_and_genes)
 
-    def test_giqlnearest_sql_no_tables_error(self):
+    def test_expand_nearest_should_raise_when_no_tables_registered(self):
         """
-        GIVEN a GIQLNearest without tables registered
-        WHEN giqlnearest_sql is called
-        THEN ValueError is raised because target table cannot be resolved.
+        GIVEN a GIQLNearest with no tables registered
+        WHEN the NEAREST expander runs
+        THEN ValueError is raised because the target table cannot be resolved.
         """
+        # Arrange
         sql = "SELECT * FROM NEAREST(genes, reference := 'chr1:1000-2000', k := 3)"
-        ast = parse_one(sql, dialect=GIQLDialect)
 
-        # Generator with empty tables - table won't be found
-        generator = BaseGIQLGenerator()
-
+        # Act & assert
         with pytest.raises(ValueError, match="not found in tables"):
-            generator.generate(ast)
+            _generate_through_passes(sql, Tables())
 
-    def test_giqlnearest_sql_target_not_in_tables(self, tables_with_peaks_and_genes):
+    def test_expand_nearest_should_raise_when_target_unregistered(
+        self, tables_with_peaks_and_genes
+    ):
         """
-        GIVEN a GIQLNearest with target table not registered
-        WHEN giqlnearest_sql is called
-        THEN ValueError is raised listing available tables.
+        GIVEN a GIQLNearest whose target table is not registered
+        WHEN the NEAREST expander runs
+        THEN ValueError is raised listing the unresolved table.
         """
+        # Arrange
         sql = (
             "SELECT * FROM NEAREST(unknown_table, reference := 'chr1:1000-2000', k := 3)"
         )
-        ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(tables=tables_with_peaks_and_genes)
-
+        # Act & assert
         with pytest.raises(ValueError, match="not found in tables"):
-            generator.generate(ast)
+            _generate_through_passes(sql, tables_with_peaks_and_genes)
 
     def test_intersects_sql_unqualified_column(self):
         """
         GIVEN an unqualified column reference (no table prefix) in spatial operation
-        WHEN intersects_sql is called
+        WHEN it is expanded and serialized
         THEN Default column names are used without table qualifier.
         """
         sql = "SELECT * FROM variants WHERE interval INTERSECTS 'chr1:1000-2000'"
-        ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator()
-        output = generator.generate(ast)
+        output = _generate_through_passes(sql, Tables())
 
         expected = (
             "SELECT * FROM variants WHERE "
@@ -1063,53 +962,47 @@ class TestBaseGIQLGenerator:
         )
         assert output == expected
 
-    def test_giqlnearest_sql_stranded_unqualified_reference(
+    def test_expand_nearest_should_resolve_strand_when_reference_unqualified(
         self, tables_with_peaks_and_genes
     ):
         """
-        GIVEN a GIQLNearest with stranded := true and unqualified column reference
-        WHEN giqlnearest_sql is called
+        GIVEN a GIQLNearest with stranded := true and an unqualified column reference
+        WHEN the NEAREST expander runs
         THEN Strand column is resolved without table prefix.
         """
-
-        # Create NEAREST with stranded=True and an unqualified column reference
-        # The reference is an unqualified column (no table prefix)
-        nearest = GIQLNearest(
-            this=exp.Table(this=exp.Identifier(this="genes")),
-            reference=exp.Column(this=exp.Identifier(this="interval")),
-            k=exp.Literal.number(3),
-            stranded=exp.Boolean(this=True),
+        # Arrange — the reference is an unqualified column (no table prefix).
+        sql = (
+            "SELECT * FROM peaks CROSS JOIN LATERAL "
+            "NEAREST(genes, reference := interval, k := 3, stranded := true)"
         )
 
-        generator = BaseGIQLGenerator(tables=tables_with_peaks_and_genes)
-        output = generator.giqlnearest_sql(nearest)
+        # Act
+        output = _generate_through_passes(sql, tables_with_peaks_and_genes)
 
-        # Should produce valid output with unqualified strand column
+        # Assert
         assert "LIMIT 3" in output
-        # The strand column should be unqualified (no table prefix)
         assert '"strand"' in output
 
-    def test_giqlnearest_sql_identifier_target(self, tables_with_peaks_and_genes):
+    def test_expand_nearest_should_emit_ordered_subquery_for_literal_reference(
+        self, tables_with_peaks_and_genes
+    ):
         """
-        GIVEN a GIQLNearest where target is an Identifier (not Table or Column)
-        WHEN giqlnearest_sql is called
-        THEN Target is converted to string and lookup proceeds.
+        GIVEN a GIQLNearest with a standalone literal reference
+        WHEN the NEAREST expander runs
+        THEN it produces a standalone ordered, limited subquery over the target
+            table with no correlated LATERAL.
         """
+        # Arrange
+        sql = "SELECT * FROM NEAREST(genes, reference := 'chr1:1000-2000', k := 3)"
 
-        # Use exp.Identifier directly - not Table or Column
-        # This triggers the else branch at line 830 where str(target) is called
-        nearest = GIQLNearest(
-            this=exp.Identifier(this="genes"),
-            reference=exp.Literal.string("chr1:1000-2000"),
-            k=exp.Literal.number(3),
-        )
+        # Act
+        output = _generate_through_passes(sql, tables_with_peaks_and_genes)
 
-        generator = BaseGIQLGenerator(tables=tables_with_peaks_and_genes)
-        output = generator.giqlnearest_sql(nearest)
-
-        # Should succeed and produce valid SQL
+        # Assert
         assert "genes" in output
+        assert "ORDER BY" in output
         assert "LIMIT 3" in output
+        assert "LATERAL" not in output
 
     @given(
         bool_repr=st.sampled_from(["true", "TRUE", "True", "1", "yes", "YES"]),
@@ -1120,17 +1013,15 @@ class TestBaseGIQLGenerator:
     ):
         """
         GIVEN a GIQLDistance with stranded parameter in various truthy representations
-        WHEN giqldistance_sql is called
+        WHEN the DISTANCE node is expanded
         THEN The parameter is parsed as True and strand-aware distance is calculated.
         """
         sql = (
             f"SELECT DISTANCE(a.interval, b.interval, stranded := {bool_repr}) as dist "
             "FROM features_a a, features_b b"
         )
-        ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(tables=tables_with_two_tables)
-        output = generator.generate(ast)
+        output = _generate_through_passes(sql, tables_with_two_tables)
 
         # Should include strand handling (NULL checks for strand columns)
         assert "strand" in output.lower()
@@ -1145,17 +1036,15 @@ class TestBaseGIQLGenerator:
     ):
         """
         GIVEN a GIQLDistance with stranded parameter in various falsy representations
-        WHEN giqldistance_sql is called
+        WHEN the DISTANCE node is expanded
         THEN The parameter is parsed as False and basic distance is calculated.
         """
         sql = (
             f"SELECT DISTANCE(a.interval, b.interval, stranded := {bool_repr}) as dist "
             "FROM features_a a, features_b b"
         )
-        ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(tables=tables_with_two_tables)
-        output = generator.generate(ast)
+        output = _generate_through_passes(sql, tables_with_two_tables)
 
         # Should NOT include strand NULL checks (basic distance)
         assert "strand" not in output.lower()
@@ -1169,17 +1058,15 @@ class TestBaseGIQLGenerator:
     ):
         """
         GIVEN a GIQLDistance with signed parameter in various truthy representations
-        WHEN giqldistance_sql is called
+        WHEN the DISTANCE node is expanded
         THEN The parameter is parsed as True and signed distance is calculated.
         """
         sql = (
             f"SELECT DISTANCE(a.interval, b.interval, signed := {bool_repr}) as dist "
             "FROM features_a a, features_b b"
         )
-        ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(tables=tables_with_two_tables)
-        output = generator.generate(ast)
+        output = _generate_through_passes(sql, tables_with_two_tables)
 
         # Signed distance has negative sign for upstream intervals
         assert "-(" in output
@@ -1193,17 +1080,15 @@ class TestBaseGIQLGenerator:
     ):
         """
         GIVEN a GIQLDistance with signed parameter in various falsy representations
-        WHEN giqldistance_sql is called
+        WHEN the DISTANCE node is expanded
         THEN The parameter is parsed as False and unsigned distance is calculated.
         """
         sql = (
             f"SELECT DISTANCE(a.interval, b.interval, signed := {bool_repr}) as dist "
             "FROM features_a a, features_b b"
         )
-        ast = parse_one(sql, dialect=GIQLDialect)
 
-        generator = BaseGIQLGenerator(tables=tables_with_two_tables)
-        output = generator.generate(ast)
+        output = _generate_through_passes(sql, tables_with_two_tables)
 
         # Unsigned distance has no negative sign (both ELSE branches are positive)
         # Count occurrences of "-(" - signed has 1, unsigned has 0
@@ -1250,19 +1135,15 @@ class TestBaseGIQLGenerator:
             unchanged.
         """
         # Arrange
-        tables = Tables()
-        tables.register(table.name, table)
         sql = "SELECT * FROM variants WHERE interval INTERSECTS 'chr1:100-200'"
-        ast = parse_one(sql, dialect=GIQLDialect)
-        generator = BaseGIQLGenerator(tables=tables)
 
-        # Act
-        output = generator.generate(ast)
+        # Act — predicate operand canonicalization now lives in the
+        # CanonicalizeCoordinates pass (#123); transpile runs it.
+        output = transpile(sql, tables=[table])
 
         # Assert
         expected = (
-            "SELECT * FROM variants WHERE "
-            f"(\"chrom\" = 'chr1' AND {expected_predicate})"
+            f"SELECT * FROM variants WHERE (\"chrom\" = 'chr1' AND {expected_predicate})"
         )
         assert output == expected
 
@@ -1307,19 +1188,15 @@ class TestBaseGIQLGenerator:
             unchanged.
         """
         # Arrange
-        tables = Tables()
-        tables.register(table.name, table)
         sql = "SELECT * FROM variants WHERE interval CONTAINS 'chr1:1500-2000'"
-        ast = parse_one(sql, dialect=GIQLDialect)
-        generator = BaseGIQLGenerator(tables=tables)
 
-        # Act
-        output = generator.generate(ast)
+        # Act — predicate operand canonicalization now lives in the
+        # CanonicalizeCoordinates pass (#123); transpile runs it.
+        output = transpile(sql, tables=[table])
 
         # Assert
         expected = (
-            "SELECT * FROM variants WHERE "
-            f"(\"chrom\" = 'chr1' AND {expected_predicate})"
+            f"SELECT * FROM variants WHERE (\"chrom\" = 'chr1' AND {expected_predicate})"
         )
         assert output == expected
 
@@ -1364,19 +1241,15 @@ class TestBaseGIQLGenerator:
             unchanged.
         """
         # Arrange
-        tables = Tables()
-        tables.register(table.name, table)
         sql = "SELECT * FROM variants WHERE interval WITHIN 'chr1:1000-5000'"
-        ast = parse_one(sql, dialect=GIQLDialect)
-        generator = BaseGIQLGenerator(tables=tables)
 
-        # Act
-        output = generator.generate(ast)
+        # Act — predicate operand canonicalization now lives in the
+        # CanonicalizeCoordinates pass (#123); transpile runs it.
+        output = transpile(sql, tables=[table])
 
         # Assert
         expected = (
-            "SELECT * FROM variants WHERE "
-            f"(\"chrom\" = 'chr1' AND {expected_predicate})"
+            f"SELECT * FROM variants WHERE (\"chrom\" = 'chr1' AND {expected_predicate})"
         )
         assert output == expected
 
@@ -1398,11 +1271,13 @@ class TestBaseGIQLGenerator:
             "SELECT * FROM bed_a AS a CROSS JOIN vcf_b AS b "
             "WHERE a.interval INTERSECTS b.interval"
         )
-        ast = parse_one(sql, dialect=GIQLDialect)
-        generator = BaseGIQLGenerator(tables=tables_mixed_conventions)
 
-        # Act
-        output = generator.generate(ast)
+        # Act — column-join operand canonicalization now lives in the
+        # CanonicalizeCoordinates pass (#123). A column-to-column INTERSECTS join
+        # expands to the naive overlap predicate in pass 3; run passes 1-3 directly
+        # to pin the predicate expander's column-join branch on canonicalized
+        # metadata.
+        output = _generate_through_passes(sql, tables_mixed_conventions)
 
         # Assert
         expected = (
@@ -1432,11 +1307,11 @@ class TestBaseGIQLGenerator:
             "SELECT * FROM bed_a AS a CROSS JOIN vcf_b AS b "
             "WHERE a.interval CONTAINS b.interval"
         )
-        ast = parse_one(sql, dialect=GIQLDialect)
-        generator = BaseGIQLGenerator(tables=tables_mixed_conventions)
 
-        # Act
-        output = generator.generate(ast)
+        # Act — column-join operand canonicalization now lives in the
+        # CanonicalizeCoordinates pass (#123); transpile runs it. (Column-to-column
+        # CONTAINS expands to a predicate in pass 3, so it reaches the emitter.)
+        output = transpile(sql, tables=list(tables_mixed_conventions))
 
         # Assert
         expected = (
@@ -1466,11 +1341,11 @@ class TestBaseGIQLGenerator:
             "SELECT * FROM bed_a AS a CROSS JOIN vcf_b AS b "
             "WHERE a.interval WITHIN b.interval"
         )
-        ast = parse_one(sql, dialect=GIQLDialect)
-        generator = BaseGIQLGenerator(tables=tables_mixed_conventions)
 
-        # Act
-        output = generator.generate(ast)
+        # Act — column-join operand canonicalization now lives in the
+        # CanonicalizeCoordinates pass (#123); transpile runs it. (Column-to-column
+        # WITHIN expands to a predicate in pass 3, so it reaches the emitter.)
+        output = transpile(sql, tables=list(tables_mixed_conventions))
 
         # Assert
         expected = (
@@ -1496,11 +1371,10 @@ class TestBaseGIQLGenerator:
         """
         # Arrange
         sql = "SELECT * FROM vcf_variants WHERE interval CONTAINS 'chr1:1500'"
-        ast = parse_one(sql, dialect=GIQLDialect)
-        generator = BaseGIQLGenerator(tables=tables_with_one_based_closed)
 
-        # Act
-        output = generator.generate(ast)
+        # Act — predicate operand canonicalization now lives in the
+        # CanonicalizeCoordinates pass (#123); transpile runs it.
+        output = transpile(sql, tables=list(tables_with_one_based_closed))
 
         # Assert
         expected = (
@@ -1527,11 +1401,10 @@ class TestBaseGIQLGenerator:
             "SELECT * FROM vcf_variants "
             "WHERE interval INTERSECTS ANY('chr1:100-200', 'chr1:500-600')"
         )
-        ast = parse_one(sql, dialect=GIQLDialect)
-        generator = BaseGIQLGenerator(tables=tables_with_one_based_closed)
 
-        # Act
-        output = generator.generate(ast)
+        # Act — SpatialSetPredicate operand canonicalization now lives in the
+        # CanonicalizeCoordinates pass (#123); transpile runs it.
+        output = transpile(sql, tables=list(tables_with_one_based_closed))
 
         # Assert
         expected = (
@@ -1545,24 +1418,39 @@ class TestBaseGIQLGenerator:
         "coordinate_system, interval_type, start_a, end_a, start_b, end_b",
         [
             pytest.param(
-                "0based", "half_open",
-                'a."start"', 'a."end"', 'b."start"', 'b."end"',
+                "0based",
+                "half_open",
+                'a."start"',
+                'a."end"',
+                'b."start"',
+                'b."end"',
                 id="0based-half_open",
             ),
             pytest.param(
-                "0based", "closed",
-                'a."start"', '(a."end" + 1)', 'b."start"', '(b."end" + 1)',
+                "0based",
+                "closed",
+                'a."start"',
+                '(a."end" + 1)',
+                'b."start"',
+                '(b."end" + 1)',
                 id="0based-closed",
             ),
             pytest.param(
-                "1based", "half_open",
-                '(a."start" - 1)', '(a."end" - 1)',
-                '(b."start" - 1)', '(b."end" - 1)',
+                "1based",
+                "half_open",
+                '(a."start" - 1)',
+                '(a."end" - 1)',
+                '(b."start" - 1)',
+                '(b."end" - 1)',
                 id="1based-half_open",
             ),
             pytest.param(
-                "1based", "closed",
-                '(a."start" - 1)', 'a."end"', '(b."start" - 1)', 'b."end"',
+                "1based",
+                "closed",
+                '(a."start" - 1)',
+                'a."end"',
+                '(b."start" - 1)',
+                'b."end"',
                 id="1based-closed",
             ),
         ],
@@ -1604,18 +1492,17 @@ class TestBaseGIQLGenerator:
             "SELECT DISTANCE(a.interval, b.interval) as dist "
             "FROM dist_a a CROSS JOIN dist_b b"
         )
-        ast = parse_one(sql, dialect=GIQLDialect)
-        generator = BaseGIQLGenerator(tables=tables)
 
-        # Act
-        output = generator.generate(ast)
+        # Act — DISTANCE operand canonicalization now lives in the
+        # CanonicalizeCoordinates pass (#123); transpile runs it.
+        output = transpile(sql, tables=list(tables))
 
         # Assert
         expected = (
-            'SELECT CASE WHEN a."chrom" != b."chrom" THEN NULL '
+            'SELECT CASE WHEN a."chrom" <> b."chrom" THEN NULL '
             f"WHEN {start_a} < {end_b} AND {end_a} > {start_b} THEN 0 "
-            f"WHEN {end_a} <= {start_b} THEN ({start_b} - {end_a}) "
-            f"ELSE ({start_a} - {end_b}) END AS dist "
+            f"WHEN {end_a} <= {start_b} THEN ({start_b} - {end_a} + 1) "
+            f"ELSE ({start_a} - {end_b} + 1) END AS dist "
             "FROM dist_a AS a CROSS JOIN dist_b AS b"
         )
         assert output == expected
@@ -1639,87 +1526,159 @@ class TestBaseGIQLGenerator:
             "SELECT DISTANCE(a.interval, b.interval) as dist "
             "FROM bed_a a CROSS JOIN vcf_b b"
         )
-        ast = parse_one(sql, dialect=GIQLDialect)
-        generator = BaseGIQLGenerator(tables=tables_mixed_conventions)
 
-        # Act
-        output = generator.generate(ast)
+        # Act — DISTANCE operand canonicalization now lives in the
+        # CanonicalizeCoordinates pass (#123); transpile runs it.
+        output = transpile(sql, tables=list(tables_mixed_conventions))
 
         # Assert
         expected = (
-            'SELECT CASE WHEN a."chrom" != b."chrom" THEN NULL '
+            'SELECT CASE WHEN a."chrom" <> b."chrom" THEN NULL '
             'WHEN a."start" < b."end" AND a."end" > (b."start" - 1) THEN 0 '
             'WHEN a."end" <= (b."start" - 1) '
-            'THEN ((b."start" - 1) - a."end") '
-            'ELSE (a."start" - b."end") END AS dist '
+            'THEN ((b."start" - 1) - a."end" + 1) '
+            'ELSE (a."start" - b."end" + 1) END AS dist '
             "FROM bed_a AS a CROSS JOIN vcf_b AS b"
         )
         assert output == expected
 
     @pytest.mark.parametrize(
-        "coordinate_system, interval_type, target_start, target_end",
+        "coordinate_system, interval_type, wrap_start, wrap_end",
         [
             pytest.param(
-                "0based", "half_open",
-                'genes."start"', 'genes."end"',
-                id="0based-half_open",
-            ),
-            pytest.param(
-                "0based", "closed",
-                'genes."start"', '(genes."end" + 1)',
+                "0based",
+                "closed",
+                '"start" AS "start"',
+                '("end" + 1) AS "end"',
                 id="0based-closed",
             ),
             pytest.param(
-                "1based", "half_open",
-                '(genes."start" - 1)', '(genes."end" - 1)',
+                "1based",
+                "half_open",
+                '("start" - 1) AS "start"',
+                '("end" - 1) AS "end"',
                 id="1based-half_open",
             ),
             pytest.param(
-                "1based", "closed",
-                '(genes."start" - 1)', 'genes."end"',
+                "1based",
+                "closed",
+                '("start" - 1) AS "start"',
+                '"end" AS "end"',
                 id="1based-closed",
             ),
         ],
     )
     def test_giqlnearest_should_canonicalize_target_columns_for_each_convention(
-        self, coordinate_system, interval_type, target_start, target_end
+        self, coordinate_system, interval_type, wrap_start, wrap_end
     ):
-        """Test NEAREST canonicalizes target endpoints per convention.
+        """Test NEAREST canonicalizes a non-canonical target via a wrapper CTE.
 
         Given:
-            A target table declared with one of the four (coordinate_system,
-            interval_type) combinations and a literal reference range.
+            A target table declared with one of the three non-canonical
+            (coordinate_system, interval_type) combinations and a literal
+            reference range.
         When:
-            giqlnearest_sql is called.
+            The query is transpiled.
         Then:
-            It should wrap the target-side start/end (or not) per the
-            canonical 0-based half-open conversion in the distance CASE
-            expression.
+            It should wrap the target in a __giql_canon_* CTE carrying the
+            canonical conversion (a star REPLACE on DuckDB, the portable star
+            EXCEPT form on the generic / DataFusion family — #145), and the
+            distance CASE should read the bare canonical target columns with no
+            in-CASE canonicalization.
         """
         # Arrange
-        tables = Tables()
-        tables.register(
-            "genes",
+        sql = "SELECT * FROM NEAREST(genes, reference := 'chr1:1000-2000', k := 1)"
+        tables = [
             Table(
                 "genes",
                 coordinate_system=coordinate_system,
                 interval_type=interval_type,
-            ),
-        )
+            )
+        ]
+
+        # Act — the target's coordinate canonicalization now lives in the
+        # CanonicalizeCoordinates pass (#123): a non-canonical target is wrapped
+        # in a __giql_canon_* CTE before generation, so the distance CASE reads
+        # already-canonical columns. The wrapper's emit strategy is capability
+        # driven (#145): REPLACE on DuckDB, the portable EXCEPT form otherwise.
+        duckdb_output = transpile(sql, tables=tables, dialect="duckdb")
+        generic_output = transpile(sql, tables=tables)
+
+        # Assert — the wrapper carries the canonical conversion; the distance
+        # CASE reads the bare canonical columns against the literal [1000, 2000).
+        assert f"REPLACE ({wrap_start}, {wrap_end}) FROM genes" in duckdb_output
+        assert (
+            f'EXCEPT ("start", "end"), {wrap_start}, {wrap_end} FROM genes'
+        ) in generic_output
+        for output in (duckdb_output, generic_output):
+            assert (
+                'WHEN 1000 < __giql_canon_0."end" AND 2000 > __giql_canon_0."start" '
+                "THEN 0"
+            ) in output
+            assert (
+                'WHEN 2000 <= __giql_canon_0."start" THEN '
+                '(__giql_canon_0."start" - 2000 + 1)'
+            ) in output
+            assert 'ELSE (1000 - __giql_canon_0."end" + 1)' in output
+
+    def test_giqlnearest_should_pass_target_columns_through_when_target_is_canonical(
+        self,
+    ):
+        """Test NEAREST leaves a canonical target unwrapped and byte-identical.
+
+        Given:
+            A canonical 0-based half-open target table and a literal reference.
+        When:
+            The query is transpiled.
+        Then:
+            It should synthesize no wrapper CTE; the distance CASE reads the raw
+            target columns and the row passes through as a plain ``genes.*``.
+        """
+        # Arrange
         sql = "SELECT * FROM NEAREST(genes, reference := 'chr1:1000-2000', k := 1)"
-        ast = parse_one(sql, dialect=GIQLDialect)
-        generator = BaseGIQLGenerator(tables=tables)
 
         # Act
-        output = generator.generate(ast)
+        output = transpile(sql, tables=[Table("genes")])
 
-        # Assert — distance CASE expression uses canonicalized target endpoints
-        # against the (already-canonical) literal reference [1000, 2000).
+        # Assert
+        assert "__giql_canon_" not in output
+        assert "genes.*," in output
+        assert 'WHEN 1000 < genes."end" AND 2000 > genes."start" THEN 0' in output
+
+    def test_giqlnearest_should_round_trip_passthrough_row_to_target_encoding(self):
+        """Test NEAREST de-canonicalizes the passed-through row to the target encoding.
+
+        Given:
+            A 1-based closed target table wrapped by the canonicalization pass.
+        When:
+            The query is transpiled.
+        Then:
+            The ``*`` passthrough should de-canonicalize the interval columns
+            back to the target's declared encoding so the returned row carries the
+            table's own convention — via a star REPLACE on DuckDB and the portable
+            star EXCEPT form on the generic / DataFusion family (#145); the
+            synthesized ``distance`` column is encoding-invariant and stays
+            unwrapped.
+        """
+        # Arrange
+        sql = "SELECT * FROM NEAREST(genes, reference := 'chr1:1000-2000', k := 1)"
+        tables = [Table("genes", coordinate_system="1based", interval_type="closed")]
+
+        # Act
+        duckdb_output = transpile(sql, tables=tables, dialect="duckdb")
+        generic_output = transpile(sql, tables=tables)
+
+        # Assert — passthrough de-canonicalizes 1-based-closed start as (start + 1)
+        # and leaves end identity; the distance column carries no round-trip.
         assert (
-            f"WHEN 1000 < {target_end} AND 2000 > {target_start} THEN 0" in output
-        )
-        assert f"WHEN 2000 <= {target_start} THEN ({target_start} - 2000)" in output
-        assert f"ELSE (1000 - {target_end})" in output
+            '__giql_canon_0.* REPLACE ((__giql_canon_0."start" + 1) AS "start", '
+            '__giql_canon_0."end" AS "end")'
+        ) in duckdb_output
+        assert (
+            '__giql_canon_0.* EXCEPT ("start", "end"), '
+            '(__giql_canon_0."start" + 1) AS "start", '
+            '__giql_canon_0."end" AS "end"'
+        ) in generic_output
 
     def test_giqlnearest_should_canonicalize_reference_column_when_reference_is_one_based_closed(
         self, tables_mixed_conventions
@@ -1730,7 +1689,7 @@ class TestBaseGIQLGenerator:
             A 0-based half-open target table (bed_a) and an explicit
             reference column from a 1-based closed table (vcf_b).
         When:
-            giqlnearest_sql is called.
+            the NEAREST expander runs.
         Then:
             It should wrap the reference-side start as (start - 1), leave
             its end raw, and leave the target side raw.
@@ -1740,13 +1699,14 @@ class TestBaseGIQLGenerator:
             "SELECT * FROM vcf_b b CROSS JOIN LATERAL "
             "NEAREST(bed_a, reference := b.interval, k := 1)"
         )
-        ast = parse_one(sql, dialect=GIQLDialect)
-        generator = BaseGIQLGenerator(tables=tables_mixed_conventions)
 
-        # Act
-        output = generator.generate(ast)
+        # Act — the reference operand's canonicalization now lives in the
+        # CanonicalizeCoordinates pass (#123); transpile runs it. The reference is
+        # a column operand (not a wrappable relation), so the arithmetic stays
+        # inline; the canonical target bed_a is left unwrapped.
+        output = transpile(sql, tables=list(tables_mixed_conventions))
 
-        # Assert — reference's start canonicalized via _canonical_start
+        # Assert — reference's start canonicalized as (start - 1)
         assert '(b."start" - 1) < bed_a."end"' in output
         assert 'bed_a."end" <= (b."start" - 1)' not in output  # reference is left side
         # Reference's end stays raw (1-based closed → identity for end)
@@ -1762,21 +1722,20 @@ class TestBaseGIQLGenerator:
             target table (bed_a) joined via CROSS JOIN LATERAL with no
             ``reference`` argument on NEAREST.
         When:
-            giqlnearest_sql is called.
+            the NEAREST expander runs.
         Then:
             It should canonicalize the outer table's columns based on
             vcf_b's convention — wrapping start as (vcf_b."start" - 1) and
             leaving end raw — while leaving bed_a's target columns raw.
         """
         # Arrange
-        sql = (
-            "SELECT * FROM vcf_b CROSS JOIN LATERAL NEAREST(bed_a, k := 1)"
-        )
-        ast = parse_one(sql, dialect=GIQLDialect)
-        generator = BaseGIQLGenerator(tables=tables_mixed_conventions)
+        sql = "SELECT * FROM vcf_b CROSS JOIN LATERAL NEAREST(bed_a, k := 1)"
 
-        # Act
-        output = generator.generate(ast)
+        # Act — the implicit-outer reference's canonicalization now lives in the
+        # CanonicalizeCoordinates pass (#123); transpile runs it. The outer
+        # reference is a column operand (not a wrappable relation), so the
+        # arithmetic stays inline; the canonical target bed_a is left unwrapped.
+        output = transpile(sql, tables=list(tables_mixed_conventions))
 
         # Assert — distance CASE uses canonicalized outer-table columns and
         # raw target-table columns.
@@ -1785,5 +1744,5 @@ class TestBaseGIQLGenerator:
             'AND vcf_b."end" > bed_a."start" THEN 0'
         ) in output
         assert 'WHEN vcf_b."end" <= bed_a."start"' in output
-        assert 'THEN (bed_a."start" - vcf_b."end")' in output
-        assert 'ELSE ((vcf_b."start" - 1) - bed_a."end")' in output
+        assert 'THEN (bed_a."start" - vcf_b."end" + 1)' in output
+        assert 'ELSE ((vcf_b."start" - 1) - bed_a."end" + 1)' in output

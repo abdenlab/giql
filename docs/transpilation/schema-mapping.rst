@@ -173,6 +173,36 @@ If your data uses 1-based coordinates (like VCF or GFF), configure the
        ],
    )
 
+.. note::
+
+   **Non-canonical encodings emit a capability-driven canonicalization wrapper.**
+   When a table declares an encoding other than the default 0-based half-open
+   (for example ``coordinate_system="1based"`` or ``interval_type="closed"``),
+   GIQL canonicalizes its coordinates by wrapping the relation in a hidden CTE.
+   The wrapper's projection form is chosen from the target's capabilities: the
+   ``"duckdb"`` target emits ``SELECT * REPLACE (...)`` (also supported by
+   BigQuery, Snowflake, and ClickHouse), while the generic (``dialect=None``)
+   and ``"datafusion"`` targets emit the portable ``SELECT * EXCEPT (start, end),
+   <start>, <end>`` form. The ``* EXCEPT`` form runs on ``* EXCEPT``-capable
+   engines (the DataFusion family) but is **not** SQL-92 and is **not**
+   DuckDB-runnable; it is row-equivalent to the ``* REPLACE`` form but re-appends
+   the recomputed interval columns at the end of the projection. Tables in the
+   default 0-based half-open encoding are unaffected -- they take an identity fast
+   path that emits portable SQL on every target.
+
+   Neither form is SQL-92. To target a strict SQL-92 engine (PostgreSQL, SQLite),
+   store your data in 0-based half-open form, or convert it explicitly in a CTE
+   and reference that CTE (which GIQL treats as already canonical). Such a CTE --
+   and any CTE or subquery passed as an operator reference -- must project the
+   canonical ``chrom`` / ``start`` / ``end`` columns; GIQL validates this contract
+   at transpile time and raises a ``ValueError`` naming the missing column(s)
+   rather than emitting SQL that fails with an engine ``column not found`` error.
+
+   The projection form is chosen from the active target's
+   :class:`~giql.targets.Capabilities` (``supports_star_replace``). A custom
+   engine can select either form by registering a target with the appropriate
+   capabilities -- see :doc:`extending`.
+
 Working with Point Features
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

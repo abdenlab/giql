@@ -1,9 +1,8 @@
-"""Property-based correctness tests for INTERSECTS binned equi-join.
+"""Property-based correctness tests for the INTERSECTS naive overlap predicate.
 
 These tests use hypothesis to generate random genomic intervals of
-varying sizes — including intervals that span multiple bins — and
-verify that GIQL's binned equi-join produces identical results to
-bedtools intersect.
+varying sizes and verify that GIQL's naive overlap predicate produces
+identical results to bedtools intersect.
 """
 
 from hypothesis import HealthCheck
@@ -57,7 +56,7 @@ interval_list_st = unique_interval_list_st()
 
 
 def _run_giql(intervals_a, intervals_b):
-    """Run the binned-join INTERSECTS query via DuckDB and return result rows."""
+    """Run the INTERSECTS-join query via DuckDB and return result rows."""
     conn = duckdb.connect(":memory:")
     try:
         load_intervals(conn, "intervals_a", [i.to_tuple() for i in intervals_a])
@@ -90,10 +89,10 @@ def _run_bedtools(intervals_a, intervals_b):
     deadline=None,
     suppress_health_check=[HealthCheck.too_slow],
 )
-def test_binned_join_matches_bedtools(intervals_a, intervals_b):
+def test_intersects_join_matches_bedtools(intervals_a, intervals_b):
     """
     GIVEN two randomly generated sets of genomic intervals
-    WHEN GIQL INTERSECTS binned equi-join is executed
+    WHEN GIQL INTERSECTS join is executed
     THEN results match bedtools intersect -u exactly
     """
     giql_result = _run_giql(intervals_a, intervals_b)
@@ -120,46 +119,6 @@ def test_self_join_matches_bedtools(intervals):
 
     comparison = compare_results(giql_result, bedtools_result)
     assert comparison.match, comparison.failure_message()
-
-
-@given(
-    intervals_a=unique_interval_list_st(max_size=30),
-    intervals_b=unique_interval_list_st(max_size=30),
-    bin_size=st.sampled_from([100, 1_000, 10_000, 100_000]),
-)
-@settings(
-    max_examples=40,
-    deadline=None,
-    suppress_health_check=[HealthCheck.too_slow],
-)
-def test_bin_size_does_not_affect_correctness(intervals_a, intervals_b, bin_size):
-    """
-    GIVEN two randomly generated sets of genomic intervals and a bin size
-    WHEN GIQL INTERSECTS is executed with that bin size
-    THEN results match bedtools intersect -u regardless of bin size
-    """
-    conn = duckdb.connect(":memory:")
-    try:
-        load_intervals(conn, "intervals_a", [i.to_tuple() for i in intervals_a])
-        load_intervals(conn, "intervals_b", [i.to_tuple() for i in intervals_b])
-
-        sql = transpile(
-            """
-            SELECT DISTINCT a.*
-            FROM intervals_a a, intervals_b b
-            WHERE a.interval INTERSECTS b.interval
-            """,
-            tables=["intervals_a", "intervals_b"],
-            intersects_bin_size=bin_size,
-        )
-        giql_result = conn.execute(sql).fetchall()
-    finally:
-        conn.close()
-
-    bedtools_result = _run_bedtools(intervals_a, intervals_b)
-
-    comparison = compare_results(giql_result, bedtools_result)
-    assert comparison.match, f"bin_size={bin_size}: {comparison.failure_message()}"
 
 
 @given(
@@ -364,8 +323,8 @@ def test_count_matches_bedtools_c(intervals_a, intervals_b):
         load_intervals(conn, "intervals_a", [i.to_tuple() for i in intervals_a])
         load_intervals(conn, "intervals_b", [i.to_tuple() for i in intervals_b])
 
-        # Use a naive overlap join for counting — the binned join's
-        # DISTINCT would collapse duplicate B matches.
+        # Use a naive overlap join for counting — a DISTINCT projection
+        # would collapse duplicate B matches.
         count_sql = """
             SELECT
                 a.chrom, a."start", a."end", a.name, a.score, a.strand,
@@ -400,10 +359,10 @@ def test_count_matches_bedtools_c(intervals_a, intervals_b):
     deadline=None,
     suppress_health_check=[HealthCheck.too_slow],
 )
-def test_count_via_binned_join_matches_bedtools_c(intervals_a, intervals_b):
+def test_count_via_intersects_join_matches_bedtools_c(intervals_a, intervals_b):
     """
     GIVEN two randomly generated sets of unique genomic intervals
-    WHEN overlap count is computed via GIQL binned join with
+    WHEN overlap count is computed via GIQL INTERSECTS join with
          distinguishing B columns in the SELECT
     THEN results match bedtools intersect -c exactly
     """

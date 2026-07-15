@@ -1,9 +1,78 @@
 """Custom AST expression nodes for genomic operations.
 
 This module defines custom SQLGlot expression nodes for GIQL spatial operators.
+
+It also declares the per-operator :class:`SlotSpec` descriptors that the
+``ResolveOperatorRefs`` normalization pass (:mod:`giql.resolver`) consumes. Each
+operator class carries a ``GIQL_SLOTS`` tuple naming the slots the operator
+resolves (``this`` / ``reference`` / ``expression`` / ``ranges``) together with
+the AST shapes that slot accepts. Keeping the acceptance rules declarative on the
+expression class — rather than duplicated across resolver code — is the structural
+change epic #114 is built around.
 """
 
+from dataclasses import dataclass
+from typing import Literal
+
 from sqlglot import exp
+from sqlglot.errors import ParseError
+
+# The shapes an operator slot may accept. The first three form the
+# "registered table / CTE / subquery" trichotomy that ``sqlglot``'s scope
+# machinery distinguishes natively and that :class:`giql.resolver.ResolvedRef`
+# models; the remaining three describe the column / literal / implicit-outer
+# forms used by NEAREST, DISTANCE, and the spatial predicates.
+SlotShape = Literal[
+    "registered_table",
+    "cte",
+    "subquery",
+    "literal_range",
+    "column",
+    "implicit_outer",
+]
+
+# The subset of slot shapes that resolve to a table-shaped relation and are
+# therefore representable as a :class:`giql.resolver.ResolvedRef`. A slot whose
+# accepted shapes are a subset of these is a "reference slot" that the
+# ``ResolveOperatorRefs`` pass resolves and attaches metadata for.
+TABLE_SHAPES: frozenset[SlotShape] = frozenset({"registered_table", "cte", "subquery"})
+
+
+@dataclass(frozen=True, slots=True)
+class SlotSpec:
+    """Declarative description of one resolvable operator slot.
+
+    Parameters
+    ----------
+    arg : str
+        The :attr:`arg_types` key naming the slot on the operator expression
+        (e.g. ``"this"``, ``"reference"``, ``"expression"``, ``"ranges"``).
+    accepts : frozenset[SlotShape]
+        The AST shapes the slot accepts.
+    required : bool
+        Whether the slot must be present on a well-formed operator.
+    is_sequence : bool
+        Whether the slot holds a list of expressions (e.g. the ``ranges`` slot
+        of :class:`SpatialSetPredicate`) rather than a single expression.
+    """
+
+    arg: str
+    accepts: frozenset[SlotShape]
+    required: bool = False
+    is_sequence: bool = False
+
+    @property
+    def is_ref_slot(self) -> bool:
+        """Whether this slot resolves to a table-shaped :class:`ResolvedRef`.
+
+        A reference slot is one whose accepted shapes are all drawn from the
+        registered-table / CTE / subquery trichotomy. These are the slots for
+        which the ``ResolveOperatorRefs`` pass resolves and attaches a
+        :class:`giql.resolver.ResolvedRef`; column / literal / implicit
+        slots are declared but their resolution is deferred to later epic #114
+        migration steps.
+        """
+        return bool(self.accepts) and self.accepts <= TABLE_SHAPES
 
 
 class GenomicRange(exp.Expression):
@@ -30,13 +99,30 @@ class SpatialPredicate(exp.Binary):
     pass
 
 
+#: Opt the spatial predicates, DISTANCE, and NEAREST into the
+#: CanonicalizeCoordinates pass (epic #114 step 8, issue #123). With this flag
+#: set, pass 2 canonicalizes each operator's interval operands: a non-table column
+#: operand (DISTANCE / predicate operand, NEAREST's column / implicit-outer
+#: reference) has its resolution metadata rewritten in place to canonical 0-based
+#: half-open arithmetic, and a registered-table reference slot (NEAREST's target)
+#: is wrapped in a ``__giql_canon_*`` CTE. The emitter then consumes already-
+#: canonical fragments with no in-emitter canonicalization. Identity (0-based
+#: half-open) operands are left untouched and the emitted SQL stays byte-identical.
+_CANONICALIZE = True
+
+
 class Intersects(SpatialPredicate):
     """INTERSECTS spatial predicate.
 
     Example: column INTERSECTS 'chr1:1000-2000'
     """
 
-    pass
+    GIQL_CANONICALIZE = _CANONICALIZE
+
+    GIQL_SLOTS = (
+        SlotSpec("this", frozenset({"column"}), required=True),
+        SlotSpec("expression", frozenset({"literal_range", "column"}), required=True),
+    )
 
 
 class Contains(SpatialPredicate):
@@ -45,7 +131,12 @@ class Contains(SpatialPredicate):
     Example: column CONTAINS 'chr1:1500'
     """
 
-    pass
+    GIQL_CANONICALIZE = _CANONICALIZE
+
+    GIQL_SLOTS = (
+        SlotSpec("this", frozenset({"column"}), required=True),
+        SlotSpec("expression", frozenset({"literal_range", "column"}), required=True),
+    )
 
 
 class Within(SpatialPredicate):
@@ -54,7 +145,12 @@ class Within(SpatialPredicate):
     Example: column WITHIN 'chr1:1000-5000'
     """
 
-    pass
+    GIQL_CANONICALIZE = _CANONICALIZE
+
+    GIQL_SLOTS = (
+        SlotSpec("this", frozenset({"column"}), required=True),
+        SlotSpec("expression", frozenset({"literal_range", "column"}), required=True),
+    )
 
 
 class SpatialSetPredicate(exp.Expression):
@@ -71,6 +167,18 @@ class SpatialSetPredicate(exp.Expression):
         "quantifier": True,
         "ranges": True,
     }
+
+    GIQL_CANONICALIZE = _CANONICALIZE
+
+    GIQL_SLOTS = (
+        SlotSpec("this", frozenset({"column"}), required=True),
+        SlotSpec(
+            "ranges",
+            frozenset({"literal_range"}),
+            required=True,
+            is_sequence=True,
+        ),
+    )
 
 
 def _split_named_and_positional(args):
@@ -91,18 +199,31 @@ class GIQLCluster(exp.Func):
 
     Implicitly partitions by chromosome and orders by start position.
 
+    The optional ``predicate`` argument is a boolean expression evaluated
+    between each interval and its sorted predecessor; intervals are only kept
+    in the same cluster when they are adjacent *and* the predicate holds. Bare
+    columns resolve to the current interval; the predecessor's value of a
+    column is referenced with ``PREV(column)``.
+
     Examples:
         CLUSTER(interval)
         CLUSTER(interval, 1000)
         CLUSTER(interval, stranded := true)
         CLUSTER(interval, 1000, stranded := true)
+        CLUSTER(interval, predicate := depth = PREV(depth))
     """
 
     arg_types = {
         "this": True,  # genomic column
         "distance": False,  # maximum distance between features
         "stranded": False,  # strand-specific clustering
+        "predicate": False,  # pairwise boolean gate (current row vs PREV(col))
     }
+
+    # CLUSTER (expanded by ``giql.expanders.cluster`` — a whole-query rewrite into
+    # the two-level ``lag_calc`` form) deliberately does NOT set
+    # ``GIQL_CANONICALIZE``: the expander derives its columns from the FROM table,
+    # so pass 2 is intentionally a no-op here.
 
     @classmethod
     def from_arg_list(cls, args):
@@ -111,6 +232,10 @@ class GIQLCluster(exp.Func):
             kwargs["this"] = positional_args[0]
         if len(positional_args) > 1:
             kwargs["distance"] = positional_args[1]
+        if "this" not in kwargs:
+            raise ParseError(
+                "CLUSTER requires a genomic interval column as its first argument."
+            )
         return cls(**kwargs)
 
 
@@ -120,17 +245,31 @@ class GIQLMerge(exp.Func):
     Merges overlapping or bookended intervals into single intervals.
     Built on top of CLUSTER operation.
 
+    The optional ``predicate`` argument gates merging on a pairwise boolean
+    expression between each interval and its sorted predecessor (see
+    :class:`GIQLCluster`); ``PREV(column)`` references the predecessor's value
+    of a column. When the predicate tests equality of a value this yields a
+    run-length encoding of the input interval sequence.
+
     Examples:
         MERGE(interval)
         MERGE(interval, 1000)
         MERGE(interval, stranded := true)
+        MERGE(interval, predicate := depth = PREV(depth))
+        MERGE(interval, predicate := strand = PREV(strand) AND name = PREV(name))
     """
 
     arg_types = {
         "this": True,  # genomic column
         "distance": False,  # maximum distance between features
         "stranded": False,  # strand-specific merging
+        "predicate": False,  # pairwise boolean gate (current row vs PREV(col))
     }
+
+    # MERGE (expanded by ``giql.expanders.merge`` — a whole-query rewrite into the
+    # clustered-aggregation form, built on CLUSTER) deliberately does NOT set
+    # ``GIQL_CANONICALIZE`` (columns come from the FROM table), so pass 2 is
+    # intentionally a no-op here.
 
     @classmethod
     def from_arg_list(cls, args):
@@ -139,6 +278,10 @@ class GIQLMerge(exp.Func):
             kwargs["this"] = positional_args[0]
         if len(positional_args) > 1:
             kwargs["distance"] = positional_args[1]
+        if "this" not in kwargs:
+            raise ParseError(
+                "MERGE requires a genomic interval column as its first argument."
+            )
         return cls(**kwargs)
 
 
@@ -162,6 +305,13 @@ class GIQLDistance(exp.Func):
         "stranded": False,  # Optional: boolean for strand-specific distance
         "signed": False,  # Optional: boolean for directional distance
     }
+
+    GIQL_CANONICALIZE = _CANONICALIZE
+
+    GIQL_SLOTS = (
+        SlotSpec("this", frozenset({"column"}), required=True),
+        SlotSpec("expression", frozenset({"column"}), required=True),
+    )
 
     @classmethod
     def from_arg_list(cls, args):
@@ -195,9 +345,90 @@ class GIQLNearest(exp.Func):
         "signed": False,  # Optional: directional distance
     }
 
+    #: Opt NEAREST into the CanonicalizeCoordinates pass (epic #114 step 8, issue
+    #: #123). Pass 2 wraps a non-canonical *target* (the ``this`` registered-table
+    #: ref slot) in a ``__giql_canon_*`` CTE — so the emitter reads canonical
+    #: target columns and de-canonicalizes its ``*`` row passthrough back to the
+    #: declared encoding — and canonicalizes a non-table ``column`` /
+    #: ``implicit_outer`` reference's metadata in place. Identity (0-based
+    #: half-open) operands are left untouched and the emitted SQL stays
+    #: byte-identical.
+    GIQL_CANONICALIZE = _CANONICALIZE
+
+    GIQL_SLOTS = (
+        SlotSpec("this", frozenset({"registered_table"}), required=True),
+        SlotSpec(
+            "reference",
+            frozenset({"literal_range", "column", "implicit_outer"}),
+        ),
+    )
+
     @classmethod
     def from_arg_list(cls, args):
         kwargs, positional_args = _split_named_and_positional(args)
         if len(positional_args) >= 1:
             kwargs["this"] = positional_args[0]
+        if "this" not in kwargs:
+            raise ParseError("NEAREST requires a target table as its first argument.")
+        return cls(**kwargs)
+
+
+class GIQLDisjoin(exp.Func):
+    """DISJOIN table function for splitting intervals at reference breakpoints.
+
+    Generates SQL that cuts each target interval at every reference breakpoint
+    strictly interior to it, so each resulting sub-interval is fully contained
+    by every reference interval it overlaps. The target row passes through
+    intact and the sub-interval is appended as ``disjoin_chrom`` /
+    ``disjoin_start`` / ``disjoin_end``. When ``reference`` is omitted it
+    defaults to the target set.
+
+    Examples:
+        DISJOIN(features)
+        DISJOIN(features, reference := other)
+        DISJOIN(features, reference => other)
+        DISJOIN(features, reference := (SELECT ...))
+    """
+
+    arg_types = {
+        "this": True,  # Required: target table name
+        "reference": False,  # Optional: reference table/CTE name or subquery
+    }
+
+    #: Opt DISJOIN into the CanonicalizeCoordinates pass (epic #114 step 7,
+    #: issue #122). With this flag set, pass 2 wraps every non-canonical
+    #: interval-bearing operand in a canonical ``__giql_canon_*`` CTE and
+    #: rewrites the slot to point at it, so the emitter consumes already-canonical
+    #: 0-based half-open columns instead of canonicalizing inline. Identity
+    #: (0-based half-open) operands are left unwrapped and the emitted SQL stays
+    #: byte-identical.
+    GIQL_CANONICALIZE = True
+
+    GIQL_SLOTS = (
+        SlotSpec("this", frozenset({"registered_table"}), required=True),
+        SlotSpec(
+            "reference",
+            frozenset({"registered_table", "cte", "subquery"}),
+        ),
+    )
+
+    @classmethod
+    def from_arg_list(cls, args):
+        kwargs, positional_args = _split_named_and_positional(args)
+        unknown = set(kwargs) - set(cls.arg_types)
+        if unknown:
+            raise ParseError(
+                f"DISJOIN got unexpected named argument(s): "
+                f"{', '.join(sorted(unknown))}. Valid arguments: reference."
+            )
+        if len(positional_args) > 1:
+            raise ParseError(
+                "DISJOIN accepts at most one positional argument (the target "
+                f"table); got {len(positional_args)}. Pass the reference set "
+                "as 'reference := ...'."
+            )
+        if len(positional_args) >= 1:
+            kwargs["this"] = positional_args[0]
+        if "this" not in kwargs:
+            raise ParseError("DISJOIN requires a target table as its first argument.")
         return cls(**kwargs)
