@@ -6,8 +6,6 @@ to standard SQL.
 
 from contextlib import contextmanager
 from typing import Iterator
-from typing import Literal
-from typing import overload
 
 from sqlglot import parse_one
 
@@ -18,45 +16,16 @@ from giql.expander import ExpandOperators
 from giql.resolver import resolve_operator_refs
 from giql.table import Table
 from giql.table import Tables
+from giql.targets import DialectName
+from giql.targets import Target
 from giql.targets import resolve_target
 
 
-@overload
 def transpile(
     giql: str,
     tables: list[str | Table] | None = None,
     *,
-    dialect: Literal["datafusion"] | None = None,
-) -> str: ...
-
-
-@overload
-def transpile(
-    giql: str,
-    tables: list[str | Table] | None = None,
-    *,
-    dialect: Literal["duckdb"],
-) -> str: ...
-
-
-# Widened overload for arbitrary custom-target dialect names (the registry
-# plugin hub). It subsumes the ``Literal["duckdb"]`` overload above, which is
-# kept deliberately so editors still autocomplete the ``"duckdb"`` literal
-# (symmetric with the ``Literal["datafusion"]`` overload).
-@overload
-def transpile(
-    giql: str,
-    tables: list[str | Table] | None = None,
-    *,
-    dialect: str,
-) -> str: ...
-
-
-def transpile(
-    giql: str,
-    tables: list[str | Table] | None = None,
-    *,
-    dialect: str | None = None,
+    dialect: DialectName | str | Target | None = None,
 ) -> str:
     """Transpile a GIQL query to SQL.
 
