@@ -115,6 +115,9 @@ def transpile(
     ValueError
         If the query cannot be parsed or transpiled, or if ``dialect`` is
         unknown.
+    TypeError
+        If an entry in ``tables`` is neither a ``str`` nor a
+        :class:`giql.table.Table`.
 
     Examples
     --------
@@ -236,8 +239,16 @@ def _build_tables(tables: list[str | Table] | None) -> Tables:
     for item in tables:
         if isinstance(item, str):
             container.register(item, Table(item))
-        else:
+        elif isinstance(item, Table):
             container.register(item.name, item)
+        else:
+            # Reject here rather than duck-typing ``item.name``. An object that
+            # merely looks like a Table reaches pass 1 and fails there with an
+            # AttributeError naming an internal column attribute, which tells a
+            # caller nothing about which argument was wrong.
+            raise TypeError(
+                f"tables entries must be str or Table, got {type(item).__name__}"
+            )
 
     return container
 

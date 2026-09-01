@@ -117,6 +117,31 @@ class TestTranspileWithTableObjects:
         assert "SELECT" in sql
 
 
+class TestTranspileTablesArgument:
+    """Tests for how the tables argument is admitted."""
+
+    def test_transpile_rejects_non_table_object(self):
+        """
+        GIVEN an object in tables that is neither a str nor a Table
+        WHEN transpiling
+        THEN should raise TypeError naming the offending type
+
+        The entry was previously duck-typed for a .name attribute, so an
+        arbitrary object reached pass 1 and failed there with an AttributeError
+        naming an internal column attribute -- which told the caller nothing
+        about which argument was wrong.
+        """
+
+        class NotATable:
+            name = "peaks"
+
+        with pytest.raises(TypeError, match="NotATable"):
+            transpile(
+                "SELECT * FROM peaks WHERE interval INTERSECTS 'chr1:1000-2000'",
+                tables=[NotATable()],
+            )
+
+
 class TestTranspileMultipleTables:
     """Tests for transpilation with multiple tables."""
 
