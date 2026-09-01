@@ -19,10 +19,13 @@ this naive predicate — #167.)
 DuckDB overrides the column-to-column *join* case with its per-chromosome IEJoin
 plan, registered as the ``(DuckDBTarget, Intersects)`` expander in
 :mod:`giql.expanders.intersects_duckdb` (#169) — a pass-3 override, not a pre-pass.
-That override reuses this module's :func:`_expand_spatial_op` for every shape it
-declines (LEFT/RIGHT/FULL, self-joins, multiple INTERSECTS, …) and for literal-range
-or residual INTERSECTS *predicates*, so the naive predicate here is the universal
-fallback on DuckDB too.
+For every shape it declines (FULL OUTER, the LEFT / RIGHT shapes its outer-join
+decomposition declines, self-joins, multiple INTERSECTS, …) and for literal-range
+or residual INTERSECTS *predicates*, that override defers to whichever expander
+serves ``(GenericTarget, Intersects)``, resolved through the registry. By default
+that is this module's expander, so the naive predicate here is the universal
+fallback on DuckDB too; a user override registered on the generic slot reaches
+those shapes as well, rather than applying under ``dialect=None`` alone.
 
 The INTERSECTS / CONTAINS / WITHIN / set-predicate expanders are registered only for
 :class:`~giql.targets.GenericTarget`: spatial-predicate *emission* is portable
