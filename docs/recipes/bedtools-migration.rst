@@ -268,6 +268,15 @@ Default: Report overlaps between A and B
    FROM features_a a
    LEFT JOIN features_b b ON a.interval INTERSECTS b.interval
 
+.. note::
+
+   Under ``dialect="duckdb"`` this star form takes the naive-predicate plan,
+   not the outer-join fast path: the decomposition needs every projection to
+   be attributable to one side, and GIQL does not read table schemas, so it
+   cannot enumerate ``a.*`` into columns. Spell the columns out
+   (``SELECT a.chrom, a.start, a.end, ..., b.chrom AS b_chrom, ...``) to get
+   the accelerated plan. See :doc:`../transpilation/performance`.
+
 ``-s``: Same strand overlaps only
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

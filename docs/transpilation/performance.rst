@@ -313,12 +313,13 @@ as a residual join filter, correct for both inner and outer joins with no
 special handling. This is the lowest-common-denominator plan: standard SQL
 that every target runs.
 
-For column-to-column ``INTERSECTS`` joins (INNER, SEMI, or ANTI) on
-DuckDB, the ``dialect="duckdb"`` opt-in instead transpiles the join into a
-per-chromosome dynamic-SQL pattern. Each per-chromosome subquery contains
-only inequality predicates, which DuckDB plans through its range-join
-family (``IE_JOIN`` or ``PIECEWISE_MERGE_JOIN``). Shapes this path declines
-fall through to the naive predicate above.
+For column-to-column ``INTERSECTS`` joins (INNER, SEMI, ANTI, and LEFT /
+RIGHT outer) on DuckDB, the ``dialect="duckdb"`` opt-in instead
+transpiles the join into a per-chromosome dynamic-SQL pattern. Each
+per-chromosome subquery contains only inequality predicates, which DuckDB
+plans through its range-join family (``IE_JOIN`` or
+``PIECEWISE_MERGE_JOIN``). Shapes this path declines fall through to the
+naive predicate above.
 
 .. code-block:: python
 
@@ -333,17 +334,21 @@ fall through to the naive predicate above.
        tables=["peaks", "genes"],
        dialect="duckdb",
    )
-   # sql is a two-statement script — see the next example for execution.
+   # sql is a multi-statement script — see the next example for execution.
 
 The output is a multi-statement string of the form::
 
    SET VARIABLE __giql_iejoin_<token> = COALESCE((... string_agg per chromosome ...), '<empty schema>');
    SELECT ... FROM query(getvariable('__giql_iejoin_<token>')) AS __giql_iejoin_wrapper
 
-The ``<token>`` is a per-call ``uuid4().hex`` (128 bits) suffix so the
-``SET VARIABLE`` name is collision-resistant even when outputs from many
-``transpile()`` calls are interleaved in a single DuckDB session
-(session variables are global session state). The outer SELECT's
+Each ``<token>`` is a 128-bit digest of the variable's own rendered value,
+so the ``SET VARIABLE`` name stays collision-resistant when outputs from
+many ``transpile()`` calls are interleaved in a single DuckDB session — an
+outer-join decomposition emits two such variables, one per half. Because
+the name addresses the content, re-running one query shape rebinds its own
+names rather than leaving a fresh pair behind on every call, which matters
+because session variables are global session state that the emitted script
+cannot release: the final statement has to be the ``SELECT``. The outer SELECT's
 wrapper-relation alias is constant (``__giql_iejoin_wrapper``) because
 it isn't user-visible and doesn't need to vary per call.
 
@@ -352,11 +357,13 @@ via ``replace(chrom, '''', '''''')`` wrapped in single quotes, so
 chromosome identifiers containing literal single quotes interpolate
 safely into the dynamic SQL.
 
-Because the output is a two-statement script that depends on session
-state, execute it through a single DuckDB connection's ``.execute()`` —
-DuckDB ≥1.4 (the version pinned by GIQL's development and CI
-environment) accepts multi-statement strings in one call and returns
-the result of the final statement. SQLAlchemy's ``text()``,
+The output is a multi-statement script that depends on session state: two
+statements for the shapes above, and three for the outer-join
+decomposition, which declares one session variable per half. Execute it
+through a single DuckDB connection's ``.execute()``. DuckDB ≥1.4 (the
+version pinned by GIQL's development and CI environment) accepts
+multi-statement strings in one call and returns the result of the final
+statement. SQLAlchemy's ``text()``,
 ``pandas.read_sql_query``, and similar wrappers that split or rewrite
 the string may drop the ``SET VARIABLE`` and produce empty or NULL
 results.
@@ -382,11 +389,12 @@ results.
 
 The dialect rewrites the whole query, so the supported shape is
 ``SELECT <qualified non-star projections> FROM <base table>
-{INNER|SEMI|ANTI} JOIN <base table> {ON|WHERE} <one column-to-column
-INTERSECTS>`` — the
-JOIN and the column-to-column ``INTERSECTS`` are both required
-(literal-range ``INTERSECTS`` against a single table falls through to
-the default predicate generator).
+{INNER|SEMI|ANTI|LEFT|RIGHT} JOIN <base table> {ON|WHERE} <one
+column-to-column INTERSECTS>`` — the JOIN and the column-to-column
+``INTERSECTS`` are both required (literal-range ``INTERSECTS`` against a
+single table falls through to the default predicate generator). ``LEFT``
+and ``RIGHT`` accept ``ON`` only: the outer-join decomposition rejects any
+top-level ``WHERE``, for the reason given under **Outer joins** below.
 
 **Join variants.** ``INNER JOIN`` is the default. ``SEMI JOIN`` returns
 distinct left rows that have at least one overlapping match; ``ANTI
@@ -394,10 +402,12 @@ JOIN`` returns left rows with no overlapping match. Both restrict the
 outer SELECT to left-side projections — any ``b.col`` reference (or an
 aggregate over ``b.col``) raises ``ValueError``; a right-side ``b.*``
 declines to the naive-predicate plan with every other star (which then
-rejects the out-of-scope right table at bind time). ANTI uses a
-left-distinct chromosome partition rather than the chromosome INTERSECT
-used by INNER / SEMI, so left rows on chromosomes absent from the right
-table are preserved.
+rejects the out-of-scope right table at bind time). ANTI partitions on the
+same chromosome ``INTERSECT`` as INNER and SEMI, then unions one
+non-partitioned branch carrying the left rows whose chromosome the right
+table lacks. Those rows cannot match, so giving each such chromosome its
+own branch would scan both tables to prove an emptiness the partition
+already knows.
 
 DuckDB plans all three variants through its ``IE_JOIN`` /
 ``PIECEWISE_MERGE_JOIN`` sort-merge range-join family. INNER emits a
@@ -408,24 +418,94 @@ JOIN`` / ``ANTI JOIN`` inequality overlap as a quadratic
 ``BLOCKWISE_NL_JOIN`` (a nested loop) rather than the range-join fast
 path — the correlated form reaches the fast path while preserving exact
 semantics (#208). Expect large speedups over the naive predicate for all
-three variants at scale.
+three variants at scale, subject to the contig-cardinality caveat below.
+
+**The contig-cardinality ceiling.** The rewrite emits one ``UNION ALL``
+branch per distinct chromosome, so its cost scales with that cardinality
+while the plain predicate's does not. That is the whole trade: on a
+primary assembly the partitioned form wins by orders of magnitude, and on
+a scaffold-level one it loses by them. Measured on 262,144 intervals per
+side, LEFT join, partitioned against naive: 0.79s against 4.53s at 24
+contigs, roughly level at 150, then 9.75s against 0.18s at 1,000 and
+57.2s against 0.11s at 3,000.
+
+The partition's cardinality is a property of the data, which no
+transpile-time check can see, so the choice is made at execution time. The
+``SET VARIABLE`` statement counts the partition it is about to build and,
+above ``MAX_PER_CHROM_PARTITIONS`` (256), binds the same query with the
+chromosome equality inlined rather than partitioned out. The ceiling sits
+above every standard reference assembly's primary-chromosome count and
+below the measured crossover, so a normal genome takes the fast form and a
+scaffolded one degrades to the plan it would have had anyway.
 
 **count_overlaps.** The idiomatic per-interval overlap count — ``SELECT
 a.cols, COUNT(b.col) FROM a LEFT JOIN b ON a.interval INTERSECTS
 b.interval GROUP BY a.cols`` — is also accelerated (#209). A plain
-``LEFT JOIN`` inequality overlap would decline to the naive predicate (a
-``HASH_JOIN`` on ``chrom`` with the position inequalities as a residual
-filter, quadratic when the chromosome key has low cardinality). Instead
-the dialect computes the counts through the INNER ``IE_JOIN`` path and
+``LEFT JOIN`` inequality overlap would otherwise decline to the naive
+predicate outright — a ``HASH_JOIN`` on ``chrom`` with the position
+inequalities as a residual filter, quadratic when the chromosome key has
+low cardinality. The outer-join decomposition below does not rescue it:
+that rewrite rejects any ``GROUP BY``, so this shape never reaches it.
+Instead the dialect computes the counts through the INNER ``IE_JOIN`` path
+and
 wraps them in a zero-fill ``LEFT JOIN`` back onto the distinct left keys,
 so left intervals with no overlap report ``0``. This covers a single
 ``COUNT(<right column>)`` (or ``COUNT(DISTINCT <right column>)``) with a
-``GROUP BY`` on the projected left columns; ``COUNT(*)``, non-COUNT
-aggregates, ``ORDER BY`` / ``LIMIT`` / ``HAVING``, and other outer-join
-shapes still take the naive-predicate plan.
+``GROUP BY`` on the projected left columns. ``COUNT(*)``, non-COUNT
+aggregates, and ``ORDER BY`` / ``LIMIT`` / ``HAVING`` fall out of this fast
+path, and each of them is declined by the outer-join decomposition too, so
+they take the naive-predicate plan.
 
-On top of the core shape the dialect also absorbs several common
-decorations:
+**Outer joins.** A ``LEFT`` / ``RIGHT JOIN ... ON a.interval INTERSECTS
+b.interval`` whose projections are all side-attributable qualified columns
+is decomposed rather than emitted as an outer join (#95): the matched pairs
+come from the INNER ``IE_JOIN`` path, and the preserved side's unmatched
+rows come from the ``NOT EXISTS`` ANTI path, combined with ``UNION ALL``
+and NULL-filled on the other side's columns. Both halves reach ``IE_JOIN``.
+Both halves partition on the chromosome ``INTERSECT``, since a chromosome
+present on one side only yields no pairs. What completes the union is what
+the unmatched half adds on top: one non-partitioned branch for the
+preserved side's chromosomes the other table lacks, so rows there still
+surface with NULLs without a per-chromosome branch apiece.
+
+A third branch completes it. Both partitions are built from ``SELECT
+DISTINCT <chrom>``, and a NULL chromosome renders as a NULL literal that
+``string_agg`` skips — so neither half emits a branch for it, and rows whose
+chromosome is NULL would be dropped by the very join that exists to preserve
+them. Those rows can never match (the partition is an equality, and ``NULL =
+x`` is never true), so the emission unions them in directly, NULL-filled on
+the other side. That is one extra scan of the preserved side, which DuckDB
+normally prunes to nothing on the strength of null statistics: measured at
+0.25% of total runtime on a base table and 2% on a CSV-backed view, and
+falling as a share as the join gets more expensive. It is cheap enough
+that folding it into the unmatched half would not repay the complexity.
+
+Emitting a per-chromosome ``LEFT JOIN`` instead — the obvious alternative —
+is *not* viable: DuckDB reports ``IE_JOIN`` for that plan, yet runs it in
+about 0.04s at 100,000 rows per side and fails to finish within 300s at
+4,194,304, where the decomposition returns in about two seconds. Plan
+inspection alone does not distinguish the two; only execution at scale
+does.
+
+``FULL OUTER`` has no two-half form here and still takes the naive plan, as
+does any outer join carrying a star or expression projection, a top-level
+modifier (``GROUP BY`` / ``HAVING`` / ``ORDER BY`` / ``LIMIT`` / ``OFFSET``
+/ ``DISTINCT``), a ``WHERE`` clause, a residual predicate in its ``ON``, a
+self-join, a ``TABLESAMPLE`` on either operand, or two preserved-side
+projections whose output names differ only in case.
+
+.. note::
+
+   The star projection is the caveat most likely to surprise. The idiomatic
+   bedtools ``-loj`` translation — ``SELECT a.*, b.name`` or ``SELECT a.*,
+   b.*`` — is a star projection, so it declines and ``dialect="duckdb"``
+   changes nothing for it. GIQL does not read table schemas, so it cannot
+   enumerate a star into the side-attributable columns the decomposition
+   needs (#202). Spell the columns out to take the fast path.
+
+On top of the INNER / SEMI / ANTI core shape the dialect also absorbs
+several common decorations (the outer-join decomposition declines all of
+them):
 
 - **Outer modifiers.** ``ORDER BY`` / ``LIMIT`` / ``OFFSET`` /
   ``DISTINCT`` on the outer query are appended to the outer SELECT;
@@ -464,11 +544,14 @@ SQL.
 
 The soft-fallback shapes are:
 
-- **Outer joins.** ``LEFT`` / ``RIGHT`` / ``FULL`` ``JOIN ... ON ...
-  INTERSECTS ...`` falls back to the naive-predicate plan. The same applies
-  when the join keeps its side modifier and the ``INTERSECTS`` lives in
-  the top-level ``WHERE`` (e.g. ``LEFT JOIN ... ON TRUE WHERE
-  a.interval INTERSECTS b.interval``).
+- **Outer joins.** ``FULL OUTER JOIN ... ON ... INTERSECTS ...`` falls back
+  to the naive-predicate plan; ``LEFT`` / ``RIGHT`` are decomposed onto the
+  IEJoin path instead (see **Outer joins** above), except for the shapes
+  listed there. A fallback also applies to any outer join that keeps its
+  side modifier while the ``INTERSECTS`` lives in the top-level ``WHERE``
+  (e.g. ``LEFT JOIN ... ON TRUE WHERE a.interval INTERSECTS b.interval``) —
+  there the filter discards the very unmatched rows the outer join
+  preserves, so it is a different query.
 - **SEMI / ANTI join with the INTERSECTS in the WHERE.** A ``SEMI`` /
   ``ANTI`` join whose column-to-column ``INTERSECTS`` sits in the
   top-level ``WHERE`` rather than its own ``ON`` (e.g. ``ANTI JOIN ... ON
