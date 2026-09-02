@@ -16,7 +16,7 @@ runs:
         path: dist-${{ inputs.version }}/
 
     - name: Sign the artifacts with Sigstore
-      uses: sigstore/gh-action-sigstore-python@f514d46b907ebcd5bedc05145c03b69c1edd8b46 # v3.0.0
+      uses: sigstore/gh-action-sigstore-python@790bc6befb9d733738f18d8f895854b453640ec9 # v3.5.0
       with:
         inputs: ./dist-${{ inputs.version }}/*.tar.gz ./dist-${{ inputs.version }}/*.whl
 
