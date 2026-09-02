@@ -1,5 +1,7 @@
 """Tests for the transpile() function."""
 
+import re
+
 import pytest
 
 import giql
@@ -115,6 +117,61 @@ class TestTranspileWithTableObjects:
         )
 
         assert "SELECT" in sql
+
+
+class TestTranspileDialectArgument:
+    """Tests for how the dialect argument is admitted."""
+
+    def test_transpile_accepts_a_target_instance(self):
+        """
+        GIVEN a Target instance passed as dialect instead of its name
+        WHEN transpiling
+        THEN should produce the same SQL as passing the name
+
+        Target, Capabilities and the concrete targets are all exported from the
+        package root, so rejecting the very objects the module publishes made
+        the published type and the published entry point fail to compose.
+        """
+        query = (
+            "SELECT a.chrom, b.start FROM peaks a "
+            "JOIN genes b ON a.interval INTERSECTS b.interval"
+        )
+
+        by_name = transpile(query, tables=["peaks", "genes"], dialect="duckdb")
+        by_instance = transpile(
+            query, tables=["peaks", "genes"], dialect=giql.DuckDBTarget()
+        )
+
+        # Session-variable tokens are normalised out: what this pins is that the
+        # instance resolves to the same target as the name, not how the tokens
+        # are minted.
+        token = re.compile(r"__giql_iejoin_[0-9a-f]+")
+        assert token.sub("VAR", by_instance) == token.sub("VAR", by_name)
+
+
+class TestTranspileTablesArgument:
+    """Tests for how the tables argument is admitted."""
+
+    def test_transpile_rejects_non_table_object(self):
+        """
+        GIVEN an object in tables that is neither a str nor a Table
+        WHEN transpiling
+        THEN should raise TypeError naming the offending type
+
+        The entry was previously duck-typed for a .name attribute, so an
+        arbitrary object reached pass 1 and failed there with an AttributeError
+        naming an internal column attribute -- which told the caller nothing
+        about which argument was wrong.
+        """
+
+        class NotATable:
+            name = "peaks"
+
+        with pytest.raises(TypeError, match="NotATable"):
+            transpile(
+                "SELECT * FROM peaks WHERE interval INTERSECTS 'chr1:1000-2000'",
+                tables=[NotATable()],
+            )
 
 
 class TestTranspileMultipleTables:

@@ -21,6 +21,8 @@ from .utils.duckdb_loader import load_intervals
 
 duckdb = pytest.importorskip("duckdb")
 
+pytestmark = pytest.mark.integration
+
 
 def _expected_distance(ref: GenomicInterval, cand: GenomicInterval) -> int:
     """Compute the bedtools-parity distance between two half-open intervals.

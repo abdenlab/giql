@@ -6,8 +6,6 @@ to standard SQL.
 
 from contextlib import contextmanager
 from typing import Iterator
-from typing import Literal
-from typing import overload
 
 from sqlglot import parse_one
 
@@ -18,45 +16,16 @@ from giql.expander import ExpandOperators
 from giql.resolver import resolve_operator_refs
 from giql.table import Table
 from giql.table import Tables
+from giql.targets import DialectName
+from giql.targets import Target
 from giql.targets import resolve_target
 
 
-@overload
 def transpile(
     giql: str,
     tables: list[str | Table] | None = None,
     *,
-    dialect: Literal["datafusion"] | None = None,
-) -> str: ...
-
-
-@overload
-def transpile(
-    giql: str,
-    tables: list[str | Table] | None = None,
-    *,
-    dialect: Literal["duckdb"],
-) -> str: ...
-
-
-# Widened overload for arbitrary custom-target dialect names (the registry
-# plugin hub). It subsumes the ``Literal["duckdb"]`` overload above, which is
-# kept deliberately so editors still autocomplete the ``"duckdb"`` literal
-# (symmetric with the ``Literal["datafusion"]`` overload).
-@overload
-def transpile(
-    giql: str,
-    tables: list[str | Table] | None = None,
-    *,
-    dialect: str,
-) -> str: ...
-
-
-def transpile(
-    giql: str,
-    tables: list[str | Table] | None = None,
-    *,
-    dialect: str | None = None,
+    dialect: DialectName | str | Target | None = None,
 ) -> str:
     """Transpile a GIQL query to SQL.
 
@@ -74,28 +43,45 @@ def transpile(
         Table configurations. Strings use default column mappings
         (chrom, start, end, strand). :class:`Table` objects provide
         custom column name mappings.
-    dialect : str | None
-        Optional target engine. Resolves to a :class:`giql.targets.Target`
-        carrying the engine's capability set; ``None`` selects the generic
-        portable target, ``"duckdb"`` / ``"datafusion"`` the built-in targets,
-        and any other name a custom :class:`giql.targets.Target` registered on
-        the plugin hub (see :func:`giql.expander.register` /
-        :meth:`giql.expander.ExpanderRegistry.register_target`). When set to
-        ``"duckdb"``, column-to-column
-        ``INTERSECTS`` joins (INNER, SEMI, or ANTI) are transpiled into a
-        per-chromosome dynamic-SQL pattern (``SET VARIABLE`` +
-        ``query(getvariable(...))``) that DuckDB plans through its
-        range-join family (``IE_JOIN`` / ``PIECEWISE_MERGE_JOIN``). Shapes
-        the IEJoin path declines (LEFT/RIGHT/FULL joins, self-joins, multiple
-        INTERSECTS, extra predicates, non-base operands, 3+ tables) fall
-        through to the generic naive overlap predicate. ``"datafusion"`` and
+    dialect : DialectName | str | Target | None
+        Optional target engine, as either a :class:`giql.targets.Target` or the
+        name of one. A Target carries the engine's capability set; ``None``
+        selects the generic portable target, ``"duckdb"`` / ``"datafusion"`` the
+        built-in targets, and any other name a custom
+        :class:`giql.targets.Target` registered on the plugin hub (see
+        :func:`giql.expander.register` /
+        :meth:`giql.expander.ExpanderRegistry.register_target`). Passing the
+        instance directly is the way to use a one-off Target without registering
+        it under a name, since registration is process-global and outlives the
+        call. :class:`giql.targets.GenericTarget` is accepted as an instance but
+        has no selectable name -- ``None`` is the one public spelling for it. When set to
+        ``"duckdb"``, column-to-column ``INTERSECTS`` joins (INNER, SEMI, ANTI,
+        and LEFT / RIGHT outer) are transpiled into a per-chromosome dynamic-SQL
+        pattern (``SET VARIABLE`` + ``query(getvariable(...))``) that DuckDB
+        plans through its range-join family (``IE_JOIN`` /
+        ``PIECEWISE_MERGE_JOIN``). A LEFT or RIGHT outer join is decomposed into
+        an INNER half, a ``NOT EXISTS`` half carrying the preserved side's
+        unmatched rows, and a third branch carrying its NULL-chromosome rows,
+        combined with ``UNION ALL``; the first two reach the fast operator and
+        the third is a filtered scan. Because the per-chromosome form emits one
+        branch per distinct chromosome, it degrades to a single non-partitioned
+        query above a partition-count ceiling, decided at execution time: the
+        partitioned form wins by orders of magnitude on a primary assembly and
+        loses by orders of magnitude on a scaffold-level one. Shapes the IEJoin
+        path declines fall through to the generic naive overlap predicate; the
+        performance guide enumerates them, and that enumeration is deliberately
+        not repeated here, because a second copy drifts. ``"datafusion"`` and
         ``None`` always emit that naive predicate — a plain
         ``ON a.chrom = b.chrom AND a.start < b.end AND b.start < a.end``
         condition the engine's own optimizer plans as a range join — for both
-        inner and outer column-to-column INTERSECTS joins. Hard-error
-        projection shapes raise ``ValueError`` at transpile time; see the
-        performance guide for the full enumeration. The target's capabilities
-        also choose the
+        inner and outer column-to-column INTERSECTS joins. For the INNER /
+        SEMI / ANTI shapes, a projection the rewrite cannot attribute to a side
+        raises ``ValueError`` at transpile time. The outer-join form instead
+        declines silently to the naive predicate for every projection it cannot
+        split, so ``dialect="duckdb"`` never changes an outer join's result —
+        only its plan. See the performance guide for the full enumeration.
+
+        The target's capabilities also choose the
         coordinate-canonicalization emit form for a non-canonically-encoded
         table: ``"duckdb"`` emits ``SELECT * REPLACE (...)``, while the generic
         (``None``) and ``"datafusion"`` targets emit the portable
@@ -108,13 +94,25 @@ def transpile(
     Returns
     -------
     str
-        The transpiled SQL query.
+        The transpiled SQL. Every target but ``"duckdb"`` returns a single
+        statement, as does ``"duckdb"`` for any shape its IEJoin path declines.
+        An accelerated column-to-column ``INTERSECTS`` join instead returns a
+        multi-statement script: one ``SET VARIABLE`` statement, or two for a
+        decomposed outer join, followed by the final ``SELECT``. Execute it on a
+        single connection -- a driver that splits statements, or forwards only
+        the last, drops the variable the ``SELECT`` reads and yields empty or
+        NULL results. Variable names are derived from the content they hold, so
+        re-running one query shape rebinds its own names rather than leaving a
+        fresh pair behind per call.
 
     Raises
     ------
     ValueError
         If the query cannot be parsed or transpiled, or if ``dialect`` is
         unknown.
+    TypeError
+        If an entry in ``tables`` is neither a ``str`` nor a
+        :class:`giql.table.Table`.
 
     Examples
     --------
@@ -149,8 +147,9 @@ def transpile(
             tables=["peaks", "genes"],
         )
 
-    DuckDB IEJoin dialect (column-to-column INNER/SEMI/ANTI JOIN only;
-    projections must be qualified)::
+    DuckDB IEJoin dialect (column-to-column INNER/SEMI/ANTI/LEFT/RIGHT JOIN).
+    INNER, SEMI and ANTI require qualified projections and raise otherwise; the
+    outer-join forms decline to the naive predicate instead::
 
         sql = transpile(
             "SELECT a.chrom, a.start, b.start "
@@ -236,8 +235,16 @@ def _build_tables(tables: list[str | Table] | None) -> Tables:
     for item in tables:
         if isinstance(item, str):
             container.register(item, Table(item))
-        else:
+        elif isinstance(item, Table):
             container.register(item.name, item)
+        else:
+            # Reject here rather than duck-typing ``item.name``. An object that
+            # merely looks like a Table reaches pass 1 and fails there with an
+            # AttributeError naming an internal column attribute, which tells a
+            # caller nothing about which argument was wrong.
+            raise TypeError(
+                f"tables entries must be str or Table, got {type(item).__name__}"
+            )
 
     return container
 

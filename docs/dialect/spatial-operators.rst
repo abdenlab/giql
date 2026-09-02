@@ -104,7 +104,7 @@ Join Internals
 
 A column-to-column ``INTERSECTS`` join expands to the **naive overlap predicate** — ``a.chrom = b.chrom AND a.start < b.end AND b.start < a.end`` — left in place as an ordinary ``ON`` (or ``WHERE``) condition. GIQL emits standard SQL and lets each engine's optimizer plan the range join: on DuckDB and DataFusion this becomes a hash join keyed on ``chrom`` with the two position inequalities applied as a residual join filter. Because the predicate is a plain condition on the original tables, inner and outer joins (``LEFT`` / ``RIGHT`` / ``FULL``) get correct semantics — including unmatched-row preservation — with no special restructuring, and every output row's multiplicity follows standard SQL bag semantics with no ``DISTINCT`` workaround.
 
-DuckDB additionally offers an opt-in ``dialect="duckdb"`` per-chromosome IEJoin plan for INNER / SEMI / ANTI joins that routes through its ``IE_JOIN`` / ``PIECEWISE_MERGE_JOIN`` family; shapes it declines fall through to the naive predicate. See the :doc:`performance guide </transpilation/performance>` for details.
+DuckDB additionally offers an opt-in ``dialect="duckdb"`` per-chromosome IEJoin plan for INNER / SEMI / ANTI joins, and for LEFT / RIGHT outer joins via a two-half decomposition, that routes through its ``IE_JOIN`` / ``PIECEWISE_MERGE_JOIN`` family; shapes it declines (including ``FULL OUTER``) fall through to the naive predicate. See the :doc:`performance guide </transpilation/performance>` for details.
 
 Related Operators
 ~~~~~~~~~~~~~~~~~

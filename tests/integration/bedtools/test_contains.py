@@ -5,7 +5,11 @@ intervals that fully contain a point or range. No direct bedtools
 equivalent exists, so tests validate against known expected results.
 """
 
+import pytest
+
 from .utils.data_models import GenomicInterval
+
+pytestmark = pytest.mark.integration
 
 
 def test_contains_point(giql_query):

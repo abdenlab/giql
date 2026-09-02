@@ -1,11 +1,17 @@
 """Tests for the DuckDB IEJoin dialect path on column-to-column INTERSECTS joins."""
 
 import re
+import time
 
 import pytest
+from sqlglot import parse_one
 
 from giql import Table
 from giql import transpile
+from giql.dialect import GIQLDialect
+from giql.expanders._per_chrom import MAX_PER_CHROM_PARTITIONS
+from giql.expanders.intersects_duckdb import IntersectsDuckDBIEJoinTransformer
+from giql.table import Tables
 
 duckdb = pytest.importorskip("duckdb")
 hypothesis = pytest.importorskip("hypothesis")
@@ -81,19 +87,105 @@ def _python_count_overlaps(peaks: list[tuple], genes: list[tuple]) -> list[tuple
     return sorted(out)
 
 
-def _explain_dynamic_sql(conn, sql: str) -> str:
+def _make_interval_tables(conn, peak_rows: list[tuple], gene_rows: list[tuple]) -> None:
+    """Recreate bare (chrom, start, end) peaks/genes tables from row triples."""
+    for table, rows in (("peaks", peak_rows), ("genes", gene_rows)):
+        conn.execute(f"DROP TABLE IF EXISTS {table}")
+        conn.execute(
+            f'CREATE TABLE {table} (chrom VARCHAR, "start" INTEGER, "end" INTEGER)'
+        )
+        if rows:
+            conn.executemany(f"INSERT INTO {table} VALUES (?, ?, ?)", rows)
+
+
+def _null_key(row: tuple) -> tuple:
+    """Total sort key for rows that may contain NULLs, which are not comparable."""
+    return tuple((value is None, str(value)) for value in row)
+
+
+def _python_left_join_overlap(peaks: list[tuple], genes: list[tuple]) -> list[tuple]:
+    """Reference LEFT-join overlap: every peak, paired with its genes or NULLs.
+
+    Returns a *sorted multiset* (list) so callers can assert exact row
+    multiplicity. That matters more here than for the other references: the
+    dialect emits this shape as a UNION ALL of two halves, and the most
+    plausible way that rewrite breaks is emitting a row twice or not at all --
+    which a `set` comparison would hide entirely.
+    """
+    out: list[tuple] = []
+    for pc, ps, pe in peaks:
+        # ``pc is not None`` encodes SQL NULL semantics: the per-chromosome
+        # partition is an equality, and NULL never equals anything -- not even
+        # another NULL -- so a NULL-chrom interval is always unmatched.
+        matches = [
+            (gc, gs, ge)
+            for gc, gs, ge in genes
+            if pc is not None and pc == gc and pe > gs and ge > ps
+        ]
+        if matches:
+            out.extend((pc, ps, pe, gc, gs, ge) for gc, gs, ge in matches)
+        else:
+            out.append((pc, ps, pe, None, None, None))
+    return sorted(out, key=_null_key)
+
+
+def _rows_and_schema(conn, sql: str) -> tuple[list, list]:
+    """Execute *sql* and return its rows (NULL-safe sorted) with its result schema."""
+    cursor = conn.execute(sql)
+    rows = sorted(cursor.fetchall(), key=_null_key)
+    return rows, [(d[0], d[1]) for d in cursor.description]
+
+
+def _assert_agrees_with_naive(conn, query: str, tables=("peaks", "genes")) -> str:
+    """Assert the duckdb dialect matches the naive plan in rows AND result schema.
+
+    Returns the dialect SQL so callers can additionally assert which path ran.
+    The schema matters as much as the rows: a UNION ALL branch that binds the
+    wrong column silently widens an INTEGER column to VARCHAR, and a derived
+    table wrapped around a branch silently renames duplicate output columns
+    (``chrom`` to ``chrom_1``) -- neither of which a row-only comparison of
+    stringified values can see.
+    """
+    dialect_sql = transpile(query, tables=list(tables), dialect="duckdb")
+    naive_sql = transpile(query, tables=list(tables), dialect=None)
+    assert _rows_and_schema(conn, dialect_sql) == _rows_and_schema(conn, naive_sql)
+    return dialect_sql
+
+
+def _timed_rows(conn, sql: str) -> tuple[float, list[tuple]]:
+    """Return the wall-clock seconds and rows from executing *sql* on *conn*."""
+    started = time.perf_counter()
+    rows = conn.execute(sql).fetchall()
+    return time.perf_counter() - started, rows
+
+
+def _dynamic_sql_variables(sql: str) -> list[str]:
+    """Return every session-variable name in *sql*, in emission order.
+
+    A decomposed outer join declares two (the matched half then the unmatched
+    half); every other IEJoin shape declares one. Callers must say which they
+    mean -- matching only the first would silently plan the matched half and
+    report nothing about the other.
+    """
+    return list(dict.fromkeys(re.findall(r"__giql_iejoin_[0-9a-f]+", sql)))
+
+
+def _explain_dynamic_sql(conn, sql: str, half: int = 0) -> str:
     """Return the DuckDB EXPLAIN text of the per-chromosome dynamic SQL for *sql*.
 
-    Runs the leading ``SET VARIABLE`` statement, reads the aggregated
-    per-chromosome ``UNION ALL`` string back out of the session variable, and
-    returns the plain EXPLAIN for it. The outer ``query(getvariable(...))``
-    wrapper is opaque to EXPLAIN, so the dynamic SQL must be planned directly.
+    Runs the leading ``SET VARIABLE`` statements, reads the aggregated
+    per-chromosome ``UNION ALL`` string back out of the session variable named by
+    *half*, and returns the plain EXPLAIN for it. The outer
+    ``query(getvariable(...))`` wrapper is opaque to EXPLAIN, so the dynamic SQL
+    must be planned directly. *half* selects which variable to plan: ``0`` is the
+    only one for a single-relation shape and the matched half of a decomposed
+    outer join, ``1`` is that decomposition's unmatched half.
     """
     statements = [s for s in sql.split(";\n") if s.strip()]
     for statement in statements[:-1]:
         conn.execute(statement)
-    var_name = re.search(r"__giql_iejoin_[0-9a-f]+", sql).group(0)
-    dynamic_sql = conn.execute(f"SELECT getvariable('{var_name}')").fetchone()[0]
+    var_names = _dynamic_sql_variables(sql)
+    dynamic_sql = conn.execute(f"SELECT getvariable('{var_names[half]}')").fetchone()[0]
     return conn.execute("EXPLAIN " + dynamic_sql).fetchone()[1]
 
 
@@ -170,10 +262,10 @@ class TestTranspileDuckDBIEJoinSQLStructure:
         assert "SET VARIABLE" not in sql.upper()
         assert "getvariable" not in sql
 
-    def test_transpile_should_route_outer_join_intersects_to_naive_predicate_plan_when_dialect_is_duckdb(
+    def test_transpile_should_preserve_left_join_semantics_when_dialect_is_duckdb(
         self, conn
     ):
-        """Test that LEFT JOIN INTERSECTS falls back to the naive-predicate plan.
+        """Test that LEFT JOIN INTERSECTS keeps its semantics on the dialect path.
 
         Given:
             A LEFT JOIN INTERSECTS query and a peak with no overlapping
@@ -181,9 +273,10 @@ class TestTranspileDuckDBIEJoinSQLStructure:
         When:
             The query is transpiled with ``dialect='duckdb'`` and executed.
         Then:
-            It should preserve LEFT JOIN semantics by returning the
-            unmatched peak with NULL gene columns (which the IEJoin path
-            cannot do, so the naive-predicate fallback fires).
+            It should take the IEJoin path and still return the unmatched peak
+            with NULL gene columns, via the INNER-plus-unmatched decomposition
+            (#95) rather than the naive-predicate fallback this shape used to
+            require.
         """
         # Arrange
         _make_table(
@@ -209,6 +302,8 @@ class TestTranspileDuckDBIEJoinSQLStructure:
         rows = sorted(conn.execute(sql).fetchall(), key=lambda r: r[0])
 
         # Assert
+        assert sql.count("SET VARIABLE __giql_iejoin_") == 2
+        assert "__giql_unmatched" in sql
         assert rows == [(100, 150), (5000, None)]
 
     def test_query_should_honor_extra_join_on_predicate_alongside_where_intersects_when_dialect_is_duckdb(
@@ -503,6 +598,7 @@ class TestTranspileDuckDBIEJoinSQLStructure:
 
         # Assert
         assert "SET VARIABLE __giql_iejoin_" not in sql
+        assert 'a."chrom" = b."chrom"' in sql
 
     def test_transpile_should_raise_when_extra_predicate_is_unqualified(
         self,
@@ -1586,6 +1682,7 @@ class TestTranspileDuckDBIEJoinSQLStructure:
 
         # Assert
         assert "SET VARIABLE __giql_iejoin_" not in sql
+        assert 'a."chrom" = b."chrom"' in sql
 
     def test_transpile_should_route_to_naive_predicate_plan_when_full_outer_join_intersects_lives_in_where(
         self,
@@ -1612,6 +1709,7 @@ class TestTranspileDuckDBIEJoinSQLStructure:
 
         # Assert
         assert "SET VARIABLE __giql_iejoin_" not in sql
+        assert 'a."chrom" = b."chrom"' in sql
 
     def test_transpile_should_route_to_naive_predicate_plan_when_extra_predicate_contains_window_function(
         self,
@@ -1641,6 +1739,7 @@ class TestTranspileDuckDBIEJoinSQLStructure:
 
         # Assert
         assert "SET VARIABLE __giql_iejoin_" not in sql
+        assert 'a."chrom" = b."chrom"' in sql
 
     def test_transpile_should_decline_window_aggregate_to_naive_plan(self):
         """Test that a window-aggregate projection declines to the naive plan.
@@ -1753,6 +1852,7 @@ class TestTranspileDuckDBIEJoinSQLStructure:
 
         # Assert
         assert "SET VARIABLE __giql_iejoin_" not in sql
+        assert 'a."chrom" = b."chrom"' in sql
 
     def test_transpile_should_route_to_naive_predicate_plan_when_modifier_has_exists(
         self,
@@ -1782,6 +1882,7 @@ class TestTranspileDuckDBIEJoinSQLStructure:
 
         # Assert
         assert "SET VARIABLE __giql_iejoin_" not in sql
+        assert 'a."chrom" = b."chrom"' in sql
 
     def test_transpile_should_route_to_naive_predicate_plan_when_having_has_subquery(
         self,
@@ -1808,6 +1909,7 @@ class TestTranspileDuckDBIEJoinSQLStructure:
 
         # Assert
         assert "SET VARIABLE __giql_iejoin_" not in sql
+        assert 'a."chrom" = b."chrom"' in sql
 
     def test_transpile_should_accept_paren_wrapped_aggregate_in_select(
         self,
@@ -1897,6 +1999,7 @@ class TestTranspileDuckDBIEJoinSQLStructure:
 
         # Assert
         assert "SET VARIABLE __giql_iejoin_" not in sql
+        assert 'a."chrom" = b."chrom"' in sql
 
     def test_transpile_should_route_to_naive_predicate_plan_and_execute_correctly_when_query_has_top_level_with_clause(
         self, conn
@@ -1939,6 +2042,7 @@ class TestTranspileDuckDBIEJoinSQLStructure:
 
         # Assert
         assert "SET VARIABLE __giql_iejoin_" not in sql
+        assert 'a."chrom" = b."chrom"' in sql
         assert rows == [(100,)]
 
     def test_transpile_should_route_to_naive_predicate_plan_when_three_table_cross_join(
@@ -1988,6 +2092,7 @@ class TestTranspileDuckDBIEJoinSQLStructure:
 
         # Assert
         assert "SET VARIABLE __giql_iejoin_" not in sql
+        assert 'a."chrom" = b."chrom"' in sql
         # One (peaks, genes) overlap pair cross-joined with 2 extra rows
         # = 2 result rows. The dialect path would emit only 1 (extra dropped).
         assert len(rows) == 2
@@ -2020,6 +2125,7 @@ class TestTranspileDuckDBIEJoinSQLStructure:
 
         # Assert
         assert "SET VARIABLE __giql_iejoin_" not in sql
+        assert 'a."chrom" = b."chrom"' in sql
         # No empty-name table interpolation leaked into the output.
         assert "FROM  " not in sql
         assert "FROM (SELECT * FROM  " not in sql
@@ -2227,6 +2333,44 @@ class TestTranspileDuckDBIEJoinSQLStructure:
         # Assert
         assert "SET VARIABLE" not in sql.upper()
         assert "getvariable" not in sql
+
+    def test_transpile_should_reuse_variable_names_for_an_identical_query(self):
+        """Test that re-transpiling one query mints the same variable names.
+
+        Given:
+            The same decomposed outer join transpiled twice.
+        When:
+            The session-variable names are compared.
+        Then:
+            They should be identical, and there should still be two distinct
+            names within one output.
+
+        The names are content-addressed: each is a digest of everything that
+        determines its variable's value. Session variables live for the
+        connection and the emitted script cannot release them -- the final
+        statement has to be the ``SELECT`` for DuckDB to return a result -- so a
+        fresh name per call made a long-lived connection accumulate one entry per
+        query executed. Addressing by content bounds the set by the number of
+        distinct query shapes instead, since re-running a shape rebinds its own
+        name to a byte-identical value.
+        """
+        # Arrange
+        query = (
+            "SELECT a.chrom, a.start FROM peaks a "
+            "LEFT JOIN genes b ON a.interval INTERSECTS b.interval"
+        )
+
+        # Act
+        first = _dynamic_sql_variables(
+            transpile(query, tables=["peaks", "genes"], dialect="duckdb")
+        )
+        second = _dynamic_sql_variables(
+            transpile(query, tables=["peaks", "genes"], dialect="duckdb")
+        )
+
+        # Assert
+        assert first == second
+        assert len(set(first)) == 2
 
     def test_transpile_should_use_unique_variable_names_across_interleaved_calls(
         self, conn
@@ -2480,6 +2624,7 @@ class TestTranspileDuckDBIEJoinSQLStructure:
 
         # Assert
         assert "SET VARIABLE __giql_iejoin_" not in sql
+        assert 'a."chrom" = b."chrom"' in sql
 
     def test_transpile_should_route_to_naive_predicate_plan_when_residual_has_subquery(
         self,
@@ -2507,6 +2652,7 @@ class TestTranspileDuckDBIEJoinSQLStructure:
 
         # Assert
         assert "SET VARIABLE __giql_iejoin_" not in sql
+        assert 'a."chrom" = b."chrom"' in sql
 
     def test_transpile_should_rewrite_group_by_multiple_columns_to_inner_aliases_when_dialect_is_duckdb(
         self,
@@ -2675,10 +2821,10 @@ class TestTranspileDuckDBIEJoinSQLStructure:
         assert "a.start" not in outer_select
         assert "a.end" not in outer_select
 
-    def test_transpile_should_route_right_outer_join_intersects_to_naive_predicate_plan_when_dialect_is_duckdb(
+    def test_transpile_should_decompose_right_outer_join_intersects_when_dialect_is_duckdb(
         self,
     ):
-        """Test that ``RIGHT JOIN INTERSECTS`` falls back to the naive-predicate plan.
+        """Test that ``RIGHT JOIN INTERSECTS`` takes the decomposition path.
 
         Given:
             A query with a ``RIGHT JOIN`` whose ON contains a
@@ -2686,8 +2832,9 @@ class TestTranspileDuckDBIEJoinSQLStructure:
         When:
             ``transpile`` is called with ``dialect='duckdb'``.
         Then:
-            ``_has_outer_join_intersects`` should detect the
-            outer-join side and route to the naive-predicate plan.
+            It should emit the two-half decomposition (#95), which mirrors the
+            LEFT form by swapping the FROM and joined tables, rather than
+            declining to the naive-predicate plan.
         """
         # Arrange & act
         sql = transpile(
@@ -2698,7 +2845,14 @@ class TestTranspileDuckDBIEJoinSQLStructure:
         )
 
         # Assert
-        assert "SET VARIABLE __giql_iejoin_" not in sql
+        assert sql.count("SET VARIABLE __giql_iejoin_") == 2
+        assert "__giql_unmatched" in sql
+        # The swap is the whole point: the unmatched half must carry the
+        # PRESERVED (right) side's left-only chromosomes in its tail branch.
+        # Asserting only on the variable count passes even if the swap never
+        # happens, so pin which table the tail branch preserves (#95).
+        assert 'FROM genes a WHERE a."chrom" IS NOT NULL' in sql
+        assert 'FROM peaks a WHERE a."chrom" IS NOT NULL' not in sql
 
     def test_transpile_should_route_to_naive_predicate_plan_when_join_target_is_subquery(
         self,
@@ -2726,6 +2880,7 @@ class TestTranspileDuckDBIEJoinSQLStructure:
 
         # Assert
         assert "SET VARIABLE __giql_iejoin_" not in sql
+        assert 'a."chrom" = b."chrom"' in sql
 
     def test_transpile_should_decline_literal_projection_to_naive_plan(self):
         """Test that a literal-only SELECT-list entry declines to the naive plan.
@@ -2837,6 +2992,7 @@ class TestTranspileDuckDBIEJoinSQLStructure:
 
         # Assert
         assert "SET VARIABLE __giql_iejoin_" not in sql
+        assert 'a."chrom" = b."chrom"' in sql
 
     def test_transpile_should_engage_dialect_when_using_join_targets_chrom_only(self):
         """Test that ``USING(chrom)`` engages the dialect path.
@@ -2885,6 +3041,7 @@ class TestTranspileDuckDBIEJoinSQLStructure:
 
         # Assert
         assert "SET VARIABLE __giql_iejoin_" not in sql
+        assert 'a."chrom" = b."chrom"' in sql
 
     def test_transpile_should_fall_back_when_using_join_targets_multiple_columns(self):
         """Test that multi-column ``USING(chrom, strand)`` falls back.
@@ -2909,6 +3066,7 @@ class TestTranspileDuckDBIEJoinSQLStructure:
 
         # Assert
         assert "SET VARIABLE __giql_iejoin_" not in sql
+        assert 'a."chrom" = b."chrom"' in sql
 
     def test_transpile_should_engage_dialect_when_join_is_implicit_cross_join(self):
         """Test that CROSS JOIN + WHERE INTERSECTS continues to engage the dialect.
@@ -2962,6 +3120,7 @@ class TestTranspileDuckDBIEJoinSQLStructure:
 
         # Assert
         assert "SET VARIABLE __giql_iejoin_" not in sql
+        assert 'a."chrom" = b."chrom"' in sql
 
     def test_transpile_should_fall_back_when_select_aggregate_contains_correlated_subquery(
         self,
@@ -2989,6 +3148,7 @@ class TestTranspileDuckDBIEJoinSQLStructure:
 
         # Assert
         assert "SET VARIABLE __giql_iejoin_" not in sql
+        assert 'a."chrom" = b."chrom"' in sql
 
     def test_transpile_should_resolve_projections_when_aliases_differ_in_case(
         self,
@@ -3167,17 +3327,20 @@ class TestTranspileDuckDBIEJoinSQLStructure:
         # Assert
         assert "SET VARIABLE __giql_iejoin_" in sql
 
-    def test_transpile_should_use_left_only_chrom_partition_when_join_is_anti(self):
-        """Test that ANTI JOIN's partition source is left-distinct only.
+    def test_transpile_should_use_shared_chrom_partition_when_join_is_anti(self):
+        """Test that ANTI JOIN partitions on shared chromosomes plus a tail branch.
 
         Given:
             An ANTI JOIN + INTERSECTS query.
         When:
             ``transpile`` is called with ``dialect='duckdb'``.
         Then:
-            The emitted SET VARIABLE block should NOT contain
-            ``INTERSECT`` (the partition source is left-distinct only,
-            not the chromosome-INTERSECT used by INNER / SEMI).
+            The emitted SET VARIABLE block should partition on the
+            chromosome ``INTERSECT`` like INNER / SEMI, and carry the left-only
+            chromosomes in a single non-partitioned tail branch rather than one
+            per-chromosome branch apiece (#95). A left-only chromosome can never
+            match, so a branch for it scans both tables to prove an emptiness the
+            partition already knows.
         """
         # Arrange
         query = (
@@ -3190,7 +3353,8 @@ class TestTranspileDuckDBIEJoinSQLStructure:
         set_var_stmt = sql.split(";\n", 1)[0]
 
         # Assert
-        assert "INTERSECT" not in set_var_stmt
+        assert "INTERSECT" in set_var_stmt
+        assert 'a."chrom" NOT IN (SELECT DISTINCT "chrom" FROM genes' in set_var_stmt
 
     def test_transpile_should_reject_right_side_projection_when_join_is_anti(self):
         """Test that ANTI JOIN raises on ``b.col`` in the outer SELECT.
@@ -3247,7 +3411,10 @@ class TestTranspileDuckDBIEJoinCountOverlaps:
         assert "SET VARIABLE __giql_iejoin_" in sql
         assert "__giql_counts" in sql
         assert "COALESCE" in sql
-        assert 'a."chrom" = b."chrom"' not in sql
+        # The chromosome equality is legitimate inside the guarded
+        # non-partitioned fallback (#95); what must not happen is the
+        # per-chromosome template emitting it instead of partitioning on it.
+        assert 'a."chrom" = b."chrom"' not in sql.split("ELSE", 1)[1]
 
     def test_transpile_should_decline_count_overlaps_when_count_star(self):
         """Test that COUNT(*) over a LEFT join declines to the naive plan.
@@ -3601,6 +3768,1472 @@ class TestTranspileDuckDBIEJoinCountOverlaps:
 
         # Assert
         assert "BLOCKWISE_NL_JOIN" not in plan
+
+
+class TestTranspileDuckDBIEJoinOuterJoinDecomposition:
+    """Outer-join INTERSECTS as INNER pairs UNION ALL unmatched rows (#95)."""
+
+    def test_transpile_should_emit_union_all_decomposition_when_left_join_intersects(
+        self,
+    ):
+        """Test that a LEFT-join INTERSECTS emits the two-half decomposition.
+
+        Given:
+            A ``SELECT a.cols, b.cols FROM a LEFT JOIN b ON a.interval
+            INTERSECTS b.interval`` query.
+        When:
+            ``transpile`` is called with ``dialect='duckdb'``.
+        Then:
+            It should emit two ``SET VARIABLE`` blocks (the INNER half and the
+            unmatched ANTI half) as three ``UNION ALL`` branches, never the
+            naive ``a.chrom = b.chrom`` hash-join predicate.
+        """
+        # Arrange
+        query = (
+            'SELECT a.chrom, a.start, a."end", b.chrom AS b_chrom '
+            "FROM peaks a LEFT JOIN genes b ON a.interval INTERSECTS b.interval"
+        )
+
+        # Act
+        sql = transpile(query, tables=["peaks", "genes"], dialect="duckdb")
+
+        # Assert
+        assert sql.count("SET VARIABLE __giql_iejoin_") == 2
+        assert "NOT EXISTS" in sql
+        # Positional, not membership: a bare "UNION ALL" proves nothing here
+        # because it is also the string_agg separator inside every per-chrom
+        # dynamic-SQL template (see _per_chrom.set_variable_statement). Both
+        # seams are asserted, so all three branches are pinned.
+        assert re.search(r"AS __giql_iejoin_wrapper UNION ALL SELECT ", sql)
+        assert re.search(r"\) AS __giql_unmatched UNION ALL SELECT ", sql)
+        # The matched half is a bare SELECT, not a derived table: a
+        # ``SELECT * FROM (...)`` wrapper would rename duplicate output columns
+        # and that renaming would become the union's schema.
+        assert "__giql_matched" not in sql
+        assert 'NULL AS "b_chrom"' in sql
+
+    def test_query_should_match_reference_left_join_when_dialect_is_duckdb(self, conn):
+        """Test that the decomposition reproduces LEFT JOIN semantics exactly.
+
+        Given:
+            Peaks that overlap a gene, a peak with no overlap on a shared
+            chromosome, and a peak on a chromosome absent from the right table.
+        When:
+            The LEFT-join INTERSECTS query is transpiled with
+            ``dialect='duckdb'`` and executed.
+        Then:
+            It should return every peak — matched peaks paired with each
+            overlapping gene, unmatched peaks with NULL gene columns.
+        """
+        # Arrange
+        peak_rows = [
+            ("chr1", 100, 200),
+            ("chr1", 5000, 6000),
+            ("chrX", 10, 20),
+        ]
+        gene_rows = [("chr1", 150, 250), ("chr1", 180, 300), ("chrY", 1, 2)]
+        _make_interval_tables(conn, peak_rows, gene_rows)
+        sql = transpile(
+            'SELECT a.chrom, a.start, a."end", b.chrom AS b_chrom, '
+            'b.start AS b_start, b."end" AS b_end '
+            "FROM peaks a LEFT JOIN genes b ON a.interval INTERSECTS b.interval",
+            tables=["peaks", "genes"],
+            dialect="duckdb",
+        )
+
+        # Act
+        rows = sorted(conn.execute(sql).fetchall(), key=_null_key)
+
+        # Assert
+        # The path assertion is load-bearing: the naive plan returns these
+        # same rows, so without it this test passes even if the
+        # decomposition silently stops firing.
+        assert sql.count("SET VARIABLE __giql_iejoin_") == 2
+        assert rows == _python_left_join_overlap(peak_rows, gene_rows)
+
+    def test_query_should_preserve_row_multiplicity_when_both_sides_have_duplicates(
+        self, conn
+    ):
+        """Test that duplicate rows on both sides keep their exact multiplicity.
+
+        Given:
+            A peak duplicated on the left and a gene duplicated on the right,
+            so the matched half must emit the full cross product of duplicates.
+        When:
+            The LEFT-join INTERSECTS query is transpiled with
+            ``dialect='duckdb'`` and executed.
+        Then:
+            It should return the same multiset as the Python reference, with no
+            row collapsed or double-counted by the UNION ALL rewrite.
+        """
+        # Arrange
+        peak_rows = [("chr1", 100, 200), ("chr1", 100, 200), ("chr1", 900, 950)]
+        gene_rows = [("chr1", 150, 250), ("chr1", 150, 250)]
+        _make_interval_tables(conn, peak_rows, gene_rows)
+        sql = transpile(
+            'SELECT a.chrom, a.start, a."end", b.chrom AS b_chrom, '
+            'b.start AS b_start, b."end" AS b_end '
+            "FROM peaks a LEFT JOIN genes b ON a.interval INTERSECTS b.interval",
+            tables=["peaks", "genes"],
+            dialect="duckdb",
+        )
+
+        # Act
+        rows = sorted(conn.execute(sql).fetchall(), key=_null_key)
+
+        # Assert
+        # The path assertion is load-bearing: the naive plan returns these
+        # same rows, so without it this test passes even if the
+        # decomposition silently stops firing.
+        assert sql.count("SET VARIABLE __giql_iejoin_") == 2
+        assert rows == _python_left_join_overlap(peak_rows, gene_rows)
+
+    def test_query_should_resolve_shadowed_name_to_relation_column(self, conn):
+        """Test that a NULL-fill alias never shadows the preserved column it names.
+
+        Given:
+            A projection whose NULL-side position is aliased to the same output
+            name as a preserved-side position and sits ahead of it, so the
+            unmatched half emits ``SELECT NULL AS "dup", "dup" AS "dup"`` -- a
+            bare column reference following a same-named computed alias in one
+            SELECT list.
+        When:
+            The LEFT-join INTERSECTS query is transpiled with
+            ``dialect='duckdb'`` and executed.
+        Then:
+            The bare reference should resolve to the subquery's relation column
+            and not to the lateral NULL alias declared just before it, so the
+            preserved value survives instead of being nulled out.
+
+        The duplicate-name gate is deliberately preserved-side only, which
+        leaves this collision reachable; nothing else pins which way DuckDB
+        resolves it.
+        """
+        # Arrange
+        _make_interval_tables(
+            conn, [("chr1", 100, 200), ("chr1", 5000, 6000)], [("chr1", 150, 250)]
+        )
+        query = (
+            "SELECT b.chrom AS dup, a.start AS dup FROM peaks a "
+            "LEFT JOIN genes b ON a.interval INTERSECTS b.interval"
+        )
+
+        # Act & assert
+        sql = _assert_agrees_with_naive(conn, query)
+
+        # Assert
+        assert sql.count("SET VARIABLE __giql_iejoin_") == 2
+        assert 'SELECT NULL AS "dup", "dup" AS "dup"' in sql
+        # The unmatched peak keeps its own start rather than inheriting the NULL.
+        assert (None, 5000) in conn.execute(sql).fetchall()
+
+    def test_query_should_keep_duplicate_output_names_when_dialect_is_duckdb(self, conn):
+        """Test that the canonical bedtools projection keeps its column labels.
+
+        Given:
+            The ``-wa -wb`` projection every bedtools migration writes, whose
+            six columns carry only three distinct output names (``chrom``,
+            ``start``, ``end`` from each side).
+        When:
+            The LEFT-join INTERSECTS query is transpiled with
+            ``dialect='duckdb'`` and executed.
+        Then:
+            It should return the naive plan's rows under the naive plan's
+            column names -- a performance flag must not renumber a user's
+            duplicate labels into ``chrom_1`` / ``start_1`` / ``end_1``.
+        """
+        # Arrange
+        _make_interval_tables(
+            conn, [("chr1", 100, 200), ("chr1", 5000, 6000)], [("chr1", 150, 250)]
+        )
+        query = (
+            'SELECT a.chrom, a.start, a."end", b.chrom, b.start, b."end" '
+            "FROM peaks a LEFT JOIN genes b ON a.interval INTERSECTS b.interval"
+        )
+
+        # Act & assert
+        sql = _assert_agrees_with_naive(conn, query)
+
+        # Assert
+        assert sql.count("SET VARIABLE __giql_iejoin_") == 2
+        assert [d[0] for d in conn.execute(sql).description] == [
+            "chrom",
+            "start",
+            "end",
+            "chrom",
+            "start",
+            "end",
+        ]
+
+    def test_query_should_match_reference_right_join_when_dialect_is_duckdb(self, conn):
+        """Test that a RIGHT join preserves the right side's unmatched rows.
+
+        Given:
+            A gene with no overlapping peak, plus a gene on a chromosome the
+            left table does not contain.
+        When:
+            The RIGHT-join INTERSECTS query is transpiled with
+            ``dialect='duckdb'`` and executed.
+        Then:
+            It should return every gene, matched ones paired with their peaks
+            and unmatched ones with NULL peak columns — the mirror of LEFT.
+        """
+        # Arrange
+        peak_rows = [("chr1", 100, 200)]
+        gene_rows = [("chr1", 150, 250), ("chr1", 8000, 8100), ("chrY", 1, 5)]
+        _make_interval_tables(conn, peak_rows, gene_rows)
+        sql = transpile(
+            'SELECT b.chrom, b.start, b."end", a.chrom AS a_chrom, '
+            'a.start AS a_start, a."end" AS a_end '
+            "FROM peaks a RIGHT JOIN genes b ON a.interval INTERSECTS b.interval",
+            tables=["peaks", "genes"],
+            dialect="duckdb",
+        )
+
+        # Act
+        rows = sorted(conn.execute(sql).fetchall(), key=_null_key)
+
+        # Assert — a RIGHT join preserves genes, so the reference runs mirrored.
+        # The path assertion is load-bearing: the naive plan returns these
+        # same rows, so without it this test passes even if the
+        # decomposition silently stops firing.
+        assert sql.count("SET VARIABLE __giql_iejoin_") == 2
+        assert rows == _python_left_join_overlap(gene_rows, peak_rows)
+
+    def test_transpile_should_decline_outer_join_when_full_outer(self):
+        """Test that a FULL OUTER join still falls back to the naive plan.
+
+        Given:
+            A ``FULL OUTER JOIN`` whose ON carries a column-to-column
+            INTERSECTS.
+        When:
+            ``transpile`` is called with ``dialect='duckdb'``.
+        Then:
+            It should decline to the naive-predicate plan, since preserving
+            unmatched rows on *both* sides has no two-half decomposition.
+        """
+        # Arrange & act
+        sql = transpile(
+            "SELECT a.chrom, b.chrom AS b_chrom FROM peaks a "
+            "FULL OUTER JOIN genes b ON a.interval INTERSECTS b.interval",
+            tables=["peaks", "genes"],
+            dialect="duckdb",
+        )
+
+        # Assert
+        assert "SET VARIABLE __giql_iejoin_" not in sql
+        assert 'a."chrom" = b."chrom"' in sql
+
+    def test_transpile_should_decline_outer_join_when_projection_is_expression(self):
+        """Test that an expression projection under an outer join declines.
+
+        Given:
+            A LEFT-join INTERSECTS whose SELECT list contains a ``CASE``
+            expression (the ``bedtools -wao`` shape).
+        When:
+            ``transpile`` is called with ``dialect='duckdb'``.
+        Then:
+            It should decline to the naive-predicate plan — the unmatched half
+            can only NULL-fill a side-attributable column, not an arbitrary
+            expression (this shape unblocks with #109).
+        """
+        # Arrange & act
+        sql = transpile(
+            "SELECT a.chrom, CASE WHEN b.chrom IS NULL THEN 0 ELSE 1 END AS ov "
+            "FROM peaks a LEFT JOIN genes b ON a.interval INTERSECTS b.interval",
+            tables=["peaks", "genes"],
+            dialect="duckdb",
+        )
+
+        # Assert
+        assert "SET VARIABLE __giql_iejoin_" not in sql
+        assert 'a."chrom" = b."chrom"' in sql
+
+    def test_transpile_should_decline_outer_join_when_order_by(self):
+        """Test that a top-level ORDER BY under an outer join declines.
+
+        Given:
+            A LEFT-join INTERSECTS carrying a top-level ``ORDER BY``.
+        When:
+            ``transpile`` is called with ``dialect='duckdb'``.
+        Then:
+            It should decline to the naive-predicate plan, because the modifier
+            belongs on the union rather than on each half independently.
+        """
+        # Arrange & act
+        sql = transpile(
+            "SELECT a.chrom, a.start FROM peaks a "
+            "LEFT JOIN genes b ON a.interval INTERSECTS b.interval "
+            "ORDER BY a.start",
+            tables=["peaks", "genes"],
+            dialect="duckdb",
+        )
+
+        # Assert
+        assert "SET VARIABLE __giql_iejoin_" not in sql
+        assert 'a."chrom" = b."chrom"' in sql
+
+    def test_transpile_should_route_count_overlaps_to_zero_fill_not_decomposition(self):
+        """Test that count_overlaps keeps its own faster zero-fill path.
+
+        Given:
+            A ``COUNT(b.col)`` LEFT-join with a GROUP BY — also an outer join,
+            so both fast paths could plausibly claim it.
+        When:
+            ``transpile`` is called with ``dialect='duckdb'``.
+        Then:
+            It should emit the ``__giql_counts`` zero-fill wrapper and no
+            ``__giql_unmatched`` half, proving the dispatch order still
+            favours the count_overlaps path.
+        """
+        # Arrange & act
+        sql = transpile(
+            'SELECT a.chrom, a.start, a."end", COUNT(b.chrom) AS n '
+            "FROM peaks a LEFT JOIN genes b ON a.interval INTERSECTS b.interval "
+            'GROUP BY a.chrom, a.start, a."end"',
+            tables=["peaks", "genes"],
+            dialect="duckdb",
+        )
+
+        # Assert
+        assert "__giql_counts" in sql
+        assert "__giql_unmatched" not in sql
+
+    @settings(
+        max_examples=50,
+        deadline=None,
+        suppress_health_check=[HealthCheck.function_scoped_fixture],
+    )
+    @given(
+        peaks=st.lists(
+            st.tuples(
+                st.sampled_from(["chr1", "chr2", "chr3", None]),
+                st.integers(min_value=0, max_value=100),
+                st.integers(min_value=0, max_value=30),
+            ),
+            min_size=0,
+            max_size=8,
+        ),
+        genes=st.lists(
+            st.tuples(
+                st.sampled_from(["chr1", "chr2", "chr3", None]),
+                st.integers(min_value=0, max_value=100),
+                st.integers(min_value=0, max_value=30),
+            ),
+            min_size=0,
+            max_size=8,
+        ),
+    )
+    def test_left_join_should_match_python_reference_for_random_inputs(
+        self, conn, peaks, genes
+    ):
+        """Test the outer-join decomposition against a Python-native reference.
+
+        Given:
+            A Hypothesis-generated pair of small interval lists, which freely
+            produce duplicate rows, empty tables, and chromosomes present on
+            only one side.
+        When:
+            A LEFT-join INTERSECTS is transpiled with ``dialect='duckdb'`` and
+            executed.
+        Then:
+            The returned rows should equal the Python LEFT-join reference as a
+            multiset, including unmatched rows carrying NULL right columns.
+        """
+        # Arrange
+        peak_rows = [(c, s, s + length) for (c, s, length) in peaks]
+        gene_rows = [(c, s, s + length) for (c, s, length) in genes]
+        _make_interval_tables(conn, peak_rows, gene_rows)
+        sql = transpile(
+            'SELECT a.chrom, a.start, a."end", b.chrom AS b_chrom, '
+            'b.start AS b_start, b."end" AS b_end '
+            "FROM peaks a LEFT JOIN genes b ON a.interval INTERSECTS b.interval",
+            tables=["peaks", "genes"],
+            dialect="duckdb",
+        )
+
+        # Act
+        rows = sorted(conn.execute(sql).fetchall(), key=_null_key)
+
+        # Assert
+        # The path assertion is load-bearing: the naive plan returns these
+        # same rows, so without it this test passes even if the
+        # decomposition silently stops firing.
+        assert sql.count("SET VARIABLE __giql_iejoin_") == 2
+        assert rows == _python_left_join_overlap(peak_rows, gene_rows)
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "SELECT a.chrom AS Start, a.start, b.chrom AS bc FROM peaks a "
+            "LEFT JOIN genes b ON a.interval INTERSECTS b.interval",
+            "SELECT b.chrom AS y, b.start AS Y, a.start FROM peaks a "
+            "RIGHT JOIN genes b ON a.interval INTERSECTS b.interval",
+        ],
+        ids=["left", "right"],
+    )
+    def test_transpile_should_decline_when_preserved_names_collide_case_insensitively(
+        self, conn, query
+    ):
+        """Test that case-only colliding preserved output names decline.
+
+        Given:
+            An outer-join INTERSECTS whose preserved-side projections have
+            output names differing only in letter case.
+        When:
+            The query is transpiled with ``dialect='duckdb'`` and executed.
+        Then:
+            It should decline to the naive-predicate plan and return that
+            plan's rows and column types unchanged.
+
+        DuckDB resolves identifiers case-insensitively even when quoted, so the
+        unmatched half's by-name re-projection would bind both positions to
+        whichever column came first -- returning the chromosome where a start
+        was asked for, and flipping that column's type to VARCHAR for the
+        matched rows too.
+        """
+        # Arrange
+        _make_interval_tables(
+            conn, [("chr1", 10, 20), ("chr1", 900, 910)], [("chr1", 15, 25)]
+        )
+
+        # Act & assert
+        sql = _assert_agrees_with_naive(conn, query)
+
+        # Assert
+        assert "SET VARIABLE __giql_iejoin_" not in sql
+
+    @pytest.mark.parametrize(
+        ("peaks", "genes", "query"),
+        [
+            (
+                [("chr1", 100, 200), (None, 10, 20)],
+                [("chr1", 150, 250)],
+                'SELECT a.chrom, a.start, a."end", b.chrom AS bc FROM peaks a '
+                "LEFT JOIN genes b ON a.interval INTERSECTS b.interval",
+            ),
+            (
+                [(None, 1, 10), (None, 20, 30)],
+                [("chr1", 150, 250)],
+                'SELECT a.chrom, a.start, a."end", b.chrom AS bc FROM peaks a '
+                "LEFT JOIN genes b ON a.interval INTERSECTS b.interval",
+            ),
+            (
+                [("chr1", 100, 200)],
+                [("chr1", 150, 250), (None, 1, 2)],
+                "SELECT b.chrom, b.start, a.chrom AS ac FROM peaks a "
+                "RIGHT JOIN genes b ON a.interval INTERSECTS b.interval",
+            ),
+        ],
+        ids=["left_one_null_chrom", "left_all_null_chrom", "right_null_chrom"],
+    )
+    def test_query_should_preserve_rows_whose_chromosome_is_null(
+        self, conn, peaks, genes, query
+    ):
+        """Test that a preserved-side row with a NULL chromosome still surfaces.
+
+        Given:
+            An outer-join INTERSECTS where the row-preserving side contains a
+            NULL chromosome, including the case where every row does.
+        When:
+            The query is transpiled with ``dialect='duckdb'`` and executed.
+        Then:
+            It should return the naive plan's rows, with the NULL-chromosome
+            rows present and NULL-filled on the other side.
+
+        Neither half can surface these on its own: both partitions come from
+        ``SELECT DISTINCT <chrom>``, where a NULL renders as a NULL literal that
+        ``string_agg`` skips, so no per-chromosome branch is ever emitted for
+        it. Dropping them would defeat the one guarantee an outer join makes.
+        """
+        # Arrange
+        _make_interval_tables(conn, peaks, genes)
+
+        # Act & assert
+        sql = _assert_agrees_with_naive(conn, query)
+
+        # Assert
+        assert sql.count("SET VARIABLE __giql_iejoin_") == 2
+
+    @pytest.mark.parametrize(
+        "clause",
+        [
+            "QUALIFY ROW_NUMBER() OVER (PARTITION BY a.chrom ORDER BY a.start) = 1",
+            "LIMIT 2",
+            "LIMIT 2 OFFSET 1",
+            "GROUP BY a.chrom, a.start",
+            "ORDER BY a.start",
+        ],
+        ids=["qualify", "limit", "limit_offset", "group_by", "order_by"],
+    )
+    def test_transpile_should_decline_outer_join_when_top_level_clause_present(
+        self, conn, clause
+    ):
+        """Test that any unread top-level clause declines the decomposition.
+
+        Given:
+            A LEFT-join INTERSECTS carrying a top-level clause the rewrite does
+            not itself consume.
+        When:
+            The query is transpiled with ``dialect='duckdb'`` and executed.
+        Then:
+            It should decline to the naive-predicate plan and match its rows.
+
+        The rewrite re-emits the query as a UNION ALL of two independently
+        transpiled halves, so any such clause would be applied per half rather
+        than over the union -- ``LIMIT 2`` would return four rows, not two.
+        """
+        # Arrange
+        _make_interval_tables(
+            conn,
+            [("chr1", 100, 200), ("chr1", 5000, 6000), ("chrX", 10, 20)],
+            [("chr1", 150, 250), ("chr1", 180, 300)],
+        )
+        query = (
+            "SELECT a.chrom, a.start FROM peaks a "
+            f"LEFT JOIN genes b ON a.interval INTERSECTS b.interval {clause}"
+        )
+
+        # Act & assert
+        sql = _assert_agrees_with_naive(conn, query)
+
+        # Assert
+        assert "SET VARIABLE __giql_iejoin_" not in sql
+
+    @pytest.mark.parametrize(
+        ("label", "query"),
+        [
+            (
+                "from_operand",
+                "SELECT a.chrom, b.start AS bs FROM peaks a TABLESAMPLE 100 PERCENT "
+                "LEFT JOIN genes b ON a.interval INTERSECTS b.interval",
+            ),
+            (
+                "joined_operand",
+                "SELECT a.chrom, b.start AS bs FROM peaks a "
+                "LEFT JOIN genes b TABLESAMPLE 100 PERCENT "
+                "ON a.interval INTERSECTS b.interval",
+            ),
+        ],
+    )
+    def test_transpile_should_decline_outer_join_when_operand_is_sampled(
+        self, conn, label, query
+    ):
+        """Test that a TABLESAMPLE on either operand declines the decomposition.
+
+        Given:
+            A LEFT-join INTERSECTS whose FROM table or whose joined table
+            carries ``TABLESAMPLE``.
+        When:
+            The query is transpiled with ``dialect='duckdb'`` and executed.
+        Then:
+            It should decline to the naive-predicate plan and remain executable.
+
+        The sample rides on the table node rather than the top-level SELECT, so
+        the clause whitelist cannot see it; left alone it lands in a position
+        the per-chromosome template cannot parse at all. Each operand is gated
+        separately, so each needs its own case.
+        """
+        # Arrange
+        _make_interval_tables(conn, [("chr1", 100, 200)], [("chr1", 150, 250)])
+
+        # Act & assert
+        sql = _assert_agrees_with_naive(conn, query)
+
+        # Assert
+        assert "SET VARIABLE __giql_iejoin_" not in sql
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            'SELECT a.name AS "we;\nird", b.name AS bn FROM peaks a '
+            "LEFT JOIN genes b ON a.interval INTERSECTS b.interval",
+            'SELECT a.name AS "we;\nird", COUNT(b.name) AS n FROM peaks a '
+            "LEFT JOIN genes b ON a.interval INTERSECTS b.interval "
+            "GROUP BY a.name",
+        ],
+        ids=["decomposition", "count_overlaps"],
+    )
+    def test_query_should_handle_identifier_containing_statement_separator(
+        self, conn, query
+    ):
+        """Test that an identifier containing the statement separator still works.
+
+        Given:
+            An outer-join INTERSECTS whose output alias contains ``";\\n"`` --
+            the sequence separating the emitted script's statements.
+        When:
+            The query is transpiled with ``dialect='duckdb'`` and executed.
+        Then:
+            It should execute and match the naive plan, rather than splitting
+            the script inside the quoted alias and failing to parse.
+
+        Both composing rewrites take the setup and SELECT as separate values
+        now; recovering them by splitting rendered SQL is what broke here.
+        """
+        # Arrange
+        _make_table(conn, "peaks", [("chr1", 100, 200, "p1", 0, "+")])
+        _make_table(conn, "genes", [("chr1", 150, 250, "g1", 0, "+")])
+
+        # Act & assert
+        _assert_agrees_with_naive(conn, query)
+
+    def test_query_should_agree_with_naive_when_projection_interleaves_sides(self, conn):
+        """Test that a projection alternating sides keeps every column in place.
+
+        Given:
+            A LEFT join projecting preserved and NULL-filled columns in
+            alternating positions, over data covering matched rows, unmatched
+            rows and a NULL chromosome -- one row for each of the three branches.
+        When:
+            The query is transpiled with ``dialect='duckdb'`` and executed.
+        Then:
+            It should return the naive plan's rows, column names and types.
+
+        Every branch re-projects by position, walking the preserved columns with
+        a running index while the NULL fills consume none of it. A projection
+        that groups the preserved columns first -- which most shapes here do --
+        keeps that index correct even if the arms are mis-sequenced, so only an
+        interleaved projection can catch it.
+        """
+        # Arrange
+        _make_table(
+            conn,
+            "peaks",
+            [
+                ("chr1", 100, 200, "p1", 0, "+"),
+                ("chr1", 5000, 6000, "p2", 0, "+"),
+                (None, 100, 200, "pnull", 0, "+"),
+            ],
+        )
+        _make_table(conn, "genes", [("chr1", 150, 250, "g1", 0, "+")])
+        query = (
+            "SELECT a.chrom, b.start AS bs, a.start, b.chrom AS bc, a.name "
+            "FROM peaks a LEFT JOIN genes b ON a.interval INTERSECTS b.interval"
+        )
+
+        # Act & assert
+        sql = _assert_agrees_with_naive(conn, query)
+
+        # Assert
+        assert sql.count("SET VARIABLE __giql_iejoin_") == 2
+
+    def test_transform_to_parts_should_return_setup_and_select_separately(self):
+        """Test that the primitive hands back the two parts unjoined.
+
+        Given:
+            A decomposed outer join and a transformer over its tables.
+        When:
+            transform_to_parts is called.
+        Then:
+            It should return the setup statements and the final SELECT as a
+            pair, so a rewrite composing on top never has to recover them by
+            splitting rendered SQL.
+
+        Splitting is what the pair exists to avoid: the separator appears inside
+        the script itself whenever an identifier contains it.
+        """
+        # Arrange
+        tables = Tables()
+        for name in ("peaks", "genes"):
+            tables.register(name, Table(name))
+        transformer = IntersectsDuckDBIEJoinTransformer(tables)
+        ast = parse_one(
+            "SELECT a.chrom, a.start FROM peaks a "
+            "LEFT JOIN genes b ON a.interval INTERSECTS b.interval",
+            dialect=GIQLDialect,
+        )
+
+        # Act
+        setup, select = transformer.transform_to_parts(ast)
+
+        # Assert
+        assert [s for s in setup.split(";\n") if not s.startswith("SET VARIABLE")] == []
+        assert select.startswith("SELECT ")
+        assert "SET VARIABLE" not in select
+
+    def test_transform_to_parts_should_not_mutate_its_query(self):
+        """Test that the primitive leaves the AST it is handed unchanged.
+
+        Given:
+            A parsed decomposed outer join.
+        When:
+            transform_to_parts is called on it.
+        Then:
+            The AST should be unchanged.
+
+        The registry entry point passes the live statement AST that pass 3 goes
+        on transforming, and the naive-predicate fallback rewrites that same node
+        in place when this path declines. Every composed rewrite here now
+        transpiles a copy rather than the caller's node, which is what lets this
+        hold without each of them defending it.
+        """
+        # Arrange
+        tables = Tables()
+        for name in ("peaks", "genes"):
+            tables.register(name, Table(name))
+        transformer = IntersectsDuckDBIEJoinTransformer(tables)
+        ast = parse_one(
+            "SELECT a.chrom, a.start FROM peaks a "
+            "LEFT JOIN genes b ON a.interval INTERSECTS b.interval",
+            dialect=GIQLDialect,
+        )
+        before = repr(ast)
+
+        # Act
+        transformer.transform_to_parts(ast)
+
+        # Assert
+        assert repr(ast) == before
+
+    @pytest.mark.parametrize(
+        "side, raises",
+        [("", True), ("LEFT ", False), ("RIGHT ", False)],
+        ids=["inner", "left", "right"],
+    )
+    def test_transpile_should_apply_its_documented_projection_policy_per_join_side(
+        self, side, raises
+    ):
+        """Test that an unqualified projection raises on INNER and declines on outer.
+
+        Given:
+            One unqualified projection, spelled as an INNER, a LEFT and a RIGHT
+            join.
+        When:
+            Each is transpiled with ``dialect='duckdb'``.
+        Then:
+            INNER should raise ``ValueError`` and the outer forms should decline
+            to the naive plan, returning its rows.
+
+        The two policies are documented separately and reached by different
+        code: the INNER family raises from projection resolution, while the
+        outer-join matcher returns None for a column it cannot attribute to a
+        side. Before LEFT and RIGHT joined this dialect they were not IEJoin
+        shapes at all, so the divergence was invisible. Pinning both sides
+        against one projection is what stops the documented contract and the
+        behaviour drifting apart again.
+        """
+        # Arrange
+        query = (
+            f"SELECT chrom, b.start FROM peaks a {side}JOIN genes b "
+            "ON a.interval INTERSECTS b.interval"
+        )
+
+        # Act & assert -- transpile-level, because the naive plan for this
+        # projection is itself ambiguous SQL the engine rejects at bind time.
+        # What the contract governs is which of the two policies applies, and
+        # that is decided before any of it reaches DuckDB.
+        if raises:
+            with pytest.raises(ValueError, match="qualified projections"):
+                transpile(query, tables=["peaks", "genes"], dialect="duckdb")
+            return
+        sql = transpile(query, tables=["peaks", "genes"], dialect="duckdb")
+
+        # Assert
+        assert "SET VARIABLE __giql_iejoin_" not in sql
+        assert sql == transpile(query, tables=["peaks", "genes"])
+
+    def test_transpile_should_qualify_null_chrom_branch_with_the_rendered_alias(self):
+        """Test that the NULL-chromosome branch qualifies with its own FROM alias.
+
+        Given:
+            A LEFT join whose preserved side carries a quoted mixed-case alias.
+        When:
+            The query is transpiled with ``dialect='duckdb'``.
+        Then:
+            The NULL-chromosome branch's WHERE qualifier should be byte-equal to
+            the alias its own FROM clause renders.
+
+        The branch used to render ``FROM peaks AS "A" ... WHERE a.chrom``, mixing
+        the original case with the case-folded alias. That bound to one relation
+        only because DuckDB folds identifiers, quoted ones included -- a property
+        the adjacent identifier helper's docstring actively denies. Correct by
+        accident is worth pinning as correct by construction.
+        """
+        # Arrange
+        query = (
+            'SELECT "A".chrom, b.start FROM peaks "A" '
+            'LEFT JOIN genes b ON "A".interval INTERSECTS b.interval'
+        )
+
+        # Act
+        sql = transpile(query, tables=["peaks", "genes"], dialect="duckdb")
+        branch = sql[sql.rindex("UNION ALL") :]
+
+        # Assert
+        rendered_from = re.search(r"FROM peaks AS (\S+) WHERE", branch)
+        rendered_where = re.search(r"WHERE (\S+)\.chrom IS NULL", branch)
+        assert rendered_from is not None and rendered_where is not None
+        assert rendered_where.group(1) == rendered_from.group(1)
+
+    def test_query_should_agree_with_naive_when_preserved_alias_is_mixed_case(
+        self, conn
+    ):
+        """Test that a mixed-case preserved alias returns the naive plan's rows.
+
+        Given:
+            A LEFT join whose preserved side carries a quoted mixed-case alias,
+            over data including rows whose chromosome is NULL -- the rows only
+            the third branch surfaces.
+        When:
+            The query is transpiled with ``dialect='duckdb'`` and executed.
+        Then:
+            It should return the naive plan's rows, column names and column
+            types.
+        """
+        # Arrange
+        _make_table(
+            conn,
+            "peaks",
+            [
+                ("chr1", 100, 200, "p1", 0, "+"),
+                ("chr1", 5000, 6000, "p2", 0, "+"),
+                (None, 100, 200, "pnull", 0, "+"),
+            ],
+        )
+        _make_table(conn, "genes", [("chr1", 150, 250, "g1", 0, "+")])
+        query = (
+            'SELECT "A".chrom, "A".start, b.start AS bs FROM peaks "A" '
+            'LEFT JOIN genes b ON "A".interval INTERSECTS b.interval'
+        )
+
+        # Act & assert
+        sql = _assert_agrees_with_naive(conn, query)
+
+        # Assert
+        assert sql.count("SET VARIABLE __giql_iejoin_") == 2
+
+    @pytest.mark.parametrize(
+        "shape",
+        [
+            pytest.param("three_tables", id="three_tables"),
+            pytest.param("table_function_operand", id="table_function_operand"),
+        ],
+    )
+    @pytest.mark.parametrize("side", ["", "LEFT "], ids=["inner", "left"])
+    def test_transpile_should_decline_malformed_shape_on_every_join_side(
+        self, conn, shape, side
+    ):
+        """Test that a malformed two-table shape declines whatever the join side.
+
+        Given:
+            A shape the shared operand resolver rejects -- a third joined table,
+            or a table-function operand that parses with an empty name --
+            spelled once as an INNER join and once as a LEFT join.
+        When:
+            Each is transpiled with ``dialect='duckdb'`` and executed.
+        Then:
+            Both should decline to the naive plan and return its rows.
+
+        The INNER path and the outer-join matchers resolve their operands
+        through one shared helper, so a gap in it would open on both at once.
+        Pinning both sides is what makes that shared gate observable: before the
+        merge each path carried its own copy, and a fix to one left the other.
+        """
+        # Arrange
+        _make_table(
+            conn,
+            "peaks",
+            [("chr1", 100, 200, "p1", 0, "+"), ("chr1", 5000, 6000, "p2", 0, "+")],
+        )
+        _make_table(conn, "genes", [("chr1", 150, 250, "g1", 0, "+")])
+        _make_table(conn, "exons", [("chr1", 150, 250, "e1", 0, "+")])
+        queries = {
+            "three_tables": (
+                f"SELECT a.chrom, b.start FROM peaks a {side}JOIN genes b "
+                "ON a.interval INTERSECTS b.interval JOIN exons c ON b.chrom = c.chrom"
+            ),
+            "table_function_operand": (
+                f"SELECT a.chrom, b.start FROM peaks a {side}JOIN DISJOIN(genes) b "
+                "ON a.interval INTERSECTS b.interval"
+            ),
+        }
+
+        # Act & assert
+        sql = _assert_agrees_with_naive(conn, queries[shape])
+
+        # Assert
+        assert "SET VARIABLE __giql_iejoin_" not in sql
+
+    @pytest.mark.parametrize(
+        ("label", "query"),
+        [
+            (
+                "duplicate_preserved_names",
+                "SELECT a.chrom AS c, a.start AS c, b.start AS bs FROM peaks a "
+                "LEFT JOIN genes b ON a.interval INTERSECTS b.interval",
+            ),
+            (
+                "where_alongside_on_intersects",
+                "SELECT a.chrom, b.start AS bs FROM peaks a "
+                "LEFT JOIN genes b ON a.interval INTERSECTS b.interval "
+                "WHERE a.start > 1",
+            ),
+            (
+                "qualified_star",
+                "SELECT a.*, b.start AS bs FROM peaks a "
+                "LEFT JOIN genes b ON a.interval INTERSECTS b.interval",
+            ),
+            (
+                "self_join",
+                "SELECT a.chrom, b.start AS bs FROM peaks a "
+                "LEFT JOIN peaks b ON a.interval INTERSECTS b.interval",
+            ),
+            (
+                "on_residual",
+                "SELECT a.chrom, b.start AS bs FROM peaks a "
+                "LEFT JOIN genes b ON a.interval INTERSECTS b.interval "
+                "AND a.start > 1",
+            ),
+            (
+                "repeated_intersects_in_on",
+                "SELECT a.chrom, b.start AS bs FROM peaks a "
+                "LEFT JOIN genes b ON a.interval INTERSECTS b.interval "
+                "AND a.interval INTERSECTS b.interval",
+            ),
+            (
+                "subquery_from_operand",
+                "SELECT a.chrom, b.start AS bs FROM (SELECT * FROM peaks) a "
+                "LEFT JOIN genes b ON a.interval INTERSECTS b.interval",
+            ),
+            (
+                "subquery_joined_operand",
+                "SELECT a.chrom, b.start AS bs FROM peaks a "
+                "LEFT JOIN (SELECT * FROM genes) b "
+                "ON a.interval INTERSECTS b.interval",
+            ),
+        ],
+    )
+    def test_transpile_should_decline_outer_join_for_unsupported_shape(
+        self, conn, label, query
+    ):
+        """Test that each unsupported outer-join shape declines as one unit.
+
+        Given:
+            An outer-join INTERSECTS in a shape the decomposition does not
+            support -- colliding preserved names, a WHERE alongside the ON
+            INTERSECTS, a qualified star, a self-join, an ON residual, a
+            repeated INTERSECTS, or a subquery in place of a base table on
+            either side.
+        When:
+            The query is transpiled with ``dialect='duckdb'`` and executed.
+        Then:
+            It should emit no session variable at all and return the naive
+            plan's rows, never a half-emitted script or a raised error.
+        """
+        # Arrange
+        _make_table(
+            conn,
+            "peaks",
+            [("chr1", 100, 200, "p1", 0, "+"), ("chr1", 5000, 6000, "p2", 0, "+")],
+        )
+        _make_table(conn, "genes", [("chr1", 150, 250, "g1", 0, "+")])
+
+        # Act & assert
+        sql = _assert_agrees_with_naive(conn, query)
+
+        # Assert
+        assert "SET VARIABLE __giql_iejoin_" not in sql
+
+    @pytest.mark.parametrize("kind", ["LEFT SEMI", "LEFT ANTI"])
+    def test_transpile_should_not_decompose_left_semi_or_anti_join(self, kind):
+        """Test that LEFT SEMI / LEFT ANTI joins are never decomposed.
+
+        Given:
+            A ``LEFT SEMI`` or ``LEFT ANTI`` join carrying a column-to-column
+            INTERSECTS. sqlglot parses these with ``side='LEFT'``, so they clear
+            the matcher's side gate and reach its ``kind`` gate -- but the join
+            preserves no unmatched rows.
+        When:
+            The query is transpiled with ``dialect='duckdb'``.
+        Then:
+            It should not emit the two-half decomposition, which would answer a
+            semi or anti join as an outer join.
+        """
+        # Act
+        sql = transpile(
+            f"SELECT a.chrom, a.start FROM peaks a {kind} JOIN genes b "
+            "ON a.interval INTERSECTS b.interval",
+            tables=["peaks", "genes"],
+            dialect="duckdb",
+        )
+
+        # Assert
+        # The decomposition is the only shape emitting a second SET VARIABLE, so
+        # this fails if the kind gate stops declining -- unlike a bare
+        # "__giql_unmatched" check, which the single-variable path can never
+        # produce whether the gate holds or not.
+        assert sql.count("SET VARIABLE __giql_iejoin_") <= 1
+        assert "__giql_unmatched" not in sql
+
+    @pytest.mark.parametrize("kind", ["SEMI", "ANTI"])
+    def test_transpile_should_not_decompose_unsided_semi_or_anti_join(self, kind):
+        """Test that bare SEMI / ANTI joins are never decomposed.
+
+        Given:
+            A bare ``SEMI`` or ``ANTI`` join carrying a column-to-column
+            INTERSECTS. sqlglot parses these with ``side=None``, so they are
+            declined by the matcher's side gate rather than its kind gate, and
+            they keep the single-variable SEMI / ANTI IEJoin path.
+        When:
+            The query is transpiled with ``dialect='duckdb'``.
+        Then:
+            It should emit the single-variable path and never the unmatched
+            half.
+        """
+        # Act
+        sql = transpile(
+            f"SELECT a.chrom, a.start FROM peaks a {kind} JOIN genes b "
+            "ON a.interval INTERSECTS b.interval",
+            tables=["peaks", "genes"],
+            dialect="duckdb",
+        )
+
+        # Assert
+        assert sql.count("SET VARIABLE __giql_iejoin_") == 1
+        assert "__giql_unmatched" not in sql
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "SELECT a.chrom, b.start AS bs FROM peaks a "
+            "LEFT OUTER JOIN genes b ON a.interval INTERSECTS b.interval",
+            "SELECT b.chrom, a.start AS asx FROM peaks a "
+            "RIGHT OUTER JOIN genes b ON a.interval INTERSECTS b.interval",
+            "SELECT (a.chrom), b.start AS bs FROM peaks a "
+            "LEFT JOIN genes b ON a.interval INTERSECTS b.interval",
+            "SELECT b.start AS bs, a.chrom, b.chrom AS bc FROM peaks a "
+            "LEFT JOIN genes b ON a.interval INTERSECTS b.interval",
+        ],
+        ids=["left_outer", "right_outer", "parenthesized", "interleaved_sides"],
+    )
+    def test_query_should_decompose_supported_outer_join_spellings(self, conn, query):
+        """Test that supported outer-join spellings decompose and stay correct.
+
+        Given:
+            An outer-join INTERSECTS written as explicit ``LEFT OUTER`` /
+            ``RIGHT OUTER``, with a parenthesized projection, or with the two
+            sides interleaved in the SELECT list.
+        When:
+            The query is transpiled with ``dialect='duckdb'`` and executed.
+        Then:
+            It should take the two-half decomposition and match the naive
+            plan's rows and column types.
+        """
+        # Arrange
+        _make_interval_tables(
+            conn,
+            [("chr1", 100, 200), ("chr1", 5000, 6000), ("chrX", 10, 20)],
+            [("chr1", 150, 250), ("chrY", 1, 2)],
+        )
+
+        # Act & assert
+        sql = _assert_agrees_with_naive(conn, query)
+
+        # Assert
+        assert sql.count("SET VARIABLE __giql_iejoin_") == 2
+
+    def test_query_should_use_configured_chrom_column_for_other_side_projection(
+        self, conn
+    ):
+        """Test that the unmatched half honours a custom chromosome column.
+
+        Given:
+            Tables registered with non-default chrom/start/end column names, and
+            a LEFT-join projecting only other-side columns -- the one path where
+            the builder must synthesise a preserved-side chromosome reference.
+        When:
+            The query is transpiled with ``dialect='duckdb'`` and executed.
+        Then:
+            It should resolve that column from the preserved table's config and
+            match the naive plan, rather than assuming the default name.
+        """
+        # Arrange
+        for table in ("cpeaks", "cgenes"):
+            conn.execute(
+                f"CREATE TABLE {table} (contig VARCHAR, beg INTEGER, stop INTEGER)"
+            )
+        conn.executemany(
+            "INSERT INTO cpeaks VALUES (?, ?, ?)",
+            [("chr1", 100, 200), ("chr1", 5000, 6000)],
+        )
+        conn.executemany("INSERT INTO cgenes VALUES (?, ?, ?)", [("chr1", 150, 250)])
+        tables = [
+            Table("cpeaks", chrom_col="contig", start_col="beg", end_col="stop"),
+            Table("cgenes", chrom_col="contig", start_col="beg", end_col="stop"),
+        ]
+        query = (
+            "SELECT b.contig AS bc, b.beg AS bb FROM cpeaks a "
+            "LEFT JOIN cgenes b ON a.interval INTERSECTS b.interval"
+        )
+
+        # Act
+        dialect_sql = transpile(query, tables=tables, dialect="duckdb")
+        naive_sql = transpile(query, tables=tables, dialect=None)
+
+        # Assert
+        assert dialect_sql.count("SET VARIABLE __giql_iejoin_") == 2
+        assert _rows_and_schema(conn, dialect_sql) == _rows_and_schema(conn, naive_sql)
+
+    def test_query_should_plan_both_decomposition_halves_through_ie_join(self, conn):
+        """Test that the matched and unmatched halves both reach IE_JOIN.
+
+        Given:
+            A LEFT-join INTERSECTS over enough rows for the planner to choose a
+            range join, with a share of left rows unmatched.
+        When:
+            Each emitted session variable's dynamic SQL is planned separately.
+        Then:
+            Both halves should plan through ``IE_JOIN`` and neither through the
+            quadratic ``BLOCKWISE_NL_JOIN``.
+
+        Planning only the first variable -- the helper's old behaviour -- would
+        report nothing at all about the unmatched half.
+        """
+        # Arrange
+        conn.execute("DROP TABLE IF EXISTS peaks")
+        conn.execute("""
+            CREATE TABLE peaks AS
+            SELECT 'chr' || ((i % 4) + 1) AS chrom,
+                   ((i * 37) % 100000)::INTEGER AS "start",
+                   (((i * 37) % 100000) + 200)::INTEGER AS "end"
+            FROM range(20000) t(i)
+        """)
+        conn.execute("DROP TABLE IF EXISTS genes")
+        conn.execute("""
+            CREATE TABLE genes AS
+            SELECT 'chr' || ((i % 4) + 1) AS chrom,
+                   ((i * 41 + 17) % 100000)::INTEGER AS "start",
+                   (((i * 41 + 17) % 100000) + 200)::INTEGER AS "end"
+            FROM range(20000) t(i)
+            WHERE (i % 4) + 1 <= 3
+        """)
+        sql = transpile(
+            "SELECT a.chrom, a.start, b.start AS bs FROM peaks a "
+            "LEFT JOIN genes b ON a.interval INTERSECTS b.interval",
+            tables=["peaks", "genes"],
+            dialect="duckdb",
+        )
+
+        # Act
+        matched_plan = _explain_dynamic_sql(conn, sql, half=0)
+        unmatched_plan = _explain_dynamic_sql(conn, sql, half=1)
+
+        # Assert
+        assert len(_dynamic_sql_variables(sql)) == 2
+        for plan in (matched_plan, unmatched_plan):
+            assert "IE_JOIN" in plan
+            assert "BLOCKWISE_NL_JOIN" not in plan
+
+    def test_query_should_bound_session_variables_across_repeated_execution(self, conn):
+        """Test that repeating one query does not grow the session's variable set.
+
+        Given:
+            A decomposed outer join transpiled and executed 25 times on one
+            connection.
+        When:
+            DuckDB's ``duckdb_variables()`` catalog is counted.
+        Then:
+            It should hold exactly the two variables the query declares, not one
+            pair per execution.
+
+        This is the accumulation bound itself rather than a proxy for it: with a
+        fresh name per call the same loop leaves 50 entries, each holding the
+        full generated per-chromosome SQL, reclaimable only by dropping the
+        connection.
+        """
+        # Arrange
+        _make_interval_tables(
+            conn,
+            [("chr1", 100, 200), ("chr1", 5000, 6000), ("chrX", 10, 20)],
+            [("chr1", 150, 250)],
+        )
+        query = (
+            "SELECT a.chrom, a.start, b.start AS bs FROM peaks a "
+            "LEFT JOIN genes b ON a.interval INTERSECTS b.interval"
+        )
+
+        # Act
+        for _ in range(25):
+            conn.execute(
+                transpile(query, tables=["peaks", "genes"], dialect="duckdb")
+            ).fetchall()
+
+        # Assert
+        declared = conn.execute(
+            "SELECT count(*) FROM duckdb_variables() WHERE name LIKE '__giql_iejoin_%'"
+        ).fetchone()[0]
+        assert declared == 2
+
+    def test_query_should_isolate_session_variables_across_interleaved_queries(
+        self, conn
+    ):
+        """Test that two decomposed queries do not rebind each other's variables.
+
+        Given:
+            Two different decomposed outer joins transpiled against the same
+            connection, each declaring its own pair of session variables.
+        When:
+            Their setup statements are interleaved before either final SELECT
+            runs, and the first query is then re-executed.
+        Then:
+            Each should return its own rows unchanged.
+
+        Session variables are global DuckDB state, and this rewrite now declares
+        two per query, so a token collision would silently cross-wire results.
+        """
+        # Arrange
+        _make_interval_tables(
+            conn,
+            [("chr1", 100, 200), ("chr1", 5000, 6000), ("chrX", 10, 20)],
+            [("chr1", 150, 250)],
+        )
+        left_sql = transpile(
+            "SELECT a.chrom, a.start, b.start AS bs FROM peaks a "
+            "LEFT JOIN genes b ON a.interval INTERSECTS b.interval",
+            tables=["peaks", "genes"],
+            dialect="duckdb",
+        )
+        right_sql = transpile(
+            "SELECT b.chrom, b.start, a.start AS asx FROM peaks a "
+            "RIGHT JOIN genes b ON a.interval INTERSECTS b.interval",
+            tables=["peaks", "genes"],
+            dialect="duckdb",
+        )
+        left_statements = [s for s in left_sql.split(";\n") if s.strip()]
+        right_statements = [s for s in right_sql.split(";\n") if s.strip()]
+        expected_left = sorted(conn.execute(left_sql).fetchall(), key=_null_key)
+        expected_right = sorted(conn.execute(right_sql).fetchall(), key=_null_key)
+
+        # Act -- interleave every setup statement before either final SELECT.
+        for left_statement, right_statement in zip(
+            left_statements[:-1], right_statements[:-1]
+        ):
+            conn.execute(left_statement)
+            conn.execute(right_statement)
+        actual_right = sorted(
+            conn.execute(right_statements[-1]).fetchall(), key=_null_key
+        )
+        actual_left = sorted(conn.execute(left_statements[-1]).fetchall(), key=_null_key)
+
+        # Assert
+        assert actual_left == expected_left
+        assert actual_right == expected_right
+
+    @pytest.mark.parametrize(
+        ("peaks", "genes"),
+        [
+            ([("chr1", 100, 200)], []),
+            ([], [("chr1", 150, 250)]),
+            ([], []),
+            ([("chr1", 100, 200)], [("chrY", 1, 2)]),
+        ],
+        ids=["empty_right", "empty_left", "both_empty", "disjoint_chromosomes"],
+    )
+    def test_query_should_preserve_column_types_when_a_half_is_empty(
+        self, conn, peaks, genes
+    ):
+        """Test that NULL fills keep their declared types when a half is empty.
+
+        Given:
+            An outer-join INTERSECTS where one or both tables are empty, or the
+            two share no chromosome, so a half contributes no rows.
+        When:
+            The query is transpiled with ``dialect='duckdb'`` and executed.
+        Then:
+            It should return the naive plan's rows and its column types.
+
+        The NULL fills take their type from the first UNION ALL branch, so an
+        empty matched half is where a type could silently degrade.
+        """
+        # Arrange
+        _make_interval_tables(conn, peaks, genes)
+        query = (
+            'SELECT a.chrom, a.start, a."end", b.chrom AS bc, b.start AS bs '
+            "FROM peaks a LEFT JOIN genes b ON a.interval INTERSECTS b.interval"
+        )
+
+        # Act & assert
+        sql = _assert_agrees_with_naive(conn, query)
+
+        # Assert
+        assert sql.count("SET VARIABLE __giql_iejoin_") == 2
+
+    def test_query_should_stay_subquadratic_when_left_join_at_scale(self, conn):
+        """Test that the decomposition still scales at 2^18 rows per side.
+
+        Given:
+            262,144 intervals per side spread over 24 chromosomes.
+        When:
+            The LEFT-join INTERSECTS query is transpiled with
+            ``dialect='duckdb'`` and executed.
+        Then:
+            It should return every left row at least once and finish well
+            inside the bound below.
+
+        A plan assertion cannot cover this: DuckDB reports ``IE_JOIN`` for the
+        per-chromosome outer join this rewrite replaced, yet that plan needs
+        minutes at this size while the decomposition needs about a second. Only
+        executing at scale separates them, so the wall-clock bound is the
+        assertion — set ~50x above the expected runtime, far below the
+        quadratic alternative, so it discriminates without being flaky.
+        """
+        # Arrange -- genes deliberately skip four of the 24 chromosomes so a
+        # sixth of the peaks have no overlap at all. Without that the matched
+        # half alone satisfies every assertion below and the unmatched half
+        # could be deleted wholesale without failing this test.
+        conn.execute("DROP TABLE IF EXISTS peaks")
+        conn.execute("""
+            CREATE TABLE peaks AS
+            SELECT 'chr' || ((i % 24) + 1) AS chrom,
+                   ((i * 37) % 1000000)::INTEGER AS "start",
+                   (((i * 37) % 1000000) + 350)::INTEGER AS "end"
+            FROM range(262144) t(i)
+        """)
+        conn.execute("DROP TABLE IF EXISTS genes")
+        conn.execute("""
+            CREATE TABLE genes AS
+            SELECT 'chr' || ((i % 24) + 1) AS chrom,
+                   ((i * 37 + 173) % 1000000)::INTEGER AS "start",
+                   (((i * 37 + 173) % 1000000) + 350)::INTEGER AS "end"
+            FROM range(262144) t(i)
+            WHERE (i % 24) + 1 <= 20
+        """)
+        sql = transpile(
+            'SELECT a.chrom, a.start, a."end", b.start AS b_start '
+            "FROM peaks a LEFT JOIN genes b ON a.interval INTERSECTS b.interval",
+            tables=["peaks", "genes"],
+            dialect="duckdb",
+        )
+
+        # Act
+        started = time.perf_counter()
+        rows = conn.execute(sql).fetchall()
+        elapsed = time.perf_counter() - started
+
+        # Assert -- every left row survives exactly as a distinct key, and the
+        # unmatched half genuinely contributes. A bare ``len(rows) >= 262144``
+        # is satisfied by the matched half several times over and proves
+        # neither property.
+        assert len({row[:3] for row in rows}) == 262144
+        assert sum(1 for row in rows if row[3] is None) > 0
+        assert elapsed < 60
+
+    def test_query_should_not_regress_against_naive_when_preserved_side_has_many_contigs(
+        self, conn
+    ):
+        """Test that left-only contigs do not cost the shared contigs their fast plan.
+
+        Given:
+            200,000 intervals per side over 24 shared chromosomes, plus 5,000
+            scaffolds carried only by the preserved side.
+        When:
+            The LEFT-join INTERSECTS query is transpiled both with
+            ``dialect='duckdb'`` and without, and both are executed.
+        Then:
+            The unmatched half should partition on the shared chromosomes, and
+            the decomposition should stay within a small multiple of the naive
+            plan's runtime.
+
+        Partitioning the unmatched half on the preserved side's distinct
+        chromosomes makes its branch count track a number the join does not
+        depend on. The cost is indirect and easy to miss: those extra branches
+        push the partition over the cardinality ceiling, so the half abandons
+        ``IE_JOIN`` for *every* chromosome -- including the 24 that carry all
+        the rows. Measured here: 8.3s partitioning on preserved-distinct, 5.0s
+        on the shared INTERSECT, against 2.5s naive (#95). The bound is a ratio
+        rather than a wall clock so it calibrates to the machine.
+        """
+        # Arrange
+        conn.execute("DROP TABLE IF EXISTS peaks")
+        conn.execute("""
+            CREATE TABLE peaks AS
+            SELECT 'chr' || ((i % 24) + 1) AS chrom,
+                   ((i * 37) % 1000000)::INTEGER AS "start",
+                   (((i * 37) % 1000000) + 350)::INTEGER AS "end"
+            FROM range(200000) t(i)
+        """)
+        conn.execute("""
+            INSERT INTO peaks
+            SELECT 'scaffold_' || (i / 3)::INTEGER,
+                   (i % 3) * 100,
+                   (i % 3) * 100 + 50
+            FROM range(15000) t(i)
+        """)
+        conn.execute("DROP TABLE IF EXISTS genes")
+        conn.execute("""
+            CREATE TABLE genes AS
+            SELECT 'chr' || ((i % 24) + 1) AS chrom,
+                   ((i * 37 + 173) % 1000000)::INTEGER AS "start",
+                   (((i * 37 + 173) % 1000000) + 350)::INTEGER AS "end"
+            FROM range(200000) t(i)
+        """)
+        query = (
+            'SELECT a.chrom, a.start, a."end", b.start AS b_start '
+            "FROM peaks a LEFT JOIN genes b ON a.interval INTERSECTS b.interval"
+        )
+
+        # Act
+        dialect_sql = transpile(query, tables=["peaks", "genes"], dialect="duckdb")
+        dialect_elapsed, dialect_rows = _timed_rows(conn, dialect_sql)
+        naive_elapsed, naive_rows = _timed_rows(
+            conn, transpile(query, tables=["peaks", "genes"])
+        )
+
+        # Assert -- the structural lock pins the mechanism even if the timing
+        # bound is ever loosened; the unmatched half is the second SET VARIABLE.
+        unmatched_setup = dialect_sql.split(";\n")[1]
+        assert "INTERSECT" in unmatched_setup
+        assert 'a."chrom" NOT IN (SELECT DISTINCT "chrom" FROM genes' in unmatched_setup
+        assert sorted(dialect_rows) == sorted(naive_rows)
+        assert dialect_elapsed < naive_elapsed * 2.5
+
+    def test_query_should_not_regress_against_naive_when_partition_exceeds_ceiling(
+        self, conn
+    ):
+        """Test that a partition above the ceiling degrades to the plain predicate.
+
+        Given:
+            200,000 intervals per side spread over 400 shared chromosomes --
+            above ``MAX_PER_CHROM_PARTITIONS``.
+        When:
+            The LEFT-join INTERSECTS query is transpiled both with
+            ``dialect='duckdb'`` and without, and both are executed.
+        Then:
+            The decomposition should return the naive plan's rows and stay
+            within a small multiple of its runtime.
+
+        The partition's cardinality is a data property no transpile-time check
+        can see, so the choice is made at execution time by a ``CASE`` over the
+        partition's own row count. Measured here at 400 shared contigs: 3.35s
+        before the guard (18.6x naive), 0.40s after (2.2x).
+        """
+        # Arrange
+        for table, offset in (("peaks", 0), ("genes", 173)):
+            conn.execute(f"DROP TABLE IF EXISTS {table}")
+            conn.execute(f"""
+                CREATE TABLE {table} AS
+                SELECT 'chr' || (i % 400) AS chrom,
+                       ((i * 37 + {offset}) % 500000)::INTEGER AS "start",
+                       (((i * 37 + {offset}) % 500000) + 300)::INTEGER AS "end"
+                FROM range(200000) t(i)
+            """)
+        query = (
+            'SELECT a.chrom, a.start, a."end", b.start AS b_start '
+            "FROM peaks a LEFT JOIN genes b ON a.interval INTERSECTS b.interval"
+        )
+
+        # Act
+        dialect_sql = transpile(query, tables=["peaks", "genes"], dialect="duckdb")
+        dialect_elapsed, dialect_rows = _timed_rows(conn, dialect_sql)
+        naive_elapsed, naive_rows = _timed_rows(
+            conn, transpile(query, tables=["peaks", "genes"])
+        )
+
+        # Assert
+        assert f"> {MAX_PER_CHROM_PARTITIONS}" in dialect_sql
+        assert sorted(dialect_rows) == sorted(naive_rows)
+        assert dialect_elapsed < naive_elapsed * 8
 
 
 class TestTranspileDuckDBIEJoinExecution:

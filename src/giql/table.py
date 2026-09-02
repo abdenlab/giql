@@ -13,13 +13,21 @@ from giql.constants import DEFAULT_START_COL
 from giql.constants import DEFAULT_STRAND_COL
 
 
-@dataclass
+@dataclass(frozen=True)
 class Table:
     """Genomic table configuration for transpilation.
 
     This class defines how genomic intervals are stored in a database table,
     mapping a pseudo-column name (genomic_col) to the physical columns that
     store chromosome, start, end, and optionally strand information.
+
+    Instances are immutable. ``coordinate_system`` and ``interval_type`` select
+    the coordinate translation the emitted SQL performs, so a value outside the
+    documented pair would produce a predicate matching no coordinate system at
+    all. Validation therefore has to hold for the object's whole lifetime, not
+    only at construction -- freezing is what makes ``__post_init__`` the single
+    way in. Build a variant with :func:`dataclasses.replace` rather than by
+    assignment. Immutability also makes the value hashable and value-equal.
 
     Parameters
     ----------

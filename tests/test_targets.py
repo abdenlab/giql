@@ -297,6 +297,35 @@ def test_resolve_target_with_datafusion_returns_datafusion():
 
 
 @pytest.mark.parametrize(
+    "target",
+    [GenericTarget(), DuckDBTarget(), DataFusionTarget()],
+    ids=["generic", "duckdb", "datafusion"],
+)
+def test_resolve_target_with_target_instance_returns_it_unchanged(target):
+    """Test resolution of a Target instance passed in place of a name.
+
+    Given:
+        A Target instance rather than a dialect name.
+    When:
+        resolve_target is called.
+    Then:
+        It should return that same instance.
+
+    Registering a one-off Target under a name to make it selectable mutates the
+    process-global registry, and that registration outlives the call. Accepting
+    the object removes the global side effect from the one-off case. Note the
+    resulting asymmetry, which the unsupported-name test below pins from the
+    other side: GenericTarget is accepted as an instance but has no selectable
+    name, because None is the one public spelling for it.
+    """
+    # Act
+    resolved = resolve_target(target)
+
+    # Assert
+    assert resolved is target
+
+
+@pytest.mark.parametrize(
     "dialect",
     [
         "postgres",  # plain unknown engine

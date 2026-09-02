@@ -4,12 +4,16 @@ These tests validate that GIQL's INTERSECTS operator produces identical
 results to bedtools intersect command.
 """
 
+import pytest
+
 from giql import transpile
 
 from .utils.bedtools_wrapper import intersect
 from .utils.comparison import compare_results
 from .utils.data_models import GenomicInterval
 from .utils.duckdb_loader import load_intervals
+
+pytestmark = pytest.mark.integration
 
 
 def test_intersect_basic_overlap(duckdb_connection):
@@ -325,3 +329,185 @@ def test_intersect_all_set_predicate(giql_query):
 
     names = {row[3] for row in result}
     assert names == {"large"}, f"Expected only large, got {names}"
+
+
+def test_intersect_left_outer_join_duckdb_dialect(duckdb_connection):
+    """
+    GIVEN interval sets where one A interval has no overlap on a shared
+        chromosome and another sits on a chromosome absent from B
+    WHEN a LEFT JOIN INTERSECTS query is transpiled with dialect="duckdb",
+        taking the INNER-plus-unmatched decomposition (#95)
+    THEN results match bedtools intersect -loj output exactly
+
+    The dialect assertion matters as much as the comparison: this shape used to
+    decline to the naive-predicate plan, and the decomposition is only exercised
+    when the fast path actually fires.
+    """
+    intervals_a = [
+        GenomicInterval("chr1", 100, 200, "a1", 100, "+"),
+        GenomicInterval("chr1", 150, 250, "a2", 200, "+"),
+        GenomicInterval("chr1", 5000, 6000, "a_lonely", 300, "-"),
+        GenomicInterval("chrX", 10, 20, "a_other_chrom", 400, "+"),
+    ]
+    intervals_b = [
+        GenomicInterval("chr1", 180, 220, "b1", 100, "+"),
+        GenomicInterval("chrY", 1, 5, "b_other_chrom", 200, "-"),
+    ]
+
+    load_intervals(
+        duckdb_connection,
+        "intervals_a",
+        [i.to_tuple() for i in intervals_a],
+    )
+    load_intervals(
+        duckdb_connection,
+        "intervals_b",
+        [i.to_tuple() for i in intervals_b],
+    )
+
+    bedtools_result = intersect(
+        [i.to_tuple() for i in intervals_a],
+        [i.to_tuple() for i in intervals_b],
+        loj=True,
+    )
+
+    sql = transpile(
+        """
+        SELECT
+            a.chrom, a.start, a.end, a.name, a.score, a.strand,
+            b.chrom AS b_chrom, b.start AS b_start, b.end AS b_end,
+            b.name AS b_name, b.score AS b_score, b.strand AS b_strand
+        FROM intervals_a a
+        LEFT JOIN intervals_b b ON a.interval INTERSECTS b.interval
+        """,
+        tables=["intervals_a", "intervals_b"],
+        dialect="duckdb",
+    )
+    assert sql.count("SET VARIABLE __giql_iejoin_") == 2
+    giql_result = duckdb_connection.execute(sql).fetchall()
+
+    comparison = compare_results(giql_result, bedtools_result)
+    assert comparison.match, comparison.failure_message()
+
+
+def test_intersect_right_outer_join_duckdb_dialect(duckdb_connection):
+    """
+    GIVEN interval sets where one B interval has no overlap on a shared
+        chromosome and another sits on a chromosome absent from A
+    WHEN a RIGHT JOIN INTERSECTS query is transpiled with dialect="duckdb",
+        taking the INNER-plus-unmatched decomposition (#95)
+    THEN results match bedtools intersect -loj with the inputs swapped
+
+    bedtools has no -roj, but a RIGHT JOIN is -loj with A and B exchanged, so
+    the oracle is expressible by swapping both the inputs and the projection
+    order. This is the end-to-end check on the RIGHT path, which rewrites the
+    AST to swap the FROM and joined tables so one LEFT-shaped code path serves
+    both orientations.
+    """
+    intervals_a = [
+        GenomicInterval("chr1", 180, 220, "a1", 100, "+"),
+        GenomicInterval("chrY", 1, 5, "a_other_chrom", 200, "-"),
+    ]
+    intervals_b = [
+        GenomicInterval("chr1", 100, 200, "b1", 100, "+"),
+        GenomicInterval("chr1", 150, 250, "b2", 200, "+"),
+        GenomicInterval("chr1", 5000, 6000, "b_lonely", 300, "-"),
+        GenomicInterval("chrX", 10, 20, "b_other_chrom", 400, "+"),
+    ]
+
+    load_intervals(
+        duckdb_connection,
+        "intervals_a",
+        [i.to_tuple() for i in intervals_a],
+    )
+    load_intervals(
+        duckdb_connection,
+        "intervals_b",
+        [i.to_tuple() for i in intervals_b],
+    )
+
+    bedtools_result = intersect(
+        [i.to_tuple() for i in intervals_b],
+        [i.to_tuple() for i in intervals_a],
+        loj=True,
+    )
+
+    sql = transpile(
+        """
+        SELECT
+            b.chrom, b.start, b.end, b.name, b.score, b.strand,
+            a.chrom AS a_chrom, a.start AS a_start, a.end AS a_end,
+            a.name AS a_name, a.score AS a_score, a.strand AS a_strand
+        FROM intervals_a a
+        RIGHT JOIN intervals_b b ON a.interval INTERSECTS b.interval
+        """,
+        tables=["intervals_a", "intervals_b"],
+        dialect="duckdb",
+    )
+    assert sql.count("SET VARIABLE __giql_iejoin_") == 2
+    giql_result = duckdb_connection.execute(sql).fetchall()
+
+    comparison = compare_results(giql_result, bedtools_result)
+    assert comparison.match, comparison.failure_message()
+
+
+def test_intersect_left_outer_join_duckdb_dialect_with_duplicate_rows(
+    duckdb_connection,
+):
+    """
+    GIVEN byte-identical duplicate intervals on both sides, plus a duplicated
+        interval that matches nothing
+    WHEN a LEFT JOIN INTERSECTS query is transpiled with dialect="duckdb",
+        taking the INNER-plus-unmatched decomposition (#95)
+    THEN results match bedtools intersect -loj output exactly
+
+    The other oracle cases draw from a unique-interval strategy, so duplicate
+    rows never reach this lane -- and row multiplicity is the axis a UNION ALL
+    rewrite is most likely to break, in either direction: a duplicate collapsed
+    by the matched half, or a row emitted by both halves at once.
+    """
+    intervals_a = [
+        GenomicInterval("chr1", 100, 200, "a1", 100, "+"),
+        GenomicInterval("chr1", 100, 200, "a1", 100, "+"),
+        GenomicInterval("chr1", 5000, 6000, "a_lonely", 300, "-"),
+        GenomicInterval("chr1", 5000, 6000, "a_lonely", 300, "-"),
+    ]
+    intervals_b = [
+        GenomicInterval("chr1", 150, 250, "b1", 100, "+"),
+        GenomicInterval("chr1", 150, 250, "b1", 100, "+"),
+    ]
+
+    load_intervals(
+        duckdb_connection,
+        "intervals_a",
+        [i.to_tuple() for i in intervals_a],
+    )
+    load_intervals(
+        duckdb_connection,
+        "intervals_b",
+        [i.to_tuple() for i in intervals_b],
+    )
+
+    bedtools_result = intersect(
+        [i.to_tuple() for i in intervals_a],
+        [i.to_tuple() for i in intervals_b],
+        loj=True,
+    )
+
+    sql = transpile(
+        """
+        SELECT
+            a.chrom, a.start, a.end, a.name, a.score, a.strand,
+            b.chrom AS b_chrom, b.start AS b_start, b.end AS b_end,
+            b.name AS b_name, b.score AS b_score, b.strand AS b_strand
+        FROM intervals_a a
+        LEFT JOIN intervals_b b ON a.interval INTERSECTS b.interval
+        """,
+        tables=["intervals_a", "intervals_b"],
+        dialect="duckdb",
+    )
+    assert sql.count("SET VARIABLE __giql_iejoin_") == 2
+    giql_result = duckdb_connection.execute(sql).fetchall()
+
+    comparison = compare_results(giql_result, bedtools_result)
+    assert comparison.match, comparison.failure_message()

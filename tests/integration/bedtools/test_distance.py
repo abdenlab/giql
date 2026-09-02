@@ -10,6 +10,8 @@ import pytest
 from .utils.bedtools_wrapper import closest
 from .utils.data_models import GenomicInterval
 
+pytestmark = pytest.mark.integration
+
 
 def _oracle_distance(a: GenomicInterval, b: GenomicInterval) -> int:
     """Return the bedtools ``closest -d`` distance between a single A and B."""
