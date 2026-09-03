@@ -21,6 +21,14 @@ from hypothesis import given  # noqa: E402
 from hypothesis import settings  # noqa: E402
 from hypothesis import strategies as st  # noqa: E402
 
+#: Leaf columns the random scalar-expression strategy draws from — both sides'
+#: start and end, so a generated tree can mix join sides freely.
+_SCALAR_LEAVES = ("a.start", 'a."end"', "b.start", 'b."end"')
+
+#: The left side's leaves only, for trees projected under SEMI / ANTI joins
+#: whose output may not reference the right side.
+_LEFT_ONLY_LEAVES = ("a.start", 'a."end"')
+
 
 def _make_table(conn, name: str, rows: list[tuple]) -> None:
     conn.execute(f"""
@@ -50,6 +58,24 @@ def _python_overlap(peaks: list[tuple], genes: list[tuple]) -> list[tuple]:
             if pc == gc and pe > gs and ge > ps:
                 out.append((pc, ps, pe, gc, gs, ge))
     return sorted(out)
+
+
+def _python_clipped_overlap(peaks: list[tuple], genes: list[tuple]) -> list[tuple]:
+    """Reference ``bedtools intersect`` clipped span plus ``-wo`` overlap width.
+
+    For every overlapping half-open pair returns ``(chrom, clipped start,
+    clipped end, width)`` — what the projection ``GREATEST(a.start, b.start)``
+    / ``LEAST(a."end", b."end")`` / their difference computes. Sorted multiset,
+    for the same reason :func:`_python_overlap` returns one; composed on that
+    oracle, as :func:`_python_anti_overlap` composes on
+    :func:`_python_semi_overlap`, so the half-open overlap predicate is
+    defined in exactly one place and a correction cannot land in only one of
+    two reference implementations.
+    """
+    return sorted(
+        (pc, max(ps, gs), min(pe, ge), min(pe, ge) - max(ps, gs))
+        for pc, ps, pe, _gc, gs, ge in _python_overlap(peaks, genes)
+    )
 
 
 def _python_semi_overlap(peaks: list[tuple], genes: list[tuple]) -> list[tuple]:
@@ -96,6 +122,35 @@ def _make_interval_tables(conn, peak_rows: list[tuple], gene_rows: list[tuple]) 
         )
         if rows:
             conn.executemany(f"INSERT INTO {table} VALUES (?, ?, ?)", rows)
+
+
+def _make_planner_scale_tables(conn, *, genes_where: str | None = None) -> None:
+    """Recreate 20k-row peaks/genes tables over four chromosomes.
+
+    Sized so DuckDB's planner picks a range join rather than a nested loop,
+    which is what the ``IE_JOIN`` plan assertions read. The two strides (37
+    and 41, the latter offset by 17) are coprime with the 100000 modulus, so
+    starts spread evenly and the interval sets overlap without either side
+    being a shifted copy of the other. *genes_where* restricts genes to a
+    subset of the chromosomes, leaving peaks with unmatched contigs.
+    """
+    conn.execute("DROP TABLE IF EXISTS peaks")
+    conn.execute("""
+        CREATE TABLE peaks AS
+        SELECT 'chr' || ((i % 4) + 1) AS chrom,
+               ((i * 37) % 100000)::INTEGER AS "start",
+               (((i * 37) % 100000) + 200)::INTEGER AS "end"
+        FROM range(20000) t(i)
+    """)
+    conn.execute("DROP TABLE IF EXISTS genes")
+    conn.execute(f"""
+        CREATE TABLE genes AS
+        SELECT 'chr' || ((i % 4) + 1) AS chrom,
+               ((i * 41 + 17) % 100000)::INTEGER AS "start",
+               (((i * 41 + 17) % 100000) + 200)::INTEGER AS "end"
+        FROM range(20000) t(i)
+        {f"WHERE {genes_where}" if genes_where else ""}
+    """)
 
 
 def _null_key(row: tuple) -> tuple:
@@ -168,6 +223,67 @@ def _dynamic_sql_variables(sql: str) -> list[str]:
     report nothing about the other.
     """
     return list(dict.fromkeys(re.findall(r"__giql_iejoin_[0-9a-f]+", sql)))
+
+
+def _expression_trees(leaves: tuple[str, ...]) -> st.SearchStrategy[str]:
+    """Return a Hypothesis strategy for scalar expression trees over *leaves*.
+
+    Leaves are the given columns plus small integer literals; a generated tree
+    is filtered to keep at least one column leaf, so a literal-only subtree
+    (which the dialect declines) can appear inside a tree but never be the
+    whole projection. Combines leaves through the operators the ``bedtools
+    intersect`` shapes use (``+`` / ``-`` / ``GREATEST`` / ``LEAST``) plus
+    ``ABS``, ``CASE`` and a ``CAST`` so the tree exercises function calls,
+    arithmetic, conditional and unary forms. Every operator stays
+    integer-valued over integer leaves, so the two plans agree on the result
+    column's type as well as its values.
+
+    Nodes carry ``(sql, has_column)`` while the tree is built and the flag is
+    dropped at the end, so "this tree has a column leaf" is decided
+    structurally. Scanning the rendered text for a leaf substring instead
+    would hold only as long as no operator template can synthesize one.
+    """
+
+    def extend(children):
+        def combine(template):
+            return st.tuples(children, children).map(
+                lambda p: (template(p[0][0], p[1][0]), p[0][1] or p[1][1])
+            )
+
+        return st.one_of(
+            combine(lambda x, y: f"({x} + {y})"),
+            combine(lambda x, y: f"({x} - {y})"),
+            combine(lambda x, y: f"GREATEST({x}, {y})"),
+            combine(lambda x, y: f"LEAST({x}, {y})"),
+            combine(lambda x, y: f"ABS({x} - {y})"),
+            combine(lambda x, y: f"CASE WHEN {x} < {y} THEN {x} ELSE {y} END"),
+            children.map(lambda c: (f"CAST({c[0]} AS BIGINT)", c[1])),
+        )
+
+    base = st.one_of(
+        st.sampled_from(leaves).map(lambda leaf: (leaf, True)),
+        st.integers(min_value=-5, max_value=5).map(lambda n: (str(n), False)),
+    )
+    return (
+        st.recursive(base, extend, max_leaves=6)
+        .filter(lambda tree: tree[1])
+        .map(lambda tree: tree[0])
+    )
+
+
+def _interval_lists(
+    chroms: tuple[str, ...] = ("chr1", "chr2"), max_size: int = 6
+) -> st.SearchStrategy[list[tuple]]:
+    """Return a strategy for (chrom, start, length) triples over *chroms*."""
+    return st.lists(
+        st.tuples(
+            st.sampled_from(chroms),
+            st.integers(min_value=0, max_value=100),
+            st.integers(min_value=1, max_value=30),
+        ),
+        min_size=0,
+        max_size=max_size,
+    )
 
 
 def _explain_dynamic_sql(conn, sql: str, half: int = 0) -> str:
@@ -2278,8 +2394,8 @@ class TestTranspileDuckDBIEJoinSQLStructure:
         with pytest.raises(ValueError, match="[Uu]nknown.*qualifier|'c'"):
             transpile(query, tables=["peaks", "genes"], dialect="duckdb")
 
-    def test_transpile_should_decline_expression_form_projection_to_naive_plan(self):
-        """Test that an arithmetic projection expression declines to the naive plan.
+    def test_transpile_should_engage_iejoin_for_expression_form_projection(self):
+        """Test that an arithmetic projection expression keeps the IEJoin plan.
 
         Given:
             A SELECT list containing an expression over a qualified column
@@ -2287,8 +2403,9 @@ class TestTranspileDuckDBIEJoinSQLStructure:
         When:
             ``transpile`` is called with ``dialect='duckdb'``.
         Then:
-            It should decline the IEJoin (no ``SET VARIABLE`` scaffolding) so
-            the naive-predicate plan evaluates the expression (#205).
+            It should engage the IEJoin path (``SET VARIABLE __giql_iejoin_``
+            emitted) — the projection shape alone must not cost the join its
+            fast plan (#109).
         """
         # Arrange
         query = """
@@ -2301,8 +2418,290 @@ class TestTranspileDuckDBIEJoinSQLStructure:
         sql = transpile(query, tables=["peaks", "genes"], dialect="duckdb")
 
         # Assert
-        assert "SET VARIABLE" not in sql.upper()
-        assert "getvariable" not in sql
+        assert "SET VARIABLE __giql_iejoin_" in sql
+        assert "getvariable" in sql
+
+    def test_transpile_should_rebuild_both_side_expression_on_outer_select(self):
+        """Test that a clipped-span projection is rebuilt over the inner columns.
+
+        Given:
+            The ``bedtools intersect`` clipped-span projection ``GREATEST(a.start,
+            b.start) AS start, LEAST(a."end", b."end") AS "end"`` over an
+            INTERSECTS INNER join.
+        When:
+            ``transpile`` is called with ``dialect='duckdb'``.
+        Then:
+            It should engage the IEJoin and re-emit each expression on the
+            outer SELECT over ``__giql_p<n>`` inner columns under the user's
+            alias, with no raw ``a.``/``b.`` reference left on the outer SELECT
+            (#109).
+        """
+        # Arrange
+        query = (
+            "SELECT a.chrom, GREATEST(a.start, b.start) AS start, "
+            'LEAST(a."end", b."end") AS "end" '
+            "FROM peaks a JOIN genes b ON a.interval INTERSECTS b.interval"
+        )
+
+        # Act
+        sql = transpile(query, tables=["peaks", "genes"], dialect="duckdb")
+        outer_select = sql.split(";\n")[-1]
+
+        # Assert
+        assert "SET VARIABLE __giql_iejoin_" in sql
+        assert re.search(
+            r'GREATEST\(__giql_p\d+, __giql_p\d+\) AS "start"', outer_select
+        )
+        assert re.search(r'LEAST\(__giql_p\d+, __giql_p\d+\) AS "end"', outer_select)
+        assert "a.start" not in outer_select
+        assert "b.start" not in outer_select
+
+    def test_transpile_should_rebuild_mixed_side_expression_when_leaves_span_both_sides(
+        self,
+    ):
+        """Test that an expression mixing both sides projects every leaf inward.
+
+        Given:
+            The ``bedtools intersect -wo`` overlap-width projection
+            ``LEAST(a."end", b."end") - GREATEST(a.start, b.start) AS ov``, whose
+            leaves come from both join sides.
+        When:
+            ``transpile`` is called with ``dialect='duckdb'``.
+        Then:
+            It should engage the IEJoin, project all four leaf columns into the
+            per-chromosome subquery, and rebuild the subtraction on the outer
+            SELECT under the ``ov`` alias (#109).
+        """
+        # Arrange
+        query = (
+            'SELECT LEAST(a."end", b."end") - GREATEST(a.start, b.start) AS ov '
+            "FROM peaks a JOIN genes b ON a.interval INTERSECTS b.interval"
+        )
+
+        # Act
+        sql = transpile(query, tables=["peaks", "genes"], dialect="duckdb")
+        setup, outer_select = sql.split(";\n")
+
+        # Assert
+        assert "SET VARIABLE __giql_iejoin_" in setup
+        for leaf in ('a."start"', 'a."end"', 'b."start"', 'b."end"'):
+            assert re.search(rf"{re.escape(leaf)} AS __giql_p\d+", setup)
+        assert re.search(
+            r"LEAST\(__giql_p\d+, __giql_p\d+\) - GREATEST\(__giql_p\d+, __giql_p\d+\)"
+            r' AS "ov"',
+            outer_select,
+        )
+
+    def test_transpile_should_rebuild_single_side_expression(self):
+        """Test that a single-side expression is rebuilt over its one inner column.
+
+        Given:
+            A ``a.start + 1 AS s`` projection over an INTERSECTS INNER join.
+        When:
+            ``transpile`` is called with ``dialect='duckdb'``.
+        Then:
+            It should engage the IEJoin and emit ``__giql_p<n> + 1 AS "s"`` on
+            the outer SELECT (#109).
+        """
+        # Arrange
+        query = (
+            "SELECT a.start + 1 AS s "
+            "FROM peaks a JOIN genes b ON a.interval INTERSECTS b.interval"
+        )
+
+        # Act
+        sql = transpile(query, tables=["peaks", "genes"], dialect="duckdb")
+        outer_select = sql.split(";\n")[-1]
+
+        # Assert
+        assert "SET VARIABLE __giql_iejoin_" in sql
+        assert re.search(r'__giql_p\d+ \+ 1 AS "s"', outer_select)
+
+    def test_transpile_should_synthesize_output_name_when_expression_is_unaliased(
+        self,
+    ):
+        """Test that an unaliased expression projection gets a synthesized name.
+
+        Given:
+            A SELECT list whose second item is the unaliased expression
+            ``a.start + 1`` over an INTERSECTS INNER join.
+        When:
+            ``transpile`` is called with ``dialect='duckdb'``.
+        Then:
+            It should engage the IEJoin and name the rebuilt expression
+            ``__giql_expr_1`` (position-indexed, like ``__giql_agg_<n>`` for an
+            unaliased aggregate), since DuckDB's auto-name is derived from the
+            original expression text the rewrite has changed (#109).
+        """
+        # Arrange
+        query = (
+            "SELECT a.chrom, a.start + 1 "
+            "FROM peaks a JOIN genes b ON a.interval INTERSECTS b.interval"
+        )
+
+        # Act
+        sql = transpile(query, tables=["peaks", "genes"], dialect="duckdb")
+        outer_select = sql.split(";\n")[-1]
+
+        # Assert
+        assert "SET VARIABLE __giql_iejoin_" in sql
+        assert re.search(r'__giql_p\d+ \+ 1 AS "__giql_expr_1"', outer_select)
+
+    @pytest.mark.parametrize("kind", ["SEMI", "ANTI"])
+    @pytest.mark.parametrize(
+        "projection",
+        [
+            "GREATEST(a.start, b.start)",
+            "CASE WHEN a.start > 0 THEN b.start ELSE a.start END",
+            'LEAST(a."end", GREATEST(a.start, b.start))',
+            "b.start + 1",
+        ],
+    )
+    def test_transpile_should_raise_left_side_only_when_expression_references_right_side_under_left_only_join(  # noqa: E501
+        self, kind, projection
+    ):
+        """Test that a right-side leaf in an expression under SEMI/ANTI raises.
+
+        Given:
+            An expression projection under a SEMI / ANTI join carrying a
+            ``b.start`` leaf — at the top level, inside a ``CASE`` branch, or
+            nested two calls deep — that is out of scope for the left-only
+            output.
+        When:
+            ``transpile`` is called with ``dialect='duckdb'``.
+        Then:
+            It should raise the dedicated left-side-only ``ValueError`` naming
+            the offending leaf rather than rebuilding or declining — the naive
+            plan rejects the reference too (#109).
+        """
+        # Arrange
+        query = (
+            f"SELECT {projection} FROM peaks a {kind} JOIN genes b "
+            "ON a.interval INTERSECTS b.interval"
+        )
+
+        # Act & assert
+        with pytest.raises(ValueError, match="left-side") as excinfo:
+            transpile(query, tables=["peaks", "genes"], dialect="duckdb")
+        assert "b.start" in str(excinfo.value)
+
+    def test_transpile_should_allocate_one_inner_column_when_leaf_is_shared(self):
+        """Test that a leaf shared by a column and two expressions is projected once.
+
+        Given:
+            A SELECT list projecting ``a.start`` plainly and twice more inside
+            ``a.start + 1`` expressions.
+        When:
+            ``transpile`` is called with ``dialect='duckdb'``.
+        Then:
+            It should project ``a."start"`` into the per-chromosome subquery
+            exactly once and rebuild all three outer items over that one inner
+            alias (#109).
+        """
+        # Arrange
+        query = (
+            "SELECT a.start, a.start + 1 AS s, a.start + 1 AS s2 "
+            "FROM peaks a JOIN genes b ON a.interval INTERSECTS b.interval"
+        )
+
+        # Act
+        sql = transpile(query, tables=["peaks", "genes"], dialect="duckdb")
+        setup, outer_select = sql.split(";\n")
+        shared = re.search(r'(__giql_p\d+) AS "start"', outer_select)
+
+        # Assert — the inner list is rendered once per emitted branch, so count
+        # distinct aliases rather than occurrences.
+        assert shared is not None
+        assert set(re.findall(r"__giql_p\d+", setup)) == {shared.group(1)}
+        assert f'{shared.group(1)} + 1 AS "s"' in outer_select
+        assert f'{shared.group(1)} + 1 AS "s2"' in outer_select
+
+    def test_transpile_should_index_synthesized_names_by_position_across_kinds(
+        self,
+    ):
+        """Test that unaliased expressions and aggregates share one position counter.
+
+        Given:
+            A SELECT list with an unaliased expression at position 0, a plain
+            column, an unaliased aggregate, and another unaliased expression.
+        When:
+            ``transpile`` is called with ``dialect='duckdb'``.
+        Then:
+            It should name them ``__giql_expr_0``, ``chrom``, ``__giql_agg_2``
+            and ``__giql_expr_3`` — every synthesized name carries its SELECT
+            position, whichever scheme produced it (#109).
+        """
+        # Arrange
+        query = (
+            "SELECT a.start + 1, a.chrom, COUNT(*), b.start + 1 "
+            "FROM peaks a JOIN genes b ON a.interval INTERSECTS b.interval "
+            "GROUP BY a.chrom, a.start, b.start"
+        )
+
+        # Act
+        sql = transpile(query, tables=["peaks", "genes"], dialect="duckdb")
+        outer_select = sql.split(";\n")[-1]
+
+        # Assert
+        assert "SET VARIABLE __giql_iejoin_" in sql
+        for name in ("__giql_expr_0", "chrom", "__giql_agg_2", "__giql_expr_3"):
+            assert f'AS "{name}"' in outer_select
+
+    @pytest.mark.parametrize("projection", ["c.start + 1", "GREATEST(a.start, c.start)"])
+    def test_transpile_should_raise_when_expression_leaf_has_unknown_qualifier(
+        self, projection
+    ):
+        """Test that an unknown table qualifier inside an expression raises.
+
+        Given:
+            An expression projection whose leaf is qualified with ``c``, an
+            alias absent from the FROM / JOIN clauses, at the top level or
+            nested inside a function call.
+        When:
+            ``transpile`` is called with ``dialect='duckdb'``.
+        Then:
+            It should raise ``ValueError`` naming the offending leaf rather than
+            rebuilding or declining — the naive plan rejects it too (#109).
+        """
+        # Arrange
+        query = (
+            f"SELECT {projection} FROM peaks a "
+            "JOIN genes b ON a.interval INTERSECTS b.interval"
+        )
+
+        # Act & assert
+        with pytest.raises(ValueError) as excinfo:
+            transpile(query, tables=["peaks", "genes"], dialect="duckdb")
+        assert "c.start" in str(excinfo.value)
+
+    def test_transpile_should_engage_iejoin_when_literal_sits_beside_column_leaf(
+        self,
+    ):
+        """Test that a literal argument next to a column leaf is rebuildable.
+
+        Given:
+            A ``COALESCE(a.start, 100) AS v`` projection — a literal inside an
+            expression that also has a qualified column leaf.
+        When:
+            ``transpile`` is called with ``dialect='duckdb'``.
+        Then:
+            It should engage the IEJoin and rebuild the call over the inner
+            alias — the bare-literal decline must not over-reach onto literal
+            arguments (#109).
+        """
+        # Arrange
+        query = (
+            "SELECT COALESCE(a.start, 100) AS v "
+            "FROM peaks a JOIN genes b ON a.interval INTERSECTS b.interval"
+        )
+
+        # Act
+        sql = transpile(query, tables=["peaks", "genes"], dialect="duckdb")
+        outer_select = sql.split(";\n")[-1]
+
+        # Assert
+        assert "SET VARIABLE __giql_iejoin_" in sql
+        assert re.search(r'COALESCE\(__giql_p\d+, 100\) AS "v"', outer_select)
 
     def test_transpile_should_decline_star_with_unknown_qualifier_to_naive_plan(
         self,
@@ -3703,18 +4102,7 @@ class TestTranspileDuckDBIEJoinCountOverlaps:
         # Arrange
         peak_rows = [(c, s, s + length) for (c, s, length) in peaks]
         gene_rows = [(c, s, s + length) for (c, s, length) in genes]
-        conn.execute("DROP TABLE IF EXISTS peaks")
-        conn.execute("DROP TABLE IF EXISTS genes")
-        conn.execute(
-            'CREATE TABLE peaks (chrom VARCHAR, "start" INTEGER, "end" INTEGER)'
-        )
-        if peak_rows:
-            conn.executemany("INSERT INTO peaks VALUES (?, ?, ?)", peak_rows)
-        conn.execute(
-            'CREATE TABLE genes (chrom VARCHAR, "start" INTEGER, "end" INTEGER)'
-        )
-        if gene_rows:
-            conn.executemany("INSERT INTO genes VALUES (?, ?, ?)", gene_rows)
+        _make_interval_tables(conn, peak_rows, gene_rows)
         sql = transpile(
             'SELECT a.chrom, a.start, a."end", COUNT(b.chrom) AS n '
             "FROM peaks a LEFT JOIN genes b ON a.interval INTERSECTS b.interval "
@@ -3768,6 +4156,38 @@ class TestTranspileDuckDBIEJoinCountOverlaps:
 
         # Assert
         assert "BLOCKWISE_NL_JOIN" not in plan
+
+    @pytest.mark.parametrize(
+        "group_by", ["a.chrom, a.start + 1", "a.chrom, s"], ids=["expression", "alias"]
+    )
+    def test_transpile_should_decline_count_overlaps_when_key_is_expression(
+        self, group_by
+    ):
+        """Test that an expression group key declines the count fast path.
+
+        Given:
+            A LEFT-join COUNT whose projected key ``a.start + 1 AS s`` is an
+            expression, grouped by the expression or by its alias.
+        When:
+            ``transpile`` is called with ``dialect='duckdb'``.
+        Then:
+            It should decline to the naive plan (no ``SET VARIABLE``) — the
+            count_overlaps matcher stays closed to expression keys even though
+            the INNER path now rebuilds expressions (#109).
+        """
+        # Arrange
+        query = (
+            "SELECT a.chrom, a.start + 1 AS s, COUNT(b.chrom) AS n "
+            "FROM peaks a LEFT JOIN genes b ON a.interval INTERSECTS b.interval "
+            f"GROUP BY {group_by}"
+        )
+
+        # Act
+        sql = transpile(query, tables=["peaks", "genes"], dialect="duckdb")
+
+        # Assert
+        assert "SET VARIABLE" not in sql.upper()
+        assert "__giql_counts" not in sql
 
 
 class TestTranspileDuckDBIEJoinOuterJoinDecomposition:
@@ -4024,23 +4444,39 @@ class TestTranspileDuckDBIEJoinOuterJoinDecomposition:
         assert "SET VARIABLE __giql_iejoin_" not in sql
         assert 'a."chrom" = b."chrom"' in sql
 
-    def test_transpile_should_decline_outer_join_when_projection_is_expression(self):
+    @pytest.mark.parametrize(
+        "join, projection",
+        [
+            ("LEFT JOIN", "CASE WHEN b.chrom IS NULL THEN 0 ELSE 1 END AS ov"),
+            ("LEFT JOIN", "a.start + 1 AS v"),
+            ("RIGHT JOIN", "GREATEST(a.start, b.start) AS v"),
+            ("FULL OUTER JOIN", "a.start + 1 AS v"),
+        ],
+        ids=["left_wao_case", "left_arithmetic", "right_greatest", "full_arithmetic"],
+    )
+    def test_transpile_should_decline_outer_join_when_projection_is_expression(
+        self, join, projection
+    ):
         """Test that an expression projection under an outer join declines.
 
         Given:
-            A LEFT-join INTERSECTS whose SELECT list contains a ``CASE``
-            expression (the ``bedtools -wao`` shape).
+            A LEFT / RIGHT / FULL OUTER-join INTERSECTS whose SELECT list
+            contains an expression — the ``bedtools -wao`` ``CASE`` shape or
+            plain arithmetic.
         When:
             ``transpile`` is called with ``dialect='duckdb'``.
         Then:
             It should decline to the naive-predicate plan — the unmatched half
             can only NULL-fill a side-attributable column, not an arbitrary
-            expression (this shape unblocks with #109).
+            expression. The INNER / SEMI / ANTI path rebuilds scalar
+            expressions (#109), but the decomposition stays column-only until
+            its unmatched half can evaluate an expression over NULL-filled
+            other-side leaves.
         """
         # Arrange & act
         sql = transpile(
-            "SELECT a.chrom, CASE WHEN b.chrom IS NULL THEN 0 ELSE 1 END AS ov "
-            "FROM peaks a LEFT JOIN genes b ON a.interval INTERSECTS b.interval",
+            f"SELECT a.chrom, {projection} "
+            f"FROM peaks a {join} genes b ON a.interval INTERSECTS b.interval",
             tables=["peaks", "genes"],
             dialect="duckdb",
         )
@@ -4048,6 +4484,42 @@ class TestTranspileDuckDBIEJoinOuterJoinDecomposition:
         # Assert
         assert "SET VARIABLE __giql_iejoin_" not in sql
         assert 'a."chrom" = b."chrom"' in sql
+
+    def test_query_should_match_naive_plan_when_declined_wao_expression_runs(self, conn):
+        """Test that the declined ``bedtools -wao`` shape executes like the naive plan.
+
+        Given:
+            Peaks with one matched and one unmatched row, and a LEFT-join
+            INTERSECTS projecting the overlap width guarded by a ``CASE`` on
+            the right side's NULL.
+        When:
+            The query is transpiled with ``dialect='duckdb'`` and executed, and
+            separately with ``dialect=None``.
+        Then:
+            It should decline the decomposition and return the naive plan's
+            rows and schema — the width for the matched row and ``0`` for the
+            unmatched one.
+        """
+        # Arrange
+        _make_table(
+            conn,
+            "peaks",
+            [("chr1", 100, 200, "p1", 1, "+"), ("chr1", 900, 950, "p2", 2, "+")],
+        )
+        _make_table(conn, "genes", [("chr1", 150, 250, "g1", 1, "-")])
+        query = (
+            "SELECT a.chrom, a.start, CASE WHEN b.start IS NULL THEN 0 "
+            'ELSE LEAST(a."end", b."end") - GREATEST(a.start, b.start) END AS ov '
+            "FROM peaks a LEFT JOIN genes b ON a.interval INTERSECTS b.interval"
+        )
+
+        # Act
+        sql = _assert_agrees_with_naive(conn, query)
+        rows = sorted(conn.execute(sql).fetchall())
+
+        # Assert
+        assert "SET VARIABLE __giql_iejoin_" not in sql
+        assert rows == [("chr1", 100, 50), ("chr1", 900, 0)]
 
     def test_transpile_should_decline_outer_join_when_order_by(self):
         """Test that a top-level ORDER BY under an outer join declines.
@@ -4452,38 +4924,63 @@ class TestTranspileDuckDBIEJoinOuterJoinDecomposition:
         assert select.startswith("SELECT ")
         assert "SET VARIABLE" not in select
 
-    def test_transform_to_parts_should_not_mutate_its_query(self):
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "SELECT a.chrom, a.start FROM peaks a "
+            "LEFT JOIN genes b ON a.interval INTERSECTS b.interval",
+            "SELECT a.chrom, GREATEST(a.start, b.start) AS s, "
+            'LEAST(a."end", b."end") AS e FROM peaks a '
+            "JOIN genes b ON a.interval INTERSECTS b.interval",
+            'SELECT a.chrom, a."end" - a.start AS len FROM peaks a '
+            "SEMI JOIN genes b ON a.interval INTERSECTS b.interval",
+            "SELECT a.chrom, a.start + 1 AS s FROM peaks a "
+            "ANTI JOIN genes b ON a.interval INTERSECTS b.interval "
+            "WHERE a.score > 1",
+            "SELECT a.chrom, a.start + 1 AS s, COUNT(*) AS n FROM peaks a "
+            "JOIN genes b ON a.interval INTERSECTS b.interval "
+            "GROUP BY a.chrom, a.start ORDER BY s",
+        ],
+        ids=[
+            "left_outer_columns",
+            "inner_clipped_span",
+            "semi",
+            "anti_where",
+            "inner_group_order",
+        ],
+    )
+    def test_transform_to_parts_should_not_mutate_its_query(self, query):
         """Test that the primitive leaves the AST it is handed unchanged.
 
         Given:
-            A parsed decomposed outer join.
+            A parsed decomposed outer join, or an INNER / SEMI / ANTI join
+            whose SELECT list carries a scalar expression, with or without
+            modifiers.
         When:
             transform_to_parts is called on it.
         Then:
-            The AST should be unchanged.
+            It should return the parts and leave the AST unchanged.
 
         The registry entry point passes the live statement AST that pass 3 goes
         on transforming, and the naive-predicate fallback rewrites that same node
         in place when this path declines. Every composed rewrite here now
         transpiles a copy rather than the caller's node, which is what lets this
-        hold without each of them defending it.
+        hold without each of them defending it — including the leaf
+        pre-allocation and expression rebuild the scalar cases exercise (#109).
         """
         # Arrange
         tables = Tables()
         for name in ("peaks", "genes"):
             tables.register(name, Table(name))
         transformer = IntersectsDuckDBIEJoinTransformer(tables)
-        ast = parse_one(
-            "SELECT a.chrom, a.start FROM peaks a "
-            "LEFT JOIN genes b ON a.interval INTERSECTS b.interval",
-            dialect=GIQLDialect,
-        )
+        ast = parse_one(query, dialect=GIQLDialect)
         before = repr(ast)
 
         # Act
-        transformer.transform_to_parts(ast)
+        parts = transformer.transform_to_parts(ast)
 
         # Assert
+        assert parts is not None
         assert repr(ast) == before
 
     @pytest.mark.parametrize(
@@ -4891,23 +5388,7 @@ class TestTranspileDuckDBIEJoinOuterJoinDecomposition:
         report nothing at all about the unmatched half.
         """
         # Arrange
-        conn.execute("DROP TABLE IF EXISTS peaks")
-        conn.execute("""
-            CREATE TABLE peaks AS
-            SELECT 'chr' || ((i % 4) + 1) AS chrom,
-                   ((i * 37) % 100000)::INTEGER AS "start",
-                   (((i * 37) % 100000) + 200)::INTEGER AS "end"
-            FROM range(20000) t(i)
-        """)
-        conn.execute("DROP TABLE IF EXISTS genes")
-        conn.execute("""
-            CREATE TABLE genes AS
-            SELECT 'chr' || ((i % 4) + 1) AS chrom,
-                   ((i * 41 + 17) % 100000)::INTEGER AS "start",
-                   (((i * 41 + 17) % 100000) + 200)::INTEGER AS "end"
-            FROM range(20000) t(i)
-            WHERE (i % 4) + 1 <= 3
-        """)
+        _make_planner_scale_tables(conn, genes_where="(i % 4) + 1 <= 3")
         sql = transpile(
             "SELECT a.chrom, a.start, b.start AS bs FROM peaks a "
             "LEFT JOIN genes b ON a.interval INTERSECTS b.interval",
@@ -5663,6 +6144,915 @@ class TestTranspileDuckDBIEJoinExecution:
         # Assert
         assert column_names == ["s"]
         assert rows == [(100,)]
+
+    def test_query_should_match_naive_plan_for_both_side_expression(self, peaks_genes):
+        """Test that the clipped-span projection runs on the IEJoin and matches naive.
+
+        Given:
+            The ``peaks`` / ``genes`` fixture tables and the ``bedtools
+            intersect`` clipped-span projection ``GREATEST(a.start, b.start)`` /
+            ``LEAST(a."end", b."end")`` over an INTERSECTS INNER join.
+        When:
+            The query is transpiled with ``dialect='duckdb'`` and executed, and
+            separately with ``dialect=None``.
+        Then:
+            It should engage the IEJoin and return the naive plan's rows and
+            schema — the clipped overlap span of each overlapping pair (#109).
+        """
+        # Arrange
+        conn = peaks_genes
+        query = (
+            "SELECT a.chrom, GREATEST(a.start, b.start) AS start, "
+            'LEAST(a."end", b."end") AS "end" '
+            "FROM peaks a JOIN genes b ON a.interval INTERSECTS b.interval"
+        )
+
+        # Act
+        sql = _assert_agrees_with_naive(conn, query)
+        rows = sorted(conn.execute(sql).fetchall())
+
+        # Assert
+        assert "SET VARIABLE __giql_iejoin_" in sql
+        assert rows == [("chr1", 150, 200), ("chr1", 500, 600), ("chr2", 100, 150)]
+
+    def test_query_should_match_naive_plan_for_single_side_expression(self, peaks_genes):
+        """Test that a single-side expression runs on the IEJoin and matches naive.
+
+        Given:
+            The ``peaks`` / ``genes`` fixture tables and a ``a.start + 1 AS s``
+            projection over an INTERSECTS INNER join.
+        When:
+            The query is transpiled with ``dialect='duckdb'`` and executed, and
+            separately with ``dialect=None``.
+        Then:
+            It should engage the IEJoin and return the naive plan's rows and
+            schema — one shifted start per overlapping pair (#109).
+        """
+        # Arrange
+        conn = peaks_genes
+        query = (
+            "SELECT a.start + 1 AS s "
+            "FROM peaks a JOIN genes b ON a.interval INTERSECTS b.interval"
+        )
+
+        # Act
+        sql = _assert_agrees_with_naive(conn, query)
+        rows = sorted(conn.execute(sql).fetchall())
+
+        # Assert
+        assert "SET VARIABLE __giql_iejoin_" in sql
+        assert rows == [(101,), (101,), (501,)]
+
+    def test_query_should_match_naive_plan_when_expression_sits_alongside_plain_columns(  # noqa: E501
+        self, peaks_genes
+    ):
+        """Test that an expression mixed with plain columns matches the naive plan.
+
+        Given:
+            The ``peaks`` / ``genes`` fixture tables and the ``bedtools
+            intersect -wo`` shape: plain columns from both sides alongside the
+            overlap width ``LEAST(a."end", b."end") - GREATEST(a.start,
+            b.start) AS ov``.
+        When:
+            The query is transpiled with ``dialect='duckdb'`` and executed, and
+            separately with ``dialect=None``.
+        Then:
+            It should engage the IEJoin and return the naive plan's rows and
+            schema, with the plain columns and the expression interleaved in
+            SELECT-list order (#109).
+        """
+        # Arrange
+        conn = peaks_genes
+        query = (
+            "SELECT a.chrom, a.start, "
+            'LEAST(a."end", b."end") - GREATEST(a.start, b.start) AS ov, '
+            "b.name "
+            "FROM peaks a JOIN genes b ON a.interval INTERSECTS b.interval"
+        )
+
+        # Act
+        sql = _assert_agrees_with_naive(conn, query)
+        rows = sorted(conn.execute(sql).fetchall())
+
+        # Assert
+        assert "SET VARIABLE __giql_iejoin_" in sql
+        assert rows == [
+            ("chr1", 100, 50, "g1"),
+            ("chr1", 500, 100, "g2"),
+            ("chr2", 100, 50, "g4"),
+        ]
+
+    def test_query_should_match_naive_plan_for_expression_under_semi_join(
+        self, peaks_genes
+    ):
+        """Test that a left-side expression under SEMI JOIN matches the naive plan.
+
+        Given:
+            The ``peaks`` / ``genes`` fixture tables and a ``a."end" - a.start
+            AS len`` projection under a SEMI JOIN INTERSECTS.
+        When:
+            The query is transpiled with ``dialect='duckdb'`` and executed, and
+            separately with ``dialect=None``.
+        Then:
+            It should engage the IEJoin (the correlated ``EXISTS`` form) and
+            return the naive plan's rows and schema — one width per left row
+            with at least one overlap (#109).
+        """
+        # Arrange
+        conn = peaks_genes
+        query = (
+            'SELECT a.chrom, a."end" - a.start AS len '
+            "FROM peaks a SEMI JOIN genes b ON a.interval INTERSECTS b.interval"
+        )
+
+        # Act
+        sql = _assert_agrees_with_naive(conn, query)
+        rows = sorted(conn.execute(sql).fetchall())
+
+        # Assert
+        assert "SET VARIABLE __giql_iejoin_" in sql
+        assert "EXISTS" in sql
+        assert rows == [("chr1", 100), ("chr1", 100), ("chr2", 100)]
+
+    def test_query_should_match_naive_plan_when_expression_combined_with_group_by_and_order_by(  # noqa: E501
+        self, peaks_genes
+    ):
+        """Test that an expression composes with GROUP BY / ORDER BY on the IEJoin.
+
+        Given:
+            The ``peaks`` / ``genes`` fixture tables and a query projecting
+            ``a.start + 1 AS s`` next to ``COUNT(*)``, grouped on the leaf column
+            and ordered by the expression's alias.
+        When:
+            The query is transpiled with ``dialect='duckdb'`` and executed, and
+            separately with ``dialect=None``.
+        Then:
+            It should engage the IEJoin and return the naive plan's rows and
+            schema, in ``ORDER BY`` order — the modifier rewriter and the
+            expression rebuild share one inner-alias map (#109).
+        """
+        # Arrange
+        conn = peaks_genes
+        query = (
+            "SELECT a.chrom, a.start + 1 AS s, COUNT(*) AS n "
+            "FROM peaks a JOIN genes b ON a.interval INTERSECTS b.interval "
+            "GROUP BY a.chrom, a.start ORDER BY s, a.chrom"
+        )
+
+        # Act
+        sql = _assert_agrees_with_naive(conn, query)
+        rows = conn.execute(sql).fetchall()
+
+        # Assert
+        assert "SET VARIABLE __giql_iejoin_" in sql
+        assert rows == [("chr1", 101, 1), ("chr2", 101, 1), ("chr1", 501, 1)]
+
+    def test_query_should_plan_expression_projection_through_ie_join(self, conn):
+        """Test that an expression projection's dynamic SQL still reaches IE_JOIN.
+
+        Given:
+            An INTERSECTS INNER join over enough rows for the planner to choose
+            a range join, projecting the clipped overlap span.
+        When:
+            The emitted session variable's dynamic SQL is planned.
+        Then:
+            It should plan through ``IE_JOIN`` and not the quadratic
+            ``BLOCKWISE_NL_JOIN`` — the projection rebuild leaves the
+            per-chromosome join untouched (#109).
+        """
+        # Arrange
+        _make_planner_scale_tables(conn)
+        sql = transpile(
+            "SELECT a.chrom, GREATEST(a.start, b.start) AS start, "
+            'LEAST(a."end", b."end") AS "end" '
+            "FROM peaks a JOIN genes b ON a.interval INTERSECTS b.interval",
+            tables=["peaks", "genes"],
+            dialect="duckdb",
+        )
+
+        # Act
+        plan = _explain_dynamic_sql(conn, sql)
+
+        # Assert
+        assert "IE_JOIN" in plan
+        assert "BLOCKWISE_NL_JOIN" not in plan
+
+    @settings(
+        max_examples=30,
+        deadline=None,
+        suppress_health_check=[HealthCheck.function_scoped_fixture],
+    )
+    @given(
+        peaks=_interval_lists(),
+        genes=_interval_lists(),
+        expression=_expression_trees(_SCALAR_LEAVES),
+    )
+    def test_query_should_match_naive_plan_for_random_scalar_expressions(
+        self, conn, peaks, genes, expression
+    ):
+        """Test cross-plan equivalence over randomized scalar expression projections.
+
+        Given:
+            A Hypothesis-generated pair of small interval lists and a random
+            scalar expression tree over the ``a`` / ``b`` start and end columns
+            (arithmetic, ``GREATEST`` / ``LEAST``, ``ABS``, ``CASE``).
+        When:
+            The same query is transpiled with ``dialect=None`` and with
+            ``dialect='duckdb'`` and both are executed.
+        Then:
+            The DuckDB plan should engage the IEJoin and return the naive
+            plan's rows and result schema (#109).
+        """
+        # Arrange
+        peak_rows = [(c, s, s + length) for (c, s, length) in peaks]
+        gene_rows = [(c, s, s + length) for (c, s, length) in genes]
+        _make_interval_tables(conn, peak_rows, gene_rows)
+        query = (
+            f"SELECT a.chrom AS c, {expression} AS v, b.start AS bs "
+            "FROM peaks a JOIN genes b ON a.interval INTERSECTS b.interval"
+        )
+
+        # Act
+        sql = _assert_agrees_with_naive(conn, query)
+
+        # Assert
+        assert "SET VARIABLE __giql_iejoin_" in sql
+
+    @settings(
+        max_examples=30,
+        deadline=None,
+        suppress_health_check=[HealthCheck.function_scoped_fixture],
+    )
+    @given(
+        peaks=_interval_lists(),
+        genes=_interval_lists(),
+        kind=st.sampled_from(["SEMI", "ANTI"]),
+        expression=_expression_trees(_LEFT_ONLY_LEAVES),
+        threshold=st.integers(min_value=0, max_value=100),
+    )
+    def test_query_should_match_naive_plan_for_random_left_only_expressions(
+        self, conn, peaks, genes, kind, expression, threshold
+    ):
+        """Test cross-plan equivalence for random expressions under SEMI / ANTI.
+
+        Given:
+            A Hypothesis-generated pair of small interval lists, a SEMI or ANTI
+            join, a random scalar expression tree over the left side's start
+            and end columns, a ``WHERE`` threshold on the left start, and an
+            ``ORDER BY`` on the expression's alias.
+        When:
+            The same query is transpiled with ``dialect=None`` and with
+            ``dialect='duckdb'`` and both are executed.
+        Then:
+            The DuckDB plan should engage the correlated ``EXISTS`` /
+            ``NOT EXISTS`` IEJoin and return the naive plan's rows, schema
+            and order — the rebuilt expression composes with the outer-wrapper
+            WHERE filter (#109, #200).
+        """
+        # Arrange
+        peak_rows = [(c, s, s + length) for (c, s, length) in peaks]
+        gene_rows = [(c, s, s + length) for (c, s, length) in genes]
+        _make_interval_tables(conn, peak_rows, gene_rows)
+        query = (
+            f"SELECT a.chrom AS c, {expression} AS v FROM peaks a "
+            f"{kind} JOIN genes b ON a.interval INTERSECTS b.interval "
+            f"WHERE a.start >= {threshold} ORDER BY v, a.chrom, a.start"
+        )
+
+        # Act
+        sql = _assert_agrees_with_naive(conn, query)
+        ordered_dd = conn.execute(sql).fetchall()
+        ordered_naive = conn.execute(
+            transpile(query, tables=["peaks", "genes"])
+        ).fetchall()
+
+        # Assert
+        assert "SET VARIABLE __giql_iejoin_" in sql
+        assert "EXISTS" in sql
+        assert ordered_dd == ordered_naive
+
+    @settings(
+        max_examples=30,
+        deadline=None,
+        suppress_health_check=[HealthCheck.function_scoped_fixture],
+    )
+    @given(
+        peaks=_interval_lists(),
+        genes=_interval_lists(),
+    )
+    def test_query_should_match_python_clipped_overlap_for_random_inputs(
+        self, conn, peaks, genes
+    ):
+        """Test the clipped-span projection against a Python-native reference.
+
+        Given:
+            A Hypothesis-generated pair of small interval lists and the
+            ``bedtools intersect`` clipped-span plus ``-wo`` width projection
+            (``GREATEST`` / ``LEAST`` over both sides' endpoints).
+        When:
+            The DuckDB-dialect SQL is executed and compared against a
+            Python-native reference computing the same span per overlapping
+            pair.
+        Then:
+            It should return exactly the reference multiset, with every width
+            strictly positive (#109).
+        """
+        # Arrange
+        peak_rows = [(c, s, s + length) for (c, s, length) in peaks]
+        gene_rows = [(c, s, s + length) for (c, s, length) in genes]
+        _make_interval_tables(conn, peak_rows, gene_rows)
+        sql = transpile(
+            "SELECT a.chrom AS c, GREATEST(a.start, b.start) AS s, "
+            'LEAST(a."end", b."end") AS e, '
+            'LEAST(a."end", b."end") - GREATEST(a.start, b.start) AS ov '
+            "FROM peaks a JOIN genes b ON a.interval INTERSECTS b.interval",
+            tables=["peaks", "genes"],
+            dialect="duckdb",
+        )
+
+        # Act
+        rows = sorted(conn.execute(sql).fetchall())
+
+        # Assert
+        assert "SET VARIABLE __giql_iejoin_" in sql
+        assert rows == _python_clipped_overlap(peak_rows, gene_rows)
+        assert all(row[3] > 0 for row in rows)
+
+    def test_query_should_match_naive_plan_for_non_numeric_expressions(
+        self, peaks_genes
+    ):
+        """Test that string, boolean and cast expressions match the naive plan.
+
+        Given:
+            The ``peaks`` / ``genes`` fixture tables and a SELECT list mixing
+            a ``CASE`` yielding string literals, ``||`` concatenation, a
+            boolean comparison, and a ``CAST`` to ``DOUBLE``.
+        When:
+            The query is transpiled with ``dialect='duckdb'`` and executed, and
+            separately with ``dialect=None``.
+        Then:
+            It should engage the IEJoin and return the naive plan's rows and
+            schema — the rebuild is type-agnostic, not integer-only (#109).
+        """
+        # Arrange
+        conn = peaks_genes
+        query = (
+            "SELECT CASE WHEN a.start < b.start THEN 'a' ELSE 'b' END AS who, "
+            "a.name || '_' || b.name AS pair, a.start < b.start AS flag, "
+            "CAST(a.start AS DOUBLE) AS s "
+            "FROM peaks a JOIN genes b ON a.interval INTERSECTS b.interval"
+        )
+
+        # Act
+        sql = _assert_agrees_with_naive(conn, query)
+        rows = sorted(conn.execute(sql).fetchall())
+
+        # Assert
+        assert "SET VARIABLE __giql_iejoin_" in sql
+        assert rows == [
+            ("a", "p1_g1", True, 100.0),
+            ("b", "p3_g2", False, 500.0),
+            ("b", "p4_g4", False, 100.0),
+        ]
+
+    def test_query_should_match_naive_plan_for_expression_under_anti_join_with_where(
+        self, peaks_genes
+    ):
+        """Test that an expression under ANTI JOIN with a WHERE residual matches naive.
+
+        Given:
+            The ``peaks`` / ``genes`` fixture tables and a ``a."end" - a.start
+            AS len`` projection under an ANTI JOIN filtered by ``WHERE a.score >
+            20``.
+        When:
+            The query is transpiled with ``dialect='duckdb'`` and executed, and
+            separately with ``dialect=None``.
+        Then:
+            It should engage the ``NOT EXISTS`` IEJoin and return the naive
+            plan's rows and schema — the WHERE residual is applied on the outer
+            wrapper beside the rebuilt expression (#109, #200).
+        """
+        # Arrange
+        conn = peaks_genes
+        query = (
+            'SELECT a.chrom, a."end" - a.start AS len '
+            "FROM peaks a ANTI JOIN genes b ON a.interval INTERSECTS b.interval "
+            "WHERE a.score > 20"
+        )
+
+        # Act
+        sql = _assert_agrees_with_naive(conn, query)
+        rows = conn.execute(sql).fetchall()
+
+        # Assert
+        assert "SET VARIABLE __giql_iejoin_" in sql
+        assert "NOT EXISTS" in sql
+        assert rows == [("chr2", 100)]
+
+    def test_query_should_match_naive_plan_for_expression_in_implicit_cross_join(
+        self, peaks_genes
+    ):
+        """Test that the ``-wo`` width over a comma join matches the naive plan.
+
+        Given:
+            The ``peaks`` / ``genes`` fixture tables and an implicit comma join
+            whose INTERSECTS sits in the WHERE, projecting the overlap width
+            and ordering by its alias descending.
+        When:
+            The query is transpiled with ``dialect='duckdb'`` and executed, and
+            separately with ``dialect=None``.
+        Then:
+            It should engage the IEJoin and return the naive plan's rows,
+            schema and order (#109).
+        """
+        # Arrange
+        conn = peaks_genes
+        query = (
+            "SELECT a.name, b.name AS gname, "
+            'LEAST(a."end", b."end") - GREATEST(a.start, b.start) AS ov '
+            "FROM peaks a, genes b WHERE a.interval INTERSECTS b.interval "
+            "ORDER BY ov DESC, a.name"
+        )
+
+        # Act
+        sql = _assert_agrees_with_naive(conn, query)
+        rows = conn.execute(sql).fetchall()
+
+        # Assert
+        assert "SET VARIABLE __giql_iejoin_" in sql
+        assert rows == [("p3", "g2", 100), ("p1", "g1", 50), ("p4", "g4", 50)]
+
+    def test_query_should_match_naive_plan_when_distinct_dedups_expression(
+        self, peaks_genes
+    ):
+        """Test that DISTINCT over an expression projection matches the naive plan.
+
+        Given:
+            The ``peaks`` / ``genes`` fixture tables and ``SELECT DISTINCT
+            a.chrom, a."end" - a.start AS len`` ordered by the alias.
+        When:
+            The query is transpiled with ``dialect='duckdb'`` and executed, and
+            separately with ``dialect=None``.
+        Then:
+            It should engage the IEJoin and return the naive plan's rows in
+            order — DISTINCT dedups on the rebuilt value, not the leaves (#109).
+        """
+        # Arrange
+        conn = peaks_genes
+        query = (
+            'SELECT DISTINCT a.chrom, a."end" - a.start AS len '
+            "FROM peaks a JOIN genes b ON a.interval INTERSECTS b.interval "
+            "ORDER BY len, a.chrom"
+        )
+
+        # Act
+        sql = _assert_agrees_with_naive(conn, query)
+        rows = conn.execute(sql).fetchall()
+
+        # Assert
+        assert "SET VARIABLE __giql_iejoin_" in sql
+        assert rows == [("chr1", 100), ("chr2", 100)]
+
+    def test_query_should_match_naive_plan_when_group_by_is_expression(
+        self, peaks_genes
+    ):
+        """Test that grouping by an expression with HAVING matches the naive plan.
+
+        Given:
+            The ``peaks`` / ``genes`` fixture tables and a query projecting the
+            interval length with ``COUNT(*)``, grouped by the length expression
+            itself and filtered by ``HAVING``.
+        When:
+            The query is transpiled with ``dialect='duckdb'`` and executed, and
+            separately with ``dialect=None``.
+        Then:
+            It should engage the IEJoin and return the naive plan's rows — the
+            GROUP BY expression is rewritten over the same inner aliases as
+            the projection (#109).
+        """
+        # Arrange
+        conn = peaks_genes
+        query = (
+            'SELECT a."end" - a.start AS len, COUNT(*) AS n '
+            "FROM peaks a JOIN genes b ON a.interval INTERSECTS b.interval "
+            'GROUP BY a."end" - a.start HAVING COUNT(*) > 2'
+        )
+
+        # Act
+        sql = _assert_agrees_with_naive(conn, query)
+        rows = conn.execute(sql).fetchall()
+
+        # Assert
+        assert "SET VARIABLE __giql_iejoin_" in sql
+        assert rows == [(100, 3)]
+
+    def test_query_should_match_naive_plan_when_limit_offset_follow_expression_order(  # noqa: E501
+        self, peaks_genes
+    ):
+        """Test that LIMIT / OFFSET over an expression-ordered result matches naive.
+
+        Given:
+            The ``peaks`` / ``genes`` fixture tables and ``a.start + 1 AS s``
+            ordered by that alias with ``LIMIT 2 OFFSET 1``.
+        When:
+            The query is transpiled with ``dialect='duckdb'`` and executed, and
+            separately with ``dialect=None``.
+        Then:
+            It should engage the IEJoin and return the naive plan's rows in
+            order — the second and third rows by the rebuilt value (#109).
+        """
+        # Arrange
+        conn = peaks_genes
+        query = (
+            "SELECT a.chrom, a.start + 1 AS s "
+            "FROM peaks a JOIN genes b ON a.interval INTERSECTS b.interval "
+            "ORDER BY s, a.chrom LIMIT 2 OFFSET 1"
+        )
+
+        # Act
+        sql = _assert_agrees_with_naive(conn, query)
+        rows = conn.execute(sql).fetchall()
+
+        # Assert
+        assert "SET VARIABLE __giql_iejoin_" in sql
+        assert rows == [("chr2", 101), ("chr1", 501)]
+
+    def test_query_should_match_naive_plan_for_expression_over_using_join(
+        self, peaks_genes
+    ):
+        """Test that an expression over a ``USING (chrom)`` join matches naive.
+
+        Given:
+            The ``peaks`` / ``genes`` fixture tables joined with ``USING
+            (chrom)`` and a WHERE-INTERSECTS, projecting a concatenation over
+            the USING column and the right side plus an arithmetic expression.
+        When:
+            The query is transpiled with ``dialect='duckdb'`` and executed, and
+            separately with ``dialect=None``.
+        Then:
+            It should engage the IEJoin and return the naive plan's rows and
+            schema (#109).
+        """
+        # Arrange
+        conn = peaks_genes
+        query = (
+            "SELECT a.chrom || ':' || b.name AS c, a.start + 1 AS s "
+            "FROM peaks a JOIN genes b USING (chrom) "
+            "WHERE a.interval INTERSECTS b.interval"
+        )
+
+        # Act
+        sql = _assert_agrees_with_naive(conn, query)
+        rows = sorted(conn.execute(sql).fetchall())
+
+        # Assert
+        assert "SET VARIABLE __giql_iejoin_" in sql
+        assert rows == [("chr1:g1", 101), ("chr1:g2", 501), ("chr2:g4", 101)]
+
+    def test_query_should_match_naive_plan_for_expression_over_custom_columns(
+        self, conn
+    ):
+        """Test that expression leaves resolve through custom column names.
+
+        Given:
+            Tables whose genomic columns are ``chromosome`` / ``start_pos`` /
+            ``end_pos`` registered with matching ``Table`` configs, and the
+            clipped-span plus width projection over those columns.
+        When:
+            The query is transpiled with ``dialect='duckdb'`` and executed, and
+            separately with ``dialect=None``.
+        Then:
+            It should engage the IEJoin and return the naive plan's rows and
+            schema (#109).
+        """
+        # Arrange
+        for table, rows in (
+            ("peaks", [("chr1", 100, 200), ("chr1", 1000, 1100)]),
+            ("genes", [("chr1", 150, 250), ("chr1", 5000, 6000)]),
+        ):
+            conn.execute(
+                f"CREATE TABLE {table} "
+                "(chromosome VARCHAR, start_pos INTEGER, end_pos INTEGER)"
+            )
+            conn.executemany(f"INSERT INTO {table} VALUES (?, ?, ?)", rows)
+        tables = [
+            Table(name, chrom_col="chromosome", start_col="start_pos", end_col="end_pos")
+            for name in ("peaks", "genes")
+        ]
+        query = (
+            "SELECT a.chromosome AS c, GREATEST(a.start_pos, b.start_pos) AS s, "
+            "LEAST(a.end_pos, b.end_pos) - GREATEST(a.start_pos, b.start_pos) AS ov "
+            "FROM peaks a JOIN genes b ON a.interval INTERSECTS b.interval"
+        )
+
+        # Act
+        sql = _assert_agrees_with_naive(conn, query, tables=tables)
+        rows = conn.execute(sql).fetchall()
+
+        # Assert
+        assert "SET VARIABLE __giql_iejoin_" in sql
+        assert rows == [("chr1", 150, 50)]
+
+    def test_query_should_match_naive_plan_for_expression_over_one_based_closed(
+        self, conn
+    ):
+        """Test that the rebuilt expression sees raw one-based closed coordinates.
+
+        Given:
+            One-based closed tables where a peak ends exactly where a gene
+            starts, and the clipped-span projection over their endpoints.
+        When:
+            The query is transpiled with ``dialect='duckdb'`` and executed, and
+            separately with ``dialect=None``.
+        Then:
+            It should engage the IEJoin, canonicalise the join predicate so the
+            touching closed endpoint counts as an overlap, and return the raw
+            stored values in the expression like the naive plan (#109).
+        """
+        # Arrange
+        _make_table(conn, "peaks", [("chr1", 100, 200, "p", 1, "+")])
+        _make_table(conn, "genes", [("chr1", 200, 300, "g", 2, "-")])
+        tables = [
+            Table(name, coordinate_system="1based", interval_type="closed")
+            for name in ("peaks", "genes")
+        ]
+        query = (
+            'SELECT GREATEST(a.start, b.start) AS s, LEAST(a."end", b."end") AS e '
+            "FROM peaks a JOIN genes b ON a.interval INTERSECTS b.interval"
+        )
+
+        # Act
+        sql = _assert_agrees_with_naive(conn, query, tables=tables)
+        rows = conn.execute(sql).fetchall()
+
+        # Assert
+        assert "SET VARIABLE __giql_iejoin_" in sql
+        assert "- 1" in sql
+        assert rows == [(200, 200)]
+
+    def test_query_should_match_naive_plan_when_expression_leaves_use_mixed_case_aliases(  # noqa: E501
+        self, peaks_genes
+    ):
+        """Test that case-folded aliases resolve inside expression leaves.
+
+        Given:
+            The ``peaks`` / ``genes`` fixture tables aliased ``p`` and ``G``
+            and referenced as ``P`` / ``G`` / ``g`` across the SELECT list and
+            the INTERSECTS.
+        When:
+            The query is transpiled with ``dialect='duckdb'`` and executed, and
+            separately with ``dialect=None``.
+        Then:
+            It should engage the IEJoin and return the naive plan's rows and
+            schema — alias matching inside expression leaves is case-folded
+            like DuckDB's own (#109).
+        """
+        # Arrange
+        conn = peaks_genes
+        query = (
+            "SELECT P.name, P.start < G.start AS flag "
+            "FROM peaks p JOIN genes G ON p.interval INTERSECTS g.interval"
+        )
+
+        # Act
+        sql = _assert_agrees_with_naive(conn, query)
+        rows = sorted(conn.execute(sql).fetchall())
+
+        # Assert
+        assert "SET VARIABLE __giql_iejoin_" in sql
+        assert rows == [("p1", True), ("p3", False), ("p4", False)]
+
+    def test_query_should_execute_unaliased_expression_under_synthesized_name(
+        self, peaks_genes
+    ):
+        """Test that an unaliased expression projection executes under its name.
+
+        Given:
+            The ``peaks`` / ``genes`` fixture tables and an unaliased
+            ``a.start + 1`` at SELECT position 1.
+        When:
+            The query is transpiled with ``dialect='duckdb'`` and executed.
+        Then:
+            It should return one shifted start per overlapping pair under the
+            output name ``__giql_expr_1`` (#109).
+        """
+        # Arrange
+        conn = peaks_genes
+        sql = transpile(
+            "SELECT a.chrom, a.start + 1 "
+            "FROM peaks a JOIN genes b ON a.interval INTERSECTS b.interval",
+            tables=["peaks", "genes"],
+            dialect="duckdb",
+        )
+
+        # Act
+        result = conn.execute(sql)
+        column_names = [d[0] for d in result.description]
+        rows = sorted(result.fetchall())
+
+        # Assert
+        assert "SET VARIABLE __giql_iejoin_" in sql
+        assert column_names == ["chrom", "__giql_expr_1"]
+        assert rows == [("chr1", 101), ("chr1", 501), ("chr2", 101)]
+
+    def test_query_should_match_naive_plan_when_projection_is_distance_operator(
+        self, peaks_genes
+    ):
+        """Test that a DISTANCE projection now rides the IEJoin path.
+
+        Given:
+            The ``peaks`` / ``genes`` fixture tables and ``DISTANCE(a.interval,
+            b.interval) AS d`` in the SELECT list — a GIQL operator pass 3
+            expands to a scalar expression before the join is rewritten.
+        When:
+            The query is transpiled with ``dialect='duckdb'`` and executed, and
+            separately with ``dialect=None``.
+        Then:
+            It should engage the IEJoin (the expanded operator is a
+            rebuildable expression rather than a decline) and return the naive
+            plan's rows and schema (#109).
+        """
+        # Arrange
+        conn = peaks_genes
+        query = (
+            "SELECT a.chrom, DISTANCE(a.interval, b.interval) AS d "
+            "FROM peaks a JOIN genes b ON a.interval INTERSECTS b.interval"
+        )
+
+        # Act
+        sql = _assert_agrees_with_naive(conn, query)
+        rows = sorted(conn.execute(sql).fetchall())
+
+        # Assert
+        assert "SET VARIABLE __giql_iejoin_" in sql
+        assert rows == [("chr1", 0), ("chr1", 0), ("chr2", 0)]
+
+    @pytest.mark.parametrize("kind", ["SEMI", "ANTI"])
+    def test_query_should_plan_left_only_expression_projection_through_ie_join(
+        self, conn, kind
+    ):
+        """Test that an expression under SEMI / ANTI keeps the range-join plan.
+
+        Given:
+            An INTERSECTS SEMI / ANTI join over enough rows for the planner to
+            choose a range join, projecting the left interval's length.
+        When:
+            The emitted session variable's dynamic SQL is planned.
+        Then:
+            It should plan through ``IE_JOIN`` and not the quadratic
+            ``BLOCKWISE_NL_JOIN`` — the rebuild leaves the correlated
+            ``EXISTS`` form untouched (#109, #208).
+        """
+        # Arrange
+        _make_planner_scale_tables(conn)
+        sql = transpile(
+            f'SELECT a."end" - a.start AS len FROM peaks a {kind} JOIN genes b '
+            "ON a.interval INTERSECTS b.interval",
+            tables=["peaks", "genes"],
+            dialect="duckdb",
+        )
+
+        # Act
+        plan = _explain_dynamic_sql(conn, sql)
+
+        # Assert
+        assert "IE_JOIN" in plan
+        assert "BLOCKWISE_NL_JOIN" not in plan
+
+    @pytest.mark.parametrize(
+        "kind, projection",
+        [
+            (
+                "",
+                "GREATEST(a.start, b.start) AS s, "
+                'LEAST(a."end", b."end") - GREATEST(a.start, b.start) AS ov',
+            ),
+            ("SEMI", 'a."end" - a.start AS len'),
+            ("ANTI", 'a."end" - a.start AS len'),
+        ],
+        ids=["inner", "semi", "anti"],
+    )
+    def test_query_should_match_naive_plan_for_expression_when_partition_exceeds_ceiling(  # noqa: E501
+        self, conn, kind, projection
+    ):
+        """Test that the unpartitioned fallback carries the rebuilt expression.
+
+        Given:
+            3,000 intervals per side spread over 300 shared chromosomes --
+            above ``MAX_PER_CHROM_PARTITIONS`` -- and an INNER / SEMI / ANTI
+            join projecting a scalar expression.
+        When:
+            The query is transpiled with ``dialect='duckdb'`` and executed, and
+            separately with ``dialect=None``.
+        Then:
+            It should take the unpartitioned branch and return the naive
+            plan's rows and schema — that branch projects the same inner leaf
+            list the expression is rebuilt over (#109).
+        """
+        # Arrange
+        for table, offset in (("peaks", 0), ("genes", 173)):
+            conn.execute(f"DROP TABLE IF EXISTS {table}")
+            conn.execute(f"""
+                CREATE TABLE {table} AS
+                SELECT 'chr' || (i % 300) AS chrom,
+                       ((i * 37 + {offset}) % 5000)::INTEGER AS "start",
+                       (((i * 37 + {offset}) % 5000) + 300)::INTEGER AS "end"
+                FROM range(3000) t(i)
+            """)
+        query = (
+            f"SELECT a.chrom, {projection} FROM peaks a {kind} JOIN genes b "
+            "ON a.interval INTERSECTS b.interval"
+        )
+
+        # Act
+        sql = _assert_agrees_with_naive(conn, query)
+
+        # Assert
+        assert f"> {MAX_PER_CHROM_PARTITIONS}" in sql
+
+    def test_query_should_type_expression_columns_in_empty_schema_fallback(self, conn):
+        """Test that the typed empty result carries rebuilt expression columns.
+
+        Given:
+            Tables whose chromosomes are disjoint, so no per-chromosome branch
+            is emitted, and a SELECT list of expressions yielding VARCHAR,
+            INTEGER, DOUBLE and BIGINT values.
+        When:
+            The query is transpiled with ``dialect='duckdb'`` and executed, and
+            separately with ``dialect=None``.
+        Then:
+            It should return no rows with the naive plan's column names and
+            types — the empty-schema fallback evaluates each expression over
+            the ``WHERE FALSE`` leaves (#109).
+        """
+        # Arrange
+        _make_table(conn, "peaks", [("chrA", 100, 200, "p", 1, "+")])
+        _make_table(conn, "genes", [("chrB", 150, 250, "g", 2, "-")])
+        query = (
+            "SELECT a.chrom AS c, GREATEST(a.start, b.start) AS s, "
+            'LEAST(a."end", b."end") - GREATEST(a.start, b.start) AS ov, '
+            "a.name || b.name AS nm, a.start / 2 AS h, CAST(a.start AS BIGINT) AS big "
+            "FROM peaks a JOIN genes b ON a.interval INTERSECTS b.interval"
+        )
+
+        # Act
+        sql = _assert_agrees_with_naive(conn, query)
+        rows, schema = _rows_and_schema(conn, sql)
+
+        # Assert
+        assert "SET VARIABLE __giql_iejoin_" in sql
+        assert rows == []
+        assert schema == [
+            ("c", "VARCHAR"),
+            ("s", "INTEGER"),
+            ("ov", "INTEGER"),
+            ("nm", "VARCHAR"),
+            ("h", "DOUBLE"),
+            ("big", "BIGINT"),
+        ]
+
+    def test_query_should_isolate_results_when_expressions_share_a_session_variable(  # noqa: E501
+        self, conn
+    ):
+        """Test that two expressions over one leaf set share a variable safely.
+
+        Given:
+            One overlapping pair, and ``GREATEST(a.start, b.start)`` and
+            ``LEAST(a.start, b.start)`` transpiled as separate queries whose
+            inner projections are identical.
+        When:
+            Both setups run on one connection and then both final SELECTs.
+        Then:
+            It should mint one content-addressed session variable for both
+            (the name keys on the inner leaf list) and each SELECT should still
+            return its own expression's value (#109).
+        """
+        # Arrange
+        _make_table(conn, "peaks", [("chr1", 100, 200, "p", 1, "+")])
+        _make_table(conn, "genes", [("chr1", 150, 250, "g", 2, "-")])
+        template = (
+            "SELECT {fn}(a.start, b.start) AS v "
+            "FROM peaks a JOIN genes b ON a.interval INTERSECTS b.interval"
+        )
+        greatest_sql = transpile(
+            template.format(fn="GREATEST"), tables=["peaks", "genes"], dialect="duckdb"
+        )
+        least_sql = transpile(
+            template.format(fn="LEAST"), tables=["peaks", "genes"], dialect="duckdb"
+        )
+        greatest_setup, greatest_select = greatest_sql.split(";\n")
+        least_setup, least_select = least_sql.split(";\n")
+
+        # Act
+        conn.execute(greatest_setup)
+        conn.execute(least_setup)
+        greatest_rows = conn.execute(greatest_select).fetchall()
+        least_rows = conn.execute(least_select).fetchall()
+
+        # Assert
+        assert _dynamic_sql_variables(greatest_sql) == _dynamic_sql_variables(least_sql)
+        assert greatest_rows == [(150,)]
+        assert least_rows == [(100,)]
 
     def test_query_should_treat_touching_half_open_intervals_as_non_overlapping(
         self, conn
@@ -6910,18 +8300,7 @@ class TestTranspileDuckDBIEJoinExecution:
         # Arrange
         peak_rows = [(c, s, s + length) for (c, s, length) in peaks]
         gene_rows = [(c, s, s + length) for (c, s, length) in genes]
-        conn.execute("DROP TABLE IF EXISTS peaks")
-        conn.execute("DROP TABLE IF EXISTS genes")
-        conn.execute(
-            'CREATE TABLE peaks (chrom VARCHAR, "start" INTEGER, "end" INTEGER)'
-        )
-        if peak_rows:
-            conn.executemany("INSERT INTO peaks VALUES (?, ?, ?)", peak_rows)
-        conn.execute(
-            'CREATE TABLE genes (chrom VARCHAR, "start" INTEGER, "end" INTEGER)'
-        )
-        if gene_rows:
-            conn.executemany("INSERT INTO genes VALUES (?, ?, ?)", gene_rows)
+        _make_interval_tables(conn, peak_rows, gene_rows)
         sql = transpile(
             """
             SELECT a.chrom AS a_chrom, a.start AS a_start, a.end AS a_end,
@@ -6947,24 +8326,8 @@ class TestTranspileDuckDBIEJoinExecution:
         suppress_health_check=[HealthCheck.function_scoped_fixture],
     )
     @given(
-        peaks=st.lists(
-            st.tuples(
-                st.sampled_from(["chr1", "chr2"]),
-                st.integers(min_value=0, max_value=100),
-                st.integers(min_value=1, max_value=30),
-            ),
-            min_size=0,
-            max_size=6,
-        ),
-        genes=st.lists(
-            st.tuples(
-                st.sampled_from(["chr1", "chr2"]),
-                st.integers(min_value=0, max_value=100),
-                st.integers(min_value=1, max_value=30),
-            ),
-            min_size=0,
-            max_size=6,
-        ),
+        peaks=_interval_lists(),
+        genes=_interval_lists(),
     )
     def test_query_should_match_naive_predicate_plan_for_random_inputs(
         self, conn, peaks, genes
@@ -6983,18 +8346,7 @@ class TestTranspileDuckDBIEJoinExecution:
         # Arrange
         peak_rows = [(c, s, s + length) for (c, s, length) in peaks]
         gene_rows = [(c, s, s + length) for (c, s, length) in genes]
-        conn.execute("DROP TABLE IF EXISTS peaks")
-        conn.execute("DROP TABLE IF EXISTS genes")
-        conn.execute(
-            'CREATE TABLE peaks (chrom VARCHAR, "start" INTEGER, "end" INTEGER)'
-        )
-        if peak_rows:
-            conn.executemany("INSERT INTO peaks VALUES (?, ?, ?)", peak_rows)
-        conn.execute(
-            'CREATE TABLE genes (chrom VARCHAR, "start" INTEGER, "end" INTEGER)'
-        )
-        if gene_rows:
-            conn.executemany("INSERT INTO genes VALUES (?, ?, ?)", gene_rows)
+        _make_interval_tables(conn, peak_rows, gene_rows)
         query = """
             SELECT a.chrom AS a_chrom, a.start AS a_start, a.end AS a_end,
                    b.chrom AS b_chrom, b.start AS b_start, b.end AS b_end
@@ -7595,18 +8947,7 @@ class TestTranspileDuckDBIEJoinExecution:
         # Arrange
         peak_rows = [(c, s, s + length) for (c, s, length) in peaks]
         gene_rows = [(c, s, s + length) for (c, s, length) in genes]
-        conn.execute("DROP TABLE IF EXISTS peaks")
-        conn.execute("DROP TABLE IF EXISTS genes")
-        conn.execute(
-            'CREATE TABLE peaks (chrom VARCHAR, "start" INTEGER, "end" INTEGER)'
-        )
-        if peak_rows:
-            conn.executemany("INSERT INTO peaks VALUES (?, ?, ?)", peak_rows)
-        conn.execute(
-            'CREATE TABLE genes (chrom VARCHAR, "start" INTEGER, "end" INTEGER)'
-        )
-        if gene_rows:
-            conn.executemany("INSERT INTO genes VALUES (?, ?, ?)", gene_rows)
+        _make_interval_tables(conn, peak_rows, gene_rows)
         sql = transpile(
             "SELECT a.chrom, a.start, a.end "
             "FROM peaks a "
@@ -7628,24 +8969,8 @@ class TestTranspileDuckDBIEJoinExecution:
         suppress_health_check=[HealthCheck.function_scoped_fixture],
     )
     @given(
-        peaks=st.lists(
-            st.tuples(
-                st.sampled_from(["chr1", "chr2"]),
-                st.integers(min_value=0, max_value=100),
-                st.integers(min_value=1, max_value=30),
-            ),
-            min_size=0,
-            max_size=6,
-        ),
-        genes=st.lists(
-            st.tuples(
-                st.sampled_from(["chr1", "chr2"]),
-                st.integers(min_value=0, max_value=100),
-                st.integers(min_value=1, max_value=30),
-            ),
-            min_size=0,
-            max_size=6,
-        ),
+        peaks=_interval_lists(),
+        genes=_interval_lists(),
     )
     def test_query_should_match_python_native_semi_overlap_for_narrow_random_inputs(
         self, conn, peaks, genes
@@ -7664,18 +8989,7 @@ class TestTranspileDuckDBIEJoinExecution:
         # Arrange
         peak_rows = [(c, s, s + length) for (c, s, length) in peaks]
         gene_rows = [(c, s, s + length) for (c, s, length) in genes]
-        conn.execute("DROP TABLE IF EXISTS peaks")
-        conn.execute("DROP TABLE IF EXISTS genes")
-        conn.execute(
-            'CREATE TABLE peaks (chrom VARCHAR, "start" INTEGER, "end" INTEGER)'
-        )
-        if peak_rows:
-            conn.executemany("INSERT INTO peaks VALUES (?, ?, ?)", peak_rows)
-        conn.execute(
-            'CREATE TABLE genes (chrom VARCHAR, "start" INTEGER, "end" INTEGER)'
-        )
-        if gene_rows:
-            conn.executemany("INSERT INTO genes VALUES (?, ?, ?)", gene_rows)
+        _make_interval_tables(conn, peak_rows, gene_rows)
         query = (
             "SELECT a.chrom, a.start, a.end "
             "FROM peaks a "
@@ -7734,18 +9048,7 @@ class TestTranspileDuckDBIEJoinExecution:
         # Arrange
         peak_rows = [(c, s, s + length) for (c, s, length) in peaks]
         gene_rows = [(c, s, s + length) for (c, s, length) in genes]
-        conn.execute("DROP TABLE IF EXISTS peaks")
-        conn.execute("DROP TABLE IF EXISTS genes")
-        conn.execute(
-            'CREATE TABLE peaks (chrom VARCHAR, "start" INTEGER, "end" INTEGER)'
-        )
-        if peak_rows:
-            conn.executemany("INSERT INTO peaks VALUES (?, ?, ?)", peak_rows)
-        conn.execute(
-            'CREATE TABLE genes (chrom VARCHAR, "start" INTEGER, "end" INTEGER)'
-        )
-        if gene_rows:
-            conn.executemany("INSERT INTO genes VALUES (?, ?, ?)", gene_rows)
+        _make_interval_tables(conn, peak_rows, gene_rows)
         sql = transpile(
             "SELECT a.chrom, a.start, a.end "
             "FROM peaks a "
@@ -7767,24 +9070,8 @@ class TestTranspileDuckDBIEJoinExecution:
         suppress_health_check=[HealthCheck.function_scoped_fixture],
     )
     @given(
-        peaks=st.lists(
-            st.tuples(
-                st.sampled_from(["chr1", "chr2"]),
-                st.integers(min_value=0, max_value=100),
-                st.integers(min_value=1, max_value=30),
-            ),
-            min_size=0,
-            max_size=6,
-        ),
-        genes=st.lists(
-            st.tuples(
-                st.sampled_from(["chr1", "chr2"]),
-                st.integers(min_value=0, max_value=100),
-                st.integers(min_value=1, max_value=30),
-            ),
-            min_size=0,
-            max_size=6,
-        ),
+        peaks=_interval_lists(),
+        genes=_interval_lists(),
     )
     def test_query_should_match_python_native_anti_overlap_for_narrow_random_inputs(
         self, conn, peaks, genes
@@ -7805,18 +9092,7 @@ class TestTranspileDuckDBIEJoinExecution:
         # Arrange
         peak_rows = [(c, s, s + length) for (c, s, length) in peaks]
         gene_rows = [(c, s, s + length) for (c, s, length) in genes]
-        conn.execute("DROP TABLE IF EXISTS peaks")
-        conn.execute("DROP TABLE IF EXISTS genes")
-        conn.execute(
-            'CREATE TABLE peaks (chrom VARCHAR, "start" INTEGER, "end" INTEGER)'
-        )
-        if peak_rows:
-            conn.executemany("INSERT INTO peaks VALUES (?, ?, ?)", peak_rows)
-        conn.execute(
-            'CREATE TABLE genes (chrom VARCHAR, "start" INTEGER, "end" INTEGER)'
-        )
-        if gene_rows:
-            conn.executemany("INSERT INTO genes VALUES (?, ?, ?)", gene_rows)
+        _make_interval_tables(conn, peak_rows, gene_rows)
         query = (
             "SELECT a.chrom, a.start, a.end "
             "FROM peaks a "
@@ -7976,24 +9252,8 @@ class TestTranspileDuckDBIEJoinExecution:
         suppress_health_check=[HealthCheck.function_scoped_fixture],
     )
     @given(
-        peaks=st.lists(
-            st.tuples(
-                st.sampled_from(["chr1", "chr2"]),
-                st.integers(min_value=0, max_value=100),
-                st.integers(min_value=1, max_value=30),
-            ),
-            min_size=0,
-            max_size=6,
-        ),
-        genes=st.lists(
-            st.tuples(
-                st.sampled_from(["chr1", "chr2"]),
-                st.integers(min_value=0, max_value=100),
-                st.integers(min_value=1, max_value=30),
-            ),
-            min_size=0,
-            max_size=6,
-        ),
+        peaks=_interval_lists(),
+        genes=_interval_lists(),
     )
     def test_query_should_match_python_native_anti_overlap_with_where_residual_random_inputs(
         self, conn, peaks, genes
@@ -8014,18 +9274,7 @@ class TestTranspileDuckDBIEJoinExecution:
         # Arrange
         peak_rows = [(c, s, s + length) for (c, s, length) in peaks]
         gene_rows = [(c, s, s + length) for (c, s, length) in genes]
-        conn.execute("DROP TABLE IF EXISTS peaks")
-        conn.execute("DROP TABLE IF EXISTS genes")
-        conn.execute(
-            'CREATE TABLE peaks (chrom VARCHAR, "start" INTEGER, "end" INTEGER)'
-        )
-        if peak_rows:
-            conn.executemany("INSERT INTO peaks VALUES (?, ?, ?)", peak_rows)
-        conn.execute(
-            'CREATE TABLE genes (chrom VARCHAR, "start" INTEGER, "end" INTEGER)'
-        )
-        if gene_rows:
-            conn.executemany("INSERT INTO genes VALUES (?, ?, ?)", gene_rows)
+        _make_interval_tables(conn, peak_rows, gene_rows)
         query = (
             "SELECT a.chrom, a.start, a.end "
             "FROM peaks a "
@@ -8721,14 +9970,23 @@ class TestTranspileDuckDBIEJoinUnsupportedProjectionFallback:
     """Regression tests for #204 and #205.
 
     Projections the naive-predicate plan compiles but the IEJoin projection
-    rebuild cannot express — expressions (``a.start + 1``), window aggregates,
-    ``FILTER`` clauses, scalar subqueries, aggregates nested in expressions
-    (``COUNT(*) * 2``), and stars nested in an aggregate argument
-    (``COUNT(a.*)`` / ``MIN(COLUMNS(*))``) — must decline the IEJoin and fall
-    back to the naive plan, keeping ``dialect="duckdb"`` consistent with every
-    other backend rather than hard-erroring (#205) or miscompiling (#204). A
-    projection with an out-of-scope column reference stays a clean transpile
-    error (the naive plan rejects it too).
+    rebuild cannot express — window aggregates, ``FILTER`` clauses, scalar
+    subqueries, aggregates nested in expressions (``COUNT(*) * 2``), bare
+    literals, and stars nested in an aggregate argument (``COUNT(a.*)`` /
+    ``MIN(COLUMNS(*))``) — must decline the IEJoin and fall back to the naive
+    plan, keeping ``dialect="duckdb"`` consistent with every other backend
+    rather than hard-erroring (#205) or miscompiling (#204). A projection with
+    an out-of-scope column reference stays a clean transpile error (the naive
+    plan rejects it too). A scalar expression over qualified columns
+    (``a.start + 1``) is no longer in this set: it is rebuilt on the IEJoin
+    path (#109), and these declines must not over-reach onto it.
+
+    #109's review added three more members, each a shape the first cut of the
+    expression rebuild admitted and answered wrongly: a literal subscript
+    (re-rendered shifted by one), a lambda (rebound against the wrapper
+    relation's alias scope), and an aggregate sqlglot models outside
+    :class:`~sqlglot.expressions.AggFunc` (rebuilt as an expression, so named
+    ``__giql_expr_<n>`` against the published ``__giql_agg_<n>`` contract).
     """
 
     @pytest.mark.parametrize(
@@ -8738,13 +9996,43 @@ class TestTranspileDuckDBIEJoinUnsupportedProjectionFallback:
             "COUNT(b.*)",
             "COUNT(a.* EXCLUDE (name))",
             "MIN(COLUMNS(*))",
-            "a.start + 1",
             "SUM(a.score) OVER ()",
             "SUM(a.score) FILTER (WHERE a.score > 0)",
             "COUNT(*) * 2",
+            "COUNT(a.*) + 1",
             "(SELECT 1) AS s",
+            "a.start + (SELECT 1)",
+            "COLUMNS(*) + 1",
             "100",
             "a.name, COUNT(a.*)",
+            "GREATEST(a.start, SUM(b.start) OVER ())",
+            "CASE WHEN EXISTS (SELECT 1) THEN a.start END",
+            "a.start + COUNT(*)",
+            "a.start IN (SELECT start FROM genes)",
+            "GREATEST(a.start, b.*)",
+            "1 + 1",
+            "NULL",
+            "CAST(100 AS INT)",
+            # A literal subscript re-renders shifted by one, because the query
+            # is read with GIQLDialect (INDEX_OFFSET 0) and the rebuild is
+            # emitted with DuckDB's generator (INDEX_OFFSET 1) — #109 B1.
+            "a.arr[1]",
+            "a.name[1]",
+            "a.arr[1] + a.start",
+            # A lambda parameter would rebind against the wrapper relation,
+            # whose alias scope differs from the join's — #109 B2.
+            "list_transform(a.arr, x -> x + a.start)",
+            "list_transform(b.arr, a -> a.start)",
+            # Aggregates sqlglot models outside AggFunc, as Anonymous or as a
+            # dedicated non-AggFunc class — #109 B3.
+            "product(a.score)",
+            "histogram(a.score)",
+            "list(a.score)",
+            "quantile_cont(a.score, 0.5)",
+            "quantile_cont(a.score, 0.5) * 2",
+            "a.start + 1 AS v, 100 AS k",
+            "a.*, a.start + 1 AS v",
+            "a.start + 1 AS v, SUM(a.score) OVER () AS w",
         ],
     )
     def test_transpile_should_decline_unsupported_projection_to_naive_plan(
@@ -8845,12 +10133,16 @@ class TestTranspileDuckDBIEJoinUnsupportedProjectionFallback:
     @pytest.mark.parametrize(
         "projection, expected",
         [
-            ("a.start + 1", [(101,)]),
+            ("a.start + (SELECT 1)", [(101,)]),
             ("SUM(a.score) OVER ()", [(7,)]),
             ("SUM(a.score) FILTER (WHERE a.score > 0)", [(7,)]),
             ("COUNT(*) * 2", [(2,)]),
             ("(SELECT 1) AS s", [(1,)]),
             ("COUNT(a.*)", [(1,)]),
+            ("GREATEST(a.start, SUM(b.start) OVER ())", [(150,)]),
+            ("CASE WHEN EXISTS (SELECT 1) THEN a.start END", [(100,)]),
+            ("a.start IN (SELECT start FROM genes)", [(False,)]),
+            ("1 + 1", [(2,)]),
         ],
     )
     def test_query_should_match_naive_plan_for_unsupported_projection(
@@ -8860,9 +10152,10 @@ class TestTranspileDuckDBIEJoinUnsupportedProjectionFallback:
 
         Given:
             A projection the IEJoin cannot rebuild but the naive plan handles —
-            an expression, a window aggregate, a FILTER clause, an
-            arithmetic-over-aggregate, a scalar subquery, or an aggregate over a
-            qualified star — over an INTERSECTS join with one overlapping pair.
+            an expression over a scalar subquery, a window aggregate, a FILTER
+            clause, an arithmetic-over-aggregate, a scalar subquery, or an
+            aggregate over a qualified star — over an INTERSECTS join with one
+            overlapping pair.
         When:
             The query is transpiled with ``dialect='duckdb'`` and executed, and
             separately with ``dialect=None``.
@@ -8895,6 +10188,10 @@ class TestTranspileDuckDBIEJoinUnsupportedProjectionFallback:
             "score + 1",
             "SUM(score) OVER ()",
             "SUM(score) FILTER (WHERE score > 0)",
+            "GREATEST(a.start, start)",
+            "start + (SELECT 1)",
+            "start + COUNT(*)",
+            "a.start + 1 AS v, score",
         ],
     )
     def test_transpile_should_raise_when_unsupported_wrapper_has_unqualified_column(
@@ -8905,7 +10202,8 @@ class TestTranspileDuckDBIEJoinUnsupportedProjectionFallback:
         Given:
             An expression / window aggregate / FILTER clause whose argument
             references an unqualified column the dialect cannot attribute to a
-            join side.
+            join side — at the top level, nested beside a qualified leaf, inside
+            a declinable wrapper, or as a sibling of a rebuildable expression.
         When:
             ``transpile`` is called with ``dialect='duckdb'``.
         Then:
@@ -8946,19 +10244,19 @@ class TestTranspileDuckDBIEJoinUnsupportedProjectionFallback:
             )
 
     @pytest.mark.parametrize("kind", ["SEMI", "ANTI"])
-    def test_transpile_should_decline_unsupported_projection_under_left_only_join(
+    def test_transpile_should_engage_iejoin_for_expression_projection_under_left_only_join(  # noqa: E501
         self, kind
     ):
-        """Test that an unsupported projection under SEMI/ANTI declines to naive.
+        """Test that a left-side expression under SEMI/ANTI keeps the IEJoin plan.
 
         Given:
             An ``a.start + 1`` expression projection under a SEMI / ANTI join.
         When:
             ``transpile`` is called with ``dialect='duckdb'``.
         Then:
-            It should decline the IEJoin (no ``SET VARIABLE`` scaffolding) so
-            the naive-predicate plan handles it — the decline applies under
-            left-only joins as under INNER.
+            It should engage the IEJoin (``SET VARIABLE __giql_iejoin_``
+            emitted) — the scalar-expression rebuild applies under left-only
+            joins as under INNER (#109).
         """
         # Arrange
         query = (
@@ -8970,8 +10268,8 @@ class TestTranspileDuckDBIEJoinUnsupportedProjectionFallback:
         sql = transpile(query, tables=["peaks", "genes"], dialect="duckdb")
 
         # Assert
-        assert "SET VARIABLE" not in sql.upper()
-        assert "getvariable" not in sql
+        assert "SET VARIABLE __giql_iejoin_" in sql
+        assert "getvariable" in sql
 
     def test_transpile_should_still_engage_iejoin_for_plain_aggregate(self):
         """Test that a plain qualified aggregate still engages the IEJoin.
@@ -8996,3 +10294,364 @@ class TestTranspileDuckDBIEJoinUnsupportedProjectionFallback:
 
         # Assert
         assert "SET VARIABLE __giql_iejoin_" in sql
+
+
+def _make_typed_interval_tables(conn) -> None:
+    """Recreate peaks/genes with the array and struct columns the gate needs.
+
+    ``peaks.arr`` is a plain list and ``peaks.name`` a string, so a subscript
+    has something to shift; ``genes.arr`` is a list of structs, so a lambda
+    body can reference a field and shadow the ``a`` join alias.
+    """
+    conn.execute("DROP TABLE IF EXISTS peaks")
+    conn.execute("""
+        CREATE TABLE peaks (
+            chrom VARCHAR, "start" INTEGER, "end" INTEGER,
+            name VARCHAR, score INTEGER, arr INTEGER[]
+        )
+    """)
+    conn.execute("INSERT INTO peaks VALUES ('chr1', 100, 200, 'abcdef', 10, [7, 8, 9])")
+    conn.execute("DROP TABLE IF EXISTS genes")
+    conn.execute("""
+        CREATE TABLE genes (
+            chrom VARCHAR, "start" INTEGER, "end" INTEGER,
+            name VARCHAR, score INTEGER, arr STRUCT("start" INTEGER)[]
+        )
+    """)
+    conn.execute(
+        "INSERT INTO genes VALUES "
+        "('chr1', 150, 250, 'g1', 1, [{'start': 1}, {'start': 2}])"
+    )
+
+
+class TestTranspileDuckDBIEJoinProjectionContract:
+    """Regression tests for #109's review findings B1-B5.
+
+    The expression rebuild re-emits a user-authored tree with the DuckDB
+    generator, though the query was read with :class:`~giql.dialect.GIQLDialect`.
+    Its first cut gated that on a blocklist of six sqlglot node classes while
+    publishing the contract as a property, so every node class the blocklist
+    did not name was admitted by default. Three shapes reached the gap and
+    answered wrongly. These tests pin the property instead: a shape either
+    engages and agrees with the naive plan, or declines — never engages and
+    diverges.
+    """
+
+    @pytest.mark.parametrize(
+        "projection",
+        ["a.arr[1]", "a.name[1]", "a.arr[1] + a.start", "a.arr[1][1]"],
+    )
+    def test_transpile_should_decline_subscript_projection(self, projection):
+        """Test that a subscript projection is not rebuilt on the IEJoin path.
+
+        Given:
+            A column-to-column INTERSECTS join projecting a literal subscript
+            of an array or string column.
+        When:
+            ``transpile`` is called with ``dialect='duckdb'``.
+        Then:
+            It should decline the IEJoin. GIQL reads with ``INDEX_OFFSET`` 0
+            and DuckDB writes with 1, so re-emitting the subtree shifts every
+            literal subscript by one; the rebuild must not be a source of that
+            (#109 B1).
+
+        This asserts the decline rather than cross-plan value agreement,
+        because the shift is not the rebuild's to fix: ``dialect="duckdb"``
+        renders the whole statement with DuckDB's generator, so a bare
+        ``SELECT arr[1] FROM peaks`` with no join at all already returns the
+        second element. That is tracked as its own defect; declining here
+        keeps the rebuild from becoming a second source of it.
+        """
+        # Arrange
+        query = (
+            f"SELECT {projection} AS v FROM peaks a "
+            "JOIN genes b ON a.interval INTERSECTS b.interval"
+        )
+
+        # Act
+        sql = transpile(query, tables=["peaks", "genes"], dialect="duckdb")
+
+        # Assert
+        assert "SET VARIABLE" not in sql.upper()
+
+    @pytest.mark.parametrize(
+        "projection, expected",
+        [
+            ('list_transform(b.arr, a -> a."start")', [100, 100]),
+            ('list_transform(b.arr, x -> x."start" + a.start)', [101, 102]),
+        ],
+        ids=["parameter_shadows_join_alias", "parameter_distinct_from_alias"],
+    )
+    def test_query_should_bind_a_lambda_body_against_the_join_scope(
+        self, conn, projection, expected
+    ):
+        """Test that a lambda body still binds against the join's alias scope.
+
+        Given:
+            A column-to-column INTERSECTS join projecting a lambda whose
+            parameter either shares the left join alias's name or does not.
+        When:
+            The query is transpiled with ``dialect='duckdb'`` and executed.
+        Then:
+            It should decline the IEJoin and return the value the join scope
+            gives — for the shadowing case ``[100, 100]``, DuckDB resolving
+            ``a."start"`` to the table rather than to the parameter's struct
+            field. Rebuilding would swap the join for the wrapper relation,
+            which carries no ``a`` alias, so the parameter would capture those
+            references and silently return ``[1, 2]`` instead (#109 B2).
+        """
+        # Arrange
+        _make_typed_interval_tables(conn)
+        query = (
+            f"SELECT {projection} AS v FROM peaks a "
+            "JOIN genes b ON a.interval INTERSECTS b.interval"
+        )
+
+        # Act
+        sql = transpile(query, tables=["peaks", "genes"], dialect="duckdb")
+        rows = conn.execute(sql).fetchall()
+
+        # Assert
+        assert "SET VARIABLE" not in sql.upper()
+        assert rows == [(expected,)]
+
+    def test_transpile_should_never_rebuild_an_aggregate_as_an_expression(self, conn):
+        """Test that no DuckDB aggregate is rebuilt through the expression path.
+
+        Given:
+            Every function name DuckDB's own catalog reports as an aggregate.
+        When:
+            Each is projected over a qualified column and transpiled with
+            ``dialect='duckdb'``.
+        Then:
+            Each should either decline or engage through the aggregate path,
+            never the expression path. sqlglot models only some aggregates as
+            :class:`~sqlglot.expressions.AggFunc` — the rest parse as
+            ``Anonymous`` or as a dedicated non-``AggFunc`` class — so one
+            slipping through would be named ``__giql_expr_<n>`` against the
+            published ``__giql_agg_<n>`` contract, and would bypass the
+            dedicated "requires qualified aggregate arguments" diagnostic
+            (#109 B3). Generated from the catalog rather than a fixed list, so
+            a sqlglot reclassification fails here and not in a user's query.
+        """
+        # Arrange
+        names = [
+            row[0]
+            for row in conn.execute(
+                "SELECT DISTINCT function_name FROM duckdb_functions() "
+                "WHERE function_type = 'aggregate' ORDER BY function_name"
+            ).fetchall()
+        ]
+        assert len(names) > 50, "DuckDB should expose a substantial aggregate catalog"
+
+        # Act
+        misnamed = []
+        for name in names:
+            query = (
+                f"SELECT {name}(a.score) FROM peaks a "
+                "JOIN genes b ON a.interval INTERSECTS b.interval"
+            )
+            try:
+                sql = transpile(query, tables=["peaks", "genes"], dialect="duckdb")
+            except ValueError:
+                continue  # a qualifier diagnosis, not a rebuild
+            if "__giql_expr_" in sql:
+                misnamed.append(name)
+
+        # Assert
+        assert misnamed == []
+
+    @pytest.mark.parametrize(
+        "prefix",
+        ["__giql_expr_1", "__giql_agg_1"],
+    )
+    def test_query_should_not_repeat_an_output_name_when_user_alias_collides(
+        self, peaks_genes, prefix
+    ):
+        """Test that a synthesized output name never shadows a user's alias.
+
+        Given:
+            A SELECT list carrying a user alias spelled exactly like the name
+            the dialect synthesizes for an unaliased expression at that
+            position.
+        When:
+            The query is transpiled with ``dialect='duckdb'`` and executed.
+        Then:
+            The result columns should all be distinctly named. DuckDB accepts
+            duplicates silently, so a collision would make ``fetchdf()`` and
+            any name-keyed access collapse or shadow a column (#109 B4).
+        """
+        # Arrange
+        conn = peaks_genes
+        query = (
+            f"SELECT a.chrom AS {prefix}, a.start + 1 FROM peaks a "
+            "JOIN genes b ON a.interval INTERSECTS b.interval"
+        )
+
+        # Act
+        sql = transpile(query, tables=["peaks", "genes"], dialect="duckdb")
+        cursor = conn.execute(sql)
+        names = [column[0] for column in cursor.description]
+
+        # Assert
+        assert "SET VARIABLE __giql_iejoin_" in sql
+        assert len(names) == len(set(names)), names
+        assert prefix in names
+
+    @pytest.mark.parametrize(
+        "projection, engages",
+        [
+            ("a.start + 1", True),
+            ('LEAST(a."end", b."end") - GREATEST(a.start, b.start)', True),
+            ("CASE WHEN a.start < b.start THEN 1 ELSE 2 END", True),
+            ("CAST(a.start AS BIGINT)", True),
+            ("TRY_CAST(a.start AS BIGINT)", True),
+            ("a.name || '_' || b.name", True),
+            ("COALESCE(a.start, 100)", True),
+            ("LENGTH(a.name)", True),
+            ("UPPER(a.name)", True),
+            ("SUBSTRING(a.name, 1, 3)", True),
+            ("a.start IS DISTINCT FROM b.start", True),
+            ("a.start < b.start", True),
+            ("a.arr[1:2]", True),
+            ("{'k': a.start}", True),
+            ("[a.start, b.start]", True),
+            ("a.arr[1]", False),
+            ("list_transform(a.arr, x -> x)", False),
+            ("SUM(a.score) OVER ()", False),
+            ("COUNT(*) * 2", False),
+            ("unnest([a.start, b.start])", False),
+            ("epoch(a.start)", False),
+            ("COLUMNS(*) + 1", False),
+            ("a.start + (SELECT 1)", False),
+            ("100", False),
+        ],
+    )
+    def test_transpile_should_hold_its_published_projection_contract(
+        self, projection, engages
+    ):
+        """Test the engage/decline boundary the performance guide publishes.
+
+        Given:
+            One projection per node class the contract names, on both sides of
+            the boundary.
+        When:
+            The query is transpiled with ``dialect='duckdb'``.
+        Then:
+            It should engage exactly when the guide says it does. A sqlglot
+            release that reclassifies a node, or a future relaxation of the
+            gate, fails here rather than silently moving a query between plans
+            or renaming its result column (#109 B5).
+        """
+        # Arrange
+        query = (
+            f"SELECT {projection} AS v FROM peaks a "
+            "JOIN genes b ON a.interval INTERSECTS b.interval"
+        )
+
+        # Act
+        sql = transpile(query, tables=["peaks", "genes"], dialect="duckdb")
+
+        # Assert
+        assert ("SET VARIABLE __giql_iejoin_" in sql) is engages
+
+    def test_transpile_should_allocate_one_inner_column_for_case_variant_leaves(self):
+        """Test that case-variant leaf spellings share one inner column.
+
+        Given:
+            An expression whose two leaves name one physical column in
+            different cases.
+        When:
+            The query is transpiled with ``dialect='duckdb'``.
+        Then:
+            Exactly one ``__giql_p<n>`` should be allocated. DuckDB resolves
+            identifiers case-insensitively, so two entries would carry a
+            duplicate of the same value per row through every branch of the
+            per-chromosome union (#109 A1).
+        """
+        # Act
+        sql = transpile(
+            "SELECT GREATEST(a.START, a.start) AS g FROM peaks a "
+            "JOIN genes b ON a.interval INTERSECTS b.interval",
+            tables=["peaks", "genes"],
+            dialect="duckdb",
+        )
+
+        # Assert
+        assert "SET VARIABLE __giql_iejoin_" in sql
+        assert len(set(re.findall(r"__giql_p\d+", sql))) == 1
+
+    @pytest.mark.parametrize(
+        "projection, expected",
+        [
+            ("GREATEST(a.start, c.start)", "'c.start' references unknown table"),
+            ('GREATEST(a.start, LEAST(a."end", oops))', "column 'oops' must be"),
+            ("mycat.myschema.a.start + 1", "carries a catalog/schema qualifier"),
+        ],
+        ids=["unknown_qualifier", "unqualified_leaf", "catalog_qualified"],
+    )
+    def test_transpile_should_name_the_offending_leaf_when_projection_is_unresolvable(
+        self, projection, expected
+    ):
+        """Test that the diagnosis names the leaf, not the tree around it.
+
+        Given:
+            An expression projection with one unresolvable leaf, nested at
+            varying depth.
+        When:
+            ``transpile`` is called with ``dialect='duckdb'``.
+        Then:
+            It should raise ``ValueError`` naming that leaf and its specific
+            fault. Echoing the whole projection would prescribe qualifying a
+            column the user already qualified (#109 A3), and a catalog-
+            qualified leaf must raise rather than engage, since the naive plan
+            rejects it at bind time (#109 A12).
+        """
+        # Arrange
+        query = (
+            f"SELECT {projection} AS v FROM peaks a "
+            "JOIN genes b ON a.interval INTERSECTS b.interval"
+        )
+
+        # Act & assert
+        with pytest.raises(ValueError) as excinfo:
+            transpile(query, tables=["peaks", "genes"], dialect="duckdb")
+        assert expected in str(excinfo.value)
+
+    @pytest.mark.parametrize("kind", ["SEMI", "ANTI"])
+    @pytest.mark.parametrize(
+        "projection",
+        [
+            "b.start + 1",
+            "CASE WHEN a.start > 0 THEN b.start ELSE a.start END",
+            'LEAST(a."end", GREATEST(a.start, b.start))',
+        ],
+    )
+    def test_transpile_should_raise_left_side_only_for_a_nested_right_side_leaf(
+        self, kind, projection
+    ):
+        """Test that a right-side leaf raises however deeply it is nested.
+
+        Given:
+            A SEMI or ANTI join projecting an expression with a right-side
+            leaf at the top level or nested inside a function or ``CASE``.
+        When:
+            ``transpile`` is called with ``dialect='duckdb'``.
+        Then:
+            It should raise the dedicated left-side-only ``ValueError`` naming
+            the leaf. Before #109's review this rule was written in three
+            places and the two that ran later depended on the first having
+            run (#109 B7, A10).
+        """
+        # Arrange
+        query = (
+            f"SELECT {projection} AS v FROM peaks a {kind} JOIN genes b "
+            "ON a.interval INTERSECTS b.interval"
+        )
+
+        # Act & assert
+        with pytest.raises(ValueError) as excinfo:
+            transpile(query, tables=["peaks", "genes"], dialect="duckdb")
+        message = str(excinfo.value)
+        assert "only projects left-side columns" in message
+        assert "'b.start'" in message
