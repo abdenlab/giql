@@ -80,6 +80,12 @@ def transpile(
         declines silently to the naive predicate for every projection it cannot
         split, so ``dialect="duckdb"`` never changes an outer join's result —
         only its plan. See the performance guide for the full enumeration.
+        This dialect also names SELECT-list items the other targets leave to
+        the engine: an unaliased scalar expression or aggregate is emitted as
+        ``__giql_expr_<n>`` / ``__giql_agg_<n>``, because the rebuilt text
+        DuckDB would derive a name from refers to inner columns the caller
+        never wrote. Alias such an item to pin its result-column name across
+        targets.
 
         The target's capabilities also choose the
         coordinate-canonicalization emit form for a non-canonically-encoded
