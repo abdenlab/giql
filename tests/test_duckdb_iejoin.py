@@ -207,11 +207,32 @@ def _assert_agrees_with_naive(conn, query: str, tables=("peaks", "genes")) -> st
     return dialect_sql
 
 
-def _timed_rows(conn, sql: str) -> tuple[float, list[tuple]]:
-    """Return the wall-clock seconds and rows from executing *sql* on *conn*."""
-    started = time.perf_counter()
-    rows = conn.execute(sql).fetchall()
-    return time.perf_counter() - started, rows
+def _timed_rows(conn, sql: str, *, repeats: int = 3) -> tuple[float, list[tuple]]:
+    """Return the best-of-*repeats* wall-clock seconds and rows for *sql*.
+
+    Callers divide two of these measurements and assert on the ratio, so the
+    measurement has to survive a shared CI runner. Contention inflates a
+    sample upward and never downward, which makes the minimum of several runs
+    an estimate of the uncontended cost; a single sample is not, and the two
+    plans do not degrade alike. The dialect plan is a multi-statement
+    per-chromosome ``UNION ALL`` with far more parallelism to lose than the
+    naive plan's single hash join, so contention inflates the ratio by
+    construction rather than symmetrically.
+
+    That matters because the window these ratios discriminate is narrow --
+    2.0x for the plan the decomposition should pick against 3.3x for the one
+    it must not (#95) -- and narrower than one sample's variance: CI has
+    produced 2.64x for an implementation that measures 1.6x unloaded.
+    Repeating is what keeps the bound tight enough to still catch the
+    regression.
+    """
+    timings: list[float] = []
+    rows: list[tuple] = []
+    for _ in range(repeats):
+        started = time.perf_counter()
+        rows = conn.execute(sql).fetchall()
+        timings.append(time.perf_counter() - started)
+    return min(timings), rows
 
 
 def _dynamic_sql_variables(sql: str) -> list[str]:
@@ -5623,7 +5644,9 @@ class TestTranspileDuckDBIEJoinOuterJoinDecomposition:
         ``IE_JOIN`` for *every* chromosome -- including the 24 that carry all
         the rows. Measured here: 8.3s partitioning on preserved-distinct, 5.0s
         on the shared INTERSECT, against 2.5s naive (#95). The bound is a ratio
-        rather than a wall clock so it calibrates to the machine.
+        rather than a wall clock so it calibrates to the machine, and each
+        side is the best of several runs so a transient stall on a shared
+        runner cannot land in one measurement and not the other.
         """
         # Arrange
         conn.execute("DROP TABLE IF EXISTS peaks")
