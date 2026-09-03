@@ -388,13 +388,14 @@ results.
    rows = conn.execute(sql).fetchall()
 
 The dialect rewrites the whole query, so the supported shape is
-``SELECT <qualified non-star projections> FROM <base table>
-{INNER|SEMI|ANTI|LEFT|RIGHT} JOIN <base table> {ON|WHERE} <one
-column-to-column INTERSECTS>`` — the JOIN and the column-to-column
-``INTERSECTS`` are both required (literal-range ``INTERSECTS`` against a
-single table falls through to the default predicate generator). ``LEFT``
-and ``RIGHT`` accept ``ON`` only: the outer-join decomposition rejects any
-top-level ``WHERE``, for the reason given under **Outer joins** below.
+``SELECT <qualified columns, scalar expressions over them, or plain
+aggregates> FROM <base table> {INNER|SEMI|ANTI|LEFT|RIGHT} JOIN <base
+table> {ON|WHERE} <one column-to-column INTERSECTS>`` — the JOIN and the
+column-to-column ``INTERSECTS`` are both required (literal-range
+``INTERSECTS`` against a single table falls through to the default
+predicate generator). ``LEFT`` and ``RIGHT`` accept ``ON`` only: the
+outer-join decomposition rejects any top-level ``WHERE``, for the reason
+given under **Outer joins** below.
 
 **Join variants.** ``INNER JOIN`` is the default. ``SEMI JOIN`` returns
 distinct left rows that have at least one overlapping match; ``ANTI
@@ -516,6 +517,44 @@ them):
   a.col)``, ...) are appended to the outer SELECT. Aggregate arguments
   must be table-qualified (``COUNT(*)`` and ``COUNT(a.col)`` are both
   accepted).
+- **Scalar expression projections.** A SELECT-list expression keeps the
+  IEJoin plan when four properties hold: it is row-wise, it binds no
+  names, it carries no star, and at least one leaf is a qualified column.
+  ``GREATEST(a.start, b.start)``,
+  ``LEAST(a."end", b."end") - GREATEST(a.start, b.start)``,
+  ``a.start + 1``, a ``CASE``, a cast, string concatenation, a comparison,
+  and the ordinary scalar functions (``COALESCE``, ``LENGTH``, ``UPPER``,
+  ``SUBSTRING``, ``DATE_TRUNC``, ...) all qualify. Each leaf column is
+  projected into the per-chromosome subquery and the expression is rebuilt
+  on the outer SELECT over those inner columns, so the join itself is
+  untouched. This is what puts the ``bedtools intersect`` default (clipped
+  overlap span) and ``-wo`` (pairs plus overlap width) shapes on the fast
+  path.
+
+  The leaves rather than the computed value go inward deliberately.
+  Computing the expression inside the subquery would narrow the wrapper
+  relation, but the session-variable name is a content digest of that
+  subquery's SQL, so the expression's text would fold into the digest and
+  ``a.start + 1`` / ``a.start + 2`` / ... would each mint a distinct
+  ``SET VARIABLE`` on a long-lived connection — trading the bounded
+  variable set above for an unbounded one. Leaf dedup means the bedtools
+  shapes pay nothing for this, since they already project their leaves as
+  plain columns.
+
+  An aliased expression keeps its alias; an unaliased one is named
+  ``__giql_expr_<n>`` by position, as an unaliased aggregate is named
+  ``__giql_agg_<n>``, because DuckDB's automatic name would be derived
+  from the rewritten text. A synthesized name is chosen around the names
+  the caller wrote, so it never duplicates one — DuckDB accepts duplicate
+  result-column names silently, which would make ``fetchdf()`` and any
+  name-keyed access collapse or shadow a column. Two same-named *user*
+  columns (``SELECT a.start, b.start``) are left as the caller wrote them,
+  because the naive plan reports the duplicate too.
+
+  A projection failing any of the four properties falls back; see
+  **Projections the IEJoin cannot rebuild** below. Under a ``LEFT`` /
+  ``RIGHT`` outer join an expression projection still declines, since the
+  decomposition's unmatched half only NULL-fills columns.
 - **Extra JOIN / WHERE predicates.** Additional non-INTERSECTS
   predicates ANDed onto the join ON or WHERE (e.g. ``a.score >
   b.score`` or ``WHERE a.score > 100``) are inlined into each
@@ -570,16 +609,46 @@ The soft-fallback shapes are:
   star against DuckDB's live schema, so declining keeps the projection
   identical across backends rather than silently narrowing it.
 - **Projections the IEJoin cannot rebuild.** The dialect's projection
-  rebuild handles a qualified column (``a.col``) or a plain aggregate
-  over qualified columns (``SUM(a.score)`` / ``COUNT(*)``). Any other
-  SELECT-list shape the naive plan compiles for free — an expression
-  (``a.start + 1``), a window aggregate (``SUM(a.score) OVER (...)``), a
-  ``FILTER`` clause, a scalar subquery, an aggregate nested in an
-  expression (``COUNT(*) * 2``), a bare literal, or a star nested in an
-  aggregate argument (``COUNT(a.*)`` / ``MIN(COLUMNS(*))``) — falls back,
-  so ``dialect="duckdb"`` stays consistent with every other backend
-  instead of hard-erroring or, for the aggregate-nested star,
-  miscompiling. A projection whose column the rebuild cannot attribute to
+  rebuild handles a qualified column (``a.col``), a scalar expression
+  over qualified columns (``GREATEST(a.start, b.start)``, ``a.start + 1``
+  — see **Scalar expression projections** above), or a plain aggregate
+  over qualified columns (``SUM(a.score)`` / ``COUNT(*)``). The remaining
+  SELECT-list shapes the naive plan compiles for free fall back, so
+  ``dialect="duckdb"`` stays consistent with every other backend instead
+  of hard-erroring or, for the aggregate-nested star, miscompiling. Each
+  falls back for one of the four properties above:
+
+  - *not row-wise* — a window aggregate (``SUM(a.score) OVER (...)``), a
+    ``FILTER`` clause, an aggregate nested in an expression
+    (``COUNT(*) * 2``), or a row-multiplying call
+    (``unnest([a.start, b.start])``);
+  - *binds names* — a scalar subquery, bare or inside an expression, and a
+    lambda (``list_transform(b.arr, x -> x + a.start)``). A lambda's body
+    resolves against the surrounding relation's aliases, and the rebuild
+    replaces the join with the wrapper relation, so a parameter sharing a
+    join alias's name would bind differently;
+  - *carries a star* — a star nested in an aggregate argument or
+    expression (``COUNT(a.*)`` / ``MIN(COLUMNS(*))`` / ``COLUMNS(*) + 1``),
+    which a schema-less rebuild cannot enumerate;
+  - *no qualified column leaf* — a bare literal (``100``, ``1 + 1``,
+    ``CAST(100 AS INT)``). There is nothing to attribute to a join side,
+    and one such SELECT item declines the whole query, so
+    ``SELECT a.start, 'tag' AS src`` takes the naive plan.
+
+  Two further shapes fall back for reasons specific to the round trip
+  through sqlglot. A **subscript** (``a.arr[1]``) falls back because GIQL
+  reads with a zero-based index offset and DuckDB writes with a one-based
+  one, so re-emitting the subtree would shift the literal by one. And a
+  **function sqlglot does not model** — parsed as an anonymous call, which
+  includes DuckDB aggregates such as ``product``, ``histogram`` and
+  ``quantile_cont`` — falls back because nothing tells the rebuild whether
+  it aggregates, multiplies rows, or binds names. Beyond these named
+  cases the rebuild verifies the round trip rather than predicting it: it
+  re-emits the tree with DuckDB's generator, re-reads it, and declines
+  unless the tree comes back unchanged. An expression projection under
+  a ``LEFT`` / ``RIGHT`` outer join also falls back, because the
+  decomposition's unmatched half only NULL-fills side-attributable
+  columns. A projection whose column the rebuild cannot attribute to
   a join side (unqualified, an unknown table, or the right side under a
   SEMI / ANTI join) raises at transpile time instead (see the hard-error
   list below) — the unknown-table and right-side cases are rejected by the
@@ -637,12 +706,17 @@ these rather than silently miscompile):
   every star it falls back to the naive-predicate plan — see the
   soft-fallback list above. An expression / window aggregate / ``FILTER``
   clause over an *unqualified* column raises the same "requires qualified
-  projections" error — once qualified, the wrapper itself falls back to the
-  naive plan rather than erroring. A scalar subquery always falls back, even
-  over an unqualified inner column, since that column resolves against the
-  subquery's own scope.)
+  projections" error — once qualified, a scalar expression is rebuilt on
+  the IEJoin path, and a window / ``FILTER`` wrapper falls back to the
+  naive plan rather than erroring. A scalar subquery always falls back,
+  even over an unqualified inner column, since that column resolves
+  against the subquery's own scope.)
+  Every one of these diagnostics names the offending *leaf* rather than
+  the projection around it, so ``GREATEST(a.start, c.start)`` reports
+  ``c.start`` instead of prescribing that a column already qualified be
+  qualified.
 - **Unknown table qualifier.** ``c.col`` when the only sides are ``a``
-  and ``b``.
+  and ``b``, at any depth inside an expression.
 - **Unknown alias in GROUP BY / HAVING / ORDER BY.** A modifier-clause
   column qualified with a table alias outside the join's two sides
   (``c.col``) raises with a ``cannot resolve … in <CLAUSE>`` message
@@ -653,6 +727,11 @@ these rather than silently miscompile):
   SEMI / ANTI return left-side columns only. (A right-side ``b.*`` falls
   back to the naive-predicate plan with every other star — see the
   soft-fallback list above.)
+- **Catalog- or schema-qualified column.** ``mycat.myschema.a.col``
+  raises, in a projection as well as in an extra predicate. The
+  alias-rewriter remaps ``a`` to the inner subquery's own ``a``, and the
+  ``mycat.myschema`` prefix would survive that rewrite and address a
+  different relation; the naive plan rejects the form at bind time too.
 - **Aggregate of unqualified column.** ``SUM(score)`` raises; use
   ``SUM(a.score)`` or ``SUM(b.score)``. (A qualified aggregate the IEJoin
   cannot rebuild — ``SUM(a.score) OVER (...)``, ``SUM(a.score) FILTER

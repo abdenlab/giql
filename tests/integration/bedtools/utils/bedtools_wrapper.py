@@ -37,6 +37,7 @@ def intersect(
     count: bool = False,
     write_overlap: bool = False,
     write_all_overlap: bool = False,
+    clip: bool = False,
     fraction_a: float | None = None,
     fraction_b: float | None = None,
     reciprocal: bool = False,
@@ -58,6 +59,11 @@ def intersect(
     write_all_overlap : bool
         Write overlap amount for all A features including
         non-overlapping (-wao).
+    clip : bool
+        Suppress this wrapper's default ``-u`` so bedtools writes each A
+        feature clipped to its overlap with B. bedtools does that when given
+        no flags at all; this wrapper otherwise passes ``-u``, so the
+        parameter is what reaches that output, not a no-op.
     fraction_a : float or None
         Minimum overlap as fraction of A (-f).
     fraction_b : float or None
@@ -85,7 +91,7 @@ def intersect(
             kwargs["wao"] = True
         elif reciprocal:
             kwargs["wa"] = True
-        else:
+        elif not clip:
             kwargs["u"] = True
 
         if strand_mode == "same":
