@@ -451,6 +451,67 @@ def test_intersect_right_outer_join_duckdb_dialect(duckdb_connection):
     assert comparison.match, comparison.failure_message()
 
 
+@pytest.mark.parametrize(
+    "bedtools_kwargs, projection",
+    [
+        (
+            {"clip": True},
+            """
+            a.chrom,
+            GREATEST(a.start, b.start) AS start,
+            LEAST(a."end", b."end") AS "end",
+            a.name, a.score, a.strand
+            """,
+        ),
+        (
+            {"write_overlap": True},
+            """
+            a.chrom, a.start, a.end, a.name, a.score, a.strand,
+            b.chrom AS b_chrom, b.start AS b_start, b.end AS b_end,
+            b.name AS b_name, b.score AS b_score, b.strand AS b_strand,
+            LEAST(a."end", b."end") - GREATEST(a.start, b.start) AS overlap
+            """,
+        ),
+    ],
+    ids=["clipped_span", "write_overlap"],
+)
+def test_intersect_expression_projection_duckdb_dialect(
+    duckdb_connection, partial_overlap_intervals, bedtools_kwargs, projection
+):
+    """
+    GIVEN interval sets with partial overlaps on two chromosomes, plus one A
+        interval with no overlap and one on a chromosome absent from B
+    WHEN a scalar expression projection over both sides' columns is transpiled
+        with dialect="duckdb", keeping the IEJoin plan under an expression
+        projection (#109) — the clipped span (GREATEST of the starts, LEAST of
+        the ends) or that span's width alongside both sides' columns
+    THEN results match the corresponding bedtools intersect output exactly
+
+    The dialect assertion matters as much as the comparison: these projection
+    shapes used to decline to the naive-predicate plan, so the rebuild is only
+    exercised when the fast path actually fires.
+    """
+    rows_a, rows_b = partial_overlap_intervals
+
+    bedtools_result = intersect(rows_a, rows_b, **bedtools_kwargs)
+
+    sql = transpile(
+        f"""
+        SELECT
+            {projection}
+        FROM intervals_a a
+        JOIN intervals_b b ON a.interval INTERSECTS b.interval
+        """,
+        tables=["intervals_a", "intervals_b"],
+        dialect="duckdb",
+    )
+    assert "SET VARIABLE __giql_iejoin_" in sql
+    giql_result = duckdb_connection.execute(sql).fetchall()
+
+    comparison = compare_results(giql_result, bedtools_result)
+    assert comparison.match, comparison.failure_message()
+
+
 def test_intersect_left_outer_join_duckdb_dialect_with_duplicate_rows(
     duckdb_connection,
 ):
