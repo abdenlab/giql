@@ -133,16 +133,19 @@ class TestCrossTargetOracleIntersects:
             Peaks and genes where one peak overlaps a gene on chr1, one peak on
             chr1 has no overlap, and one peak sits on chr2 with no overlapping gene.
         When:
-            A column-to-column ``LEFT JOIN ... ON ... INTERSECTS`` runs. The DuckDB
-            IEJoin path declines outer joins, so every target — generic, datafusion,
-            and duckdb — evaluates the naive overlap predicate as a plain outer
-            ``ON`` condition.
+            A column-to-column ``LEFT JOIN ... ON ... INTERSECTS`` runs. Generic
+            and datafusion evaluate the naive overlap predicate as a plain outer
+            ``ON`` condition; duckdb decomposes the join into an INNER half plus
+            an unmatched half unioned together (#95). The targets reach the
+            answer by different plans, which is exactly what makes agreement
+            between them worth asserting.
         Then:
             Every target should return the matched pair plus both unmatched left
-            rows with a NULL right column, proving the naive predicate gives correct
-            outer-join semantics identically on every engine (#167).
+            rows with a NULL right column, proving all three targets agree on
+            outer-join semantics despite reaching them by different plans
+            (#167, #95).
         """
-        # Arrange / Act / Assert
+        # Arrange / Act
         cross_target_oracle(
             "SELECT a.chrom, a.start AS a_start, b.start AS b_start "
             "FROM peaks a LEFT JOIN genes b ON a.interval INTERSECTS b.interval",
@@ -162,6 +165,12 @@ class TestCrossTargetOracleIntersects:
                 ("chr2", 100, None),
             ],
         )
+
+        # Assert
+        # Without this the case would pass unchanged if duckdb stopped
+        # decomposing -- the naive plan returns these same rows.
+        duckdb_sql = cross_target_oracle.sql_by_target["duckdb"]
+        assert duckdb_sql.count("SET VARIABLE __giql_iejoin_") == 2
 
 
 class TestCrossTargetOracleContainsWithin:

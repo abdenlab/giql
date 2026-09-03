@@ -18,6 +18,7 @@ expander — no capability flag is consulted.
 """
 
 from dataclasses import dataclass
+from typing import Literal
 
 
 @dataclass(frozen=True)
@@ -180,19 +181,26 @@ class DataFusionTarget(Target):
 
 # Public dialect names only. ``generic`` is intentionally absent: ``None`` is
 # the sole public way to select it (see :func:`resolve_target`).
+#: The dialect names ``transpile`` ships. Typing the parameter as
+#: ``DialectName | str`` keeps editor completion for the built-ins while still
+#: admitting a custom target's registered name; the union widens to ``str`` for
+#: a type checker, which is the point -- the registry is open.
+DialectName = Literal["duckdb", "datafusion"]
+
 _TARGETS_BY_NAME: dict[str, type[Target]] = {
     DuckDBTarget.name: DuckDBTarget,
     DataFusionTarget.name: DataFusionTarget,
 }
 
 
-def resolve_target(dialect: str | None) -> Target:
+def resolve_target(dialect: DialectName | str | Target | None) -> Target:
     """Resolve a ``dialect`` parameter to a :class:`Target` instance.
 
     Parameters
     ----------
-    dialect : str | None
-        The target dialect name. ``None`` resolves to :class:`GenericTarget`;
+    dialect : DialectName | str | Target | None
+        A :class:`Target` instance, which resolves to itself, or the name of
+        one. ``None`` resolves to :class:`GenericTarget`;
         ``"duckdb"`` and ``"datafusion"`` resolve to their respective built-in
         targets. Any other name is resolved against the plugin registry — a
         custom :class:`Target` declared through
@@ -209,6 +217,12 @@ def resolve_target(dialect: str | None) -> Target:
     ValueError
         If *dialect* is neither a built-in name nor a registered custom target.
     """
+    if isinstance(dialect, Target):
+        # Targets are frozen and value-equal, so handing one back is safe and
+        # spares the caller a round trip through the registry to select an
+        # object it already holds.
+        return dialect
+
     if dialect is None:
         return GenericTarget()
 

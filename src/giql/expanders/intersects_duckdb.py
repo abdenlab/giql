@@ -7,10 +7,13 @@ range-join family (``IE_JOIN`` / ``PIECEWISE_MERGE_JOIN``);
 :func:`expand_intersects_duckdb` wires it into the operator-expander registry so
 pass 3 (:class:`giql.expander.ExpandOperators`) dispatches DuckDB's ``Intersects``
 nodes here. For the shapes it declines, and for every literal-range or residual
-``Intersects`` predicate, the override defers to the shared naive overlap
-predicate (:func:`giql.expanders.intersects._expand_spatial_op`) that
-``dialect=None`` / ``"datafusion"`` emit on every target — a plain ``ON`` condition
-the engine plans as a range join (#167).
+``Intersects`` predicate, the override defers to whichever expander serves
+``(GenericTarget, Intersects)`` — by default the shared naive overlap predicate
+that ``dialect=None`` / ``"datafusion"`` emit on every target, a plain ``ON``
+condition the engine plans as a range join (#167). Resolving that through the
+registry rather than calling the built-in directly is what lets a user's
+``(GenericTarget, Intersects)`` override reach the shapes this target declines,
+instead of being honoured under ``dialect=None`` and silently ignored here.
 
 Because the IEJoin rewrite emits a *whole-query* multi-statement string
 (``SET VARIABLE ...; SELECT ... FROM query(getvariable(...))``) rather than a
@@ -35,11 +38,11 @@ from giql.canonical import canonical_start
 from giql.constants import DEFAULT_CHROM_COL
 from giql.constants import DEFAULT_END_COL
 from giql.constants import DEFAULT_START_COL
+from giql.expander import REGISTRY
 from giql.expander import ExpansionContext
 from giql.expander import register
 from giql.expanders._per_chrom import CHROM_LITERAL
 from giql.expanders._per_chrom import dynamic_relation
-from giql.expanders._per_chrom import new_variable_name
 from giql.expanders._per_chrom import set_variable_statement
 from giql.expanders.intersects import SPATIAL_PREDICATE_META
 from giql.expanders.intersects import _expand_spatial_op
@@ -49,6 +52,13 @@ from giql.expressions import SpatialSetPredicate
 from giql.expressions import Within
 from giql.table import Tables
 from giql.targets import DuckDBTarget
+from giql.targets import GenericTarget
+
+#: Which side of an outer join keeps its unmatched rows. Narrowed by explicit
+#: per-branch assignment rather than a cast: nothing type-checks this package, so
+#: a cast asserts without verifying, and the value decides whether the emission
+#: swaps the FROM and joined tables.
+JoinSide = Literal["left", "right"]
 
 
 class _UnqualifiedProjectionError(Exception):
@@ -82,8 +92,8 @@ class _DeclineIEJoin(Exception):
     IEJoin projection rebuild cannot express it (an expression, a window
     aggregate, a ``FILTER`` clause, a scalar subquery, an aggregate nested in
     an expression, or a star nested in an aggregate argument — #204, #205).
-    Caught in :meth:`IntersectsDuckDBIEJoinTransformer.transform_to_sql`, which
-    returns ``None`` so the generic naive-predicate plan handles the query,
+    Caught in :meth:`IntersectsDuckDBIEJoinTransformer.transform_to_parts`,
+    which returns ``None`` so the generic naive-predicate plan handles the query,
     keeping ``dialect="duckdb"`` consistent with every other backend.
     """
 
@@ -116,16 +126,24 @@ def _find_column_intersects_in(expr: exp.Expression) -> Intersects | None:
     )
 
 
-def _normalize_alias(name: str, *, quoted: bool = False) -> str:
-    """Return *name* case-folded unless it was a quoted identifier.
+def _fold_identifier(name: str) -> str:
+    """Return *name* case-folded, matching how DuckDB compares identifiers.
 
-    DuckDB (and standard SQL) treat unquoted identifiers case-insensitively.
-    Comparing aliases via raw Python equality rejects valid mixed-case queries
-    that the naive-predicate plan accepts; normalize via :py:meth:`str.casefold` so the
-    dialect matches DuckDB's identifier semantics. Quoted identifiers stay
-    case-sensitive per the SQL standard.
+    DuckDB resolves identifiers case-insensitively, and unlike the SQL standard
+    it does so even when they are quoted: given ``SELECT 1 AS "x", 2 AS "X"``,
+    both ``"x"`` and ``"X"`` select the first column. Comparing identifiers with
+    raw Python equality would therefore reject mixed-case queries the engine
+    itself accepts.
+
+    Folding quoted identifiers too is what makes the duplicate-name gate in
+    :func:`_match_outer_join_decomposition` correct: that gate exists because
+    ``AS x`` alongside ``AS X`` would otherwise bind both positions to whichever
+    column came first.
+
+    Named for identifiers rather than aliases because it is applied to all of
+    them -- table aliases, column qualifiers, and projection output names.
     """
-    return name if quoted else name.casefold()
+    return name.casefold()
 
 
 def _has_outer_join_intersects(query: exp.Select) -> bool:
@@ -139,9 +157,14 @@ def _has_outer_join_intersects(query: exp.Select) -> bool:
     drop the outer-join's unmatched-row guarantee in the second shape,
     so we fall back whenever an outer-join is present and an
     INTERSECTS sits anywhere it could influence the join result.
+
+    Since #95 this is no longer the first gate an outer join meets:
+    :func:`_match_outer_join_decomposition` runs ahead of it and claims the
+    LEFT / RIGHT shapes it can decompose. What reaches here is therefore
+    ``FULL OUTER``, the ``WHERE``-INTERSECTS shape above (where the filter
+    would discard the very rows the join preserves), and every LEFT / RIGHT
+    shape the decomposition declined.
     """
-    if not isinstance(query, exp.Select):
-        return False
     outer_joins = [
         join for join in query.args.get("joins") or [] if join.args.get("side")
     ]
@@ -176,8 +199,6 @@ def _has_left_only_join_where_intersects(query: exp.Select) -> bool:
     that is a harmless over-decline (it only ever routes to the correct
     naive plan) and such shapes already decline via other gates.
     """
-    if not isinstance(query, exp.Select):
-        return False
     has_left_only_join = any(
         (join.args.get("kind") or "").upper() in ("SEMI", "ANTI")
         for join in query.args.get("joins") or []
@@ -186,6 +207,19 @@ def _has_left_only_join_where_intersects(query: exp.Select) -> bool:
         return False
     where = query.args.get("where")
     return bool(where and _find_column_intersects_in(where.this))
+
+
+def _unwrap_projection_target(sel: exp.Expression) -> exp.Expression:
+    """Return the expression a SELECT item projects, past its alias and parens.
+
+    Peeling both means a paren-wrapped projection such as ``(SUM(a.score)) AS s``
+    is classified identically to its bare form, rather than falling through to
+    whatever generic branch handles an unrecognized node.
+    """
+    target = sel.this if isinstance(sel, exp.Alias) else sel
+    while isinstance(target, exp.Paren):
+        target = target.this
+    return target
 
 
 def _has_star_projection(query: exp.Select) -> bool:
@@ -204,12 +238,8 @@ def _has_star_projection(query: exp.Select) -> bool:
     plan expands it against DuckDB's live schema at bind time, keeping the
     projection identical across backends.
     """
-    if not isinstance(query, exp.Select):
-        return False
     for sel in query.expressions:
-        target = sel.this if isinstance(sel, exp.Alias) else sel
-        while isinstance(target, exp.Paren):
-            target = target.this
+        target = _unwrap_projection_target(sel)
         if isinstance(target, exp.Star):
             return True
         if isinstance(target, exp.Column) and isinstance(target.this, exp.Star):
@@ -286,7 +316,7 @@ def _projection_declines_to_naive(
             node = node.parent
         if in_subquery:
             continue
-        tbl = _normalize_alias(col.table) if col.table else ""
+        tbl = _fold_identifier(col.table) if col.table else ""
         if tbl not in (l_alias, r_alias) or (is_left_only and tbl == r_alias):
             return False
     return True
@@ -319,12 +349,10 @@ def _count_column_intersects(query: exp.Select) -> int:
     Walks the full AST so the dialect's "exactly one INTERSECTS" gate cannot
     be circumvented by an INTERSECTS hidden inside a subquery (e.g. inside
     a SELECT-list scalar subquery or inside ``EXISTS (SELECT ...)``). The
-    SELECT-list / modifier-clause subquery gates in ``transform_to_sql``
+    SELECT-list / modifier-clause subquery gates in ``transform_to_parts``
     already reject those shapes, but this widened count is defense-in-depth
     against future gate relaxations.
     """
-    if not isinstance(query, exp.Select):
-        return 0
     return sum(1 for n in query.find_all(Intersects) if _is_column_intersects(n))
 
 
@@ -332,7 +360,7 @@ def _count_column_intersects(query: exp.Select) -> int:
 class _IEJoinSides:
     """Resolved two-sided join shape for the DuckDB IEJoin dialect path.
 
-    Bundles the left/right user aliases (normalized via :func:`_normalize_alias`)
+    Bundles the left/right user aliases (normalized via :func:`_fold_identifier`)
     with the un-aliased :class:`~sqlglot.expressions.Table` AST nodes and a
     ``kind`` discriminator identifying the join variant. The hardcoded inner
     aliases ``a`` and ``b`` used inside each per-chromosome subquery are
@@ -376,9 +404,9 @@ class _IEJoinSides:
         join_table = join.this
         if not isinstance(join_table, exp.Table):
             return None
-        from_alias = _normalize_alias(from_table.alias_or_name)
-        left_alias = _normalize_alias(intersects.this.table)
-        right_alias = _normalize_alias(intersects.expression.table)
+        from_alias = _fold_identifier(from_table.alias_or_name)
+        left_alias = _fold_identifier(intersects.this.table)
+        right_alias = _fold_identifier(intersects.expression.table)
         if left_alias == from_alias:
             l_user_alias = from_alias
             l_table = from_table
@@ -395,10 +423,13 @@ class _IEJoinSides:
         else:
             return None
         raw_kind = (join.args.get("kind") or "").upper()
+        kind: Literal["INNER", "SEMI", "ANTI"]
         if raw_kind in ("", "CROSS"):
-            kind: Literal["INNER", "SEMI", "ANTI"] = "INNER"
-        elif raw_kind in ("SEMI", "ANTI"):
-            kind = raw_kind  # type: ignore[assignment]
+            kind = "INNER"
+        elif raw_kind == "SEMI":
+            kind = "SEMI"
+        elif raw_kind == "ANTI":
+            kind = "ANTI"
         else:
             return None
         return cls(
@@ -410,26 +441,144 @@ class _IEJoinSides:
         )
 
 
+def _resolve_two_base_tables(
+    query: exp.Select,
+) -> tuple[exp.Join, exp.Table, exp.Table] | None:
+    """Return *query*'s single join and its two base-table operands, or ``None``.
+
+    Accepts only a one-join query whose FROM and joined operands are both named
+    base tables. A GIQL table-function operand such as ``DISJOIN(genes)`` parses
+    as an :class:`~sqlglot.expressions.Table` with an empty ``name``, which would
+    interpolate an empty identifier into broken SQL, so an unnamed operand
+    declines here rather than downstream. (A CTE-named operand is caught by the
+    ``with_`` guard; an unregistered base table is fine -- the dialect uses
+    default columns exactly as the naive-predicate path does.)
+
+    Every rewrite in this module has to name both relations before it can emit
+    anything, so these gates precede all of them.
+
+    What they deliberately do not cover is alias distinctness. The callers
+    disagree about which aliases to compare -- syntactic FROM/JOIN position here
+    versus INTERSECTS-operand orientation in :meth:`transform_to_parts` -- and
+    those differ for a query like ``FROM peaks a JOIN genes b ON a.interval
+    INTERSECTS c.interval``, so folding the comparison in would change which
+    shapes decline.
+    """
+    joins = query.args.get("joins") or []
+    if len(joins) != 1:
+        return None
+    the_join = joins[0]
+
+    from_node = query.args.get("from_")
+    from_table = from_node.this if from_node else None
+    join_table = the_join.this
+    if not isinstance(from_table, exp.Table) or not from_table.name:
+        return None
+    if not isinstance(join_table, exp.Table) or not join_table.name:
+        return None
+    return the_join, from_table, join_table
+
+
+@dataclass(frozen=True)
+class _IntersectsJoin:
+    """A two-base-table join whose ``ON`` is exactly one column-to-column INTERSECTS.
+
+    The resolved form the two shape matchers share. ``from_table`` and
+    ``join_table`` keep their aliases, since the emissions render them into
+    ``FROM`` clauses whose columns resolve through those aliases;
+    ``from_alias`` and ``join_alias`` are the case-folded forms used to
+    attribute each projected column to a side.
+    """
+
+    side: JoinSide
+    from_table: exp.Table
+    join_table: exp.Table
+    from_alias: str
+    join_alias: str
+
+    @classmethod
+    def from_query(
+        cls, query: exp.Select, allowed_sides: tuple[JoinSide, ...]
+    ) -> "_IntersectsJoin | None":
+        """Return *query*'s single resolved INTERSECTS join, or ``None``.
+
+        Builds on :func:`_resolve_two_base_tables` and adds the gates specific to
+        a bare outer-join ``ON``: the accepted side, a plain join kind, exactly
+        one column-to-column INTERSECTS with no residual, and two distinct
+        aliases. Shared by the two shape matchers; the INNER / SEMI / ANTI path
+        in :meth:`IntersectsDuckDBIEJoinTransformer.transform_to_parts` accepts
+        shapes these gates reject and so builds on the base-table helper
+        directly.
+
+        *allowed_sides* entries must already be case-folded, since the join's own
+        side is folded before the membership test.
+        """
+        resolved = _resolve_two_base_tables(query)
+        if resolved is None:
+            return None
+        the_join, from_table, join_table = resolved
+
+        # Assigned per branch rather than cast, so an unexpected side declines
+        # here instead of reaching the emission as an unhandled value.
+        raw_side = _fold_identifier(the_join.args.get("side") or "")
+        side: JoinSide
+        if raw_side == "left":
+            side = "left"
+        elif raw_side == "right":
+            side = "right"
+        else:
+            return None
+        if side not in allowed_sides:
+            return None
+        if (the_join.args.get("kind") or "").upper() not in ("", "OUTER"):
+            return None
+
+        on = the_join.args.get("on")
+        if on is None:
+            return None
+        intersects = _find_column_intersects_in(on)
+        if intersects is None or _count_column_intersects(query) != 1:
+            return None
+        # v1 supports only a bare INTERSECTS ON. A residual would have to be
+        # applied identically to every relation a composed rewrite emits -- the
+        # INNER half's join and the unmatched half's NOT EXISTS correlation --
+        # which none of them coordinate yet.
+        if _strip_intersects(on, intersects) is not None:
+            return None
+
+        from_alias = _fold_identifier(from_table.alias_or_name)
+        join_alias = _fold_identifier(join_table.alias_or_name)
+        if from_alias == join_alias:
+            return None
+
+        return cls(
+            side=side,
+            from_table=from_table,
+            join_table=join_table,
+            from_alias=from_alias,
+            join_alias=join_alias,
+        )
+
+
 @dataclass(frozen=True)
 class _CountOverlapsShape:
     """The matched ``count_overlaps`` LEFT-join-with-COUNT shape (#209).
 
-    Bundles the LEFT :class:`~sqlglot.expressions.Join`, the un-aliased left
-    (FROM) base table, the left/right user aliases (case-folded), the left-side
-    group-key SELECT items, and the single ``COUNT`` aggregate SELECT item. The
-    emission reuses the INNER path to build the per-chromosome IEJoin count and
-    wraps it in a zero-fill LEFT join against the distinct left keys.
+    Bundles the left (FROM) base table, the left-side group-key SELECT items,
+    and the single ``COUNT`` aggregate SELECT item. The emission reuses the
+    INNER path to build the per-chromosome IEJoin count and wraps it in a
+    zero-fill LEFT join against the distinct left keys.
+
+    ``left_table`` keeps its alias: the distinct-key relation renders it
+    directly and the group-key projections resolve through that alias.
     """
 
-    the_join: exp.Join
     left_table: exp.Table
-    left_alias: str
-    right_alias: str
     key_items: tuple[exp.Expression, ...]
     agg_item: exp.Alias
 
 
-def _match_count_overlaps(query: exp.Expression) -> "_CountOverlapsShape | None":
+def _match_count_overlaps(query: exp.Select) -> "_CountOverlapsShape | None":
     """Return the count_overlaps shape when *query* matches it, else ``None``.
 
     Matches exactly ``SELECT <left cols>, COUNT(<right col>) AS <alias> FROM
@@ -440,8 +589,6 @@ def _match_count_overlaps(query: exp.Expression) -> "_CountOverlapsShape | None"
     non-LEFT outer join, extra ON residuals) returns ``None`` so the caller keeps
     the existing behaviour (the naive-predicate plan).
     """
-    if not isinstance(query, exp.Select):
-        return None
     if query.args.get("with_") or query.args.get("distinct"):
         return None
     if any(
@@ -451,42 +598,17 @@ def _match_count_overlaps(query: exp.Expression) -> "_CountOverlapsShape | None"
     if query.args.get("group") is None or query.args.get("where") is not None:
         return None
 
-    joins = query.args.get("joins") or []
-    if len(joins) != 1:
+    join = _IntersectsJoin.from_query(query, ("left",))
+    if join is None:
         return None
-    the_join = joins[0]
-    if _normalize_alias(the_join.args.get("side") or "") != "left":
-        return None
-    if (the_join.args.get("kind") or "").upper() not in ("", "OUTER"):
-        return None
-    on = the_join.args.get("on")
-    if on is None:
-        return None
-    intersects = _find_column_intersects_in(on)
-    if intersects is None or _count_column_intersects(query) != 1:
-        return None
-    # v1 supports only a bare INTERSECTS ON (no residual join conditions).
-    if _strip_intersects(on, intersects) is not None:
-        return None
-
-    from_node = query.args.get("from_")
-    from_table = from_node.this if from_node else None
-    join_table = the_join.this
-    if not isinstance(from_table, exp.Table) or not from_table.name:
-        return None
-    if not isinstance(join_table, exp.Table) or not join_table.name:
-        return None
-    left_alias = _normalize_alias(from_table.alias_or_name)
-    right_alias = _normalize_alias(join_table.alias_or_name)
-    if left_alias == right_alias:
-        return None
+    from_table = join.from_table
+    left_alias = join.from_alias
+    right_alias = join.join_alias
 
     key_items: list[exp.Expression] = []
     agg_item: exp.Alias | None = None
     for sel in query.expressions:
-        target = sel.this if isinstance(sel, exp.Alias) else sel
-        while isinstance(target, exp.Paren):
-            target = target.this
+        target = _unwrap_projection_target(sel)
         if isinstance(target, exp.AggFunc):
             # Exactly one COUNT(<right col>) / COUNT(DISTINCT <right col>) aggregate,
             # aliased so the wrapper can reference and re-project it.
@@ -502,7 +624,7 @@ def _match_count_overlaps(query: exp.Expression) -> "_CountOverlapsShape | None"
             if not (
                 isinstance(arg, exp.Column)
                 and not isinstance(arg.this, exp.Star)
-                and _normalize_alias(arg.table) == right_alias
+                and _fold_identifier(arg.table) == right_alias
             ):
                 return None
             agg_item = sel
@@ -511,7 +633,7 @@ def _match_count_overlaps(query: exp.Expression) -> "_CountOverlapsShape | None"
             and target.table
             and not isinstance(target.this, exp.Star)
         ):
-            if _normalize_alias(target.table) != left_alias:
+            if _fold_identifier(target.table) != left_alias:
                 return None
             key_items.append(sel)
         else:
@@ -539,19 +661,155 @@ def _match_count_overlaps(query: exp.Expression) -> "_CountOverlapsShape | None"
         return None
 
     return _CountOverlapsShape(
-        the_join=the_join,
         left_table=from_table,
-        left_alias=left_alias,
-        right_alias=right_alias,
         key_items=tuple(key_items),
         agg_item=agg_item,
+    )
+
+
+@dataclass(frozen=True)
+class _OuterJoinShape:
+    """A LEFT / RIGHT outer-join ``INTERSECTS`` decomposable into two halves (#95).
+
+    Carries the resolved join plus the SELECT-list positions belonging to each
+    side. ``side`` is ``"left"`` or ``"right"``; for ``"right"`` the emission
+    first swaps the FROM and joined tables so one LEFT-shaped code path serves
+    both orientations.
+
+    The row-preserving side is derived from the join rather than copied out of
+    it, so the table node and the alias cannot drift apart. ``preserved_table``
+    keeps its alias intact -- the NULL-chromosome branch selects from it
+    directly and references its columns through that alias, so stripping the
+    alias would leave that branch unable to bind.
+
+    ``preserved_indexes`` and ``null_indexes`` partition the projection by
+    position: the preserved side's columns survive into both halves, while the
+    other side's become NULL fills in the unmatched half.
+    """
+
+    join: _IntersectsJoin
+    preserved_indexes: tuple[int, ...]
+    null_indexes: tuple[int, ...]
+
+    @property
+    def side(self) -> JoinSide:
+        """Which side keeps its unmatched rows."""
+        return self.join.side
+
+    @property
+    def preserved_table(self) -> exp.Table:
+        """The row-preserving side's table node, alias intact."""
+        return self.join.from_table if self.side == "left" else self.join.join_table
+
+    @property
+    def preserved_alias(self) -> str:
+        """The row-preserving side's case-folded alias."""
+        return self.join.from_alias if self.side == "left" else self.join.join_alias
+
+
+def _match_outer_join_decomposition(query: exp.Select) -> "_OuterJoinShape | None":
+    """Return the decomposable outer-join shape for *query*, else ``None``.
+
+    Matches ``SELECT <side-attributable columns> FROM <base> a LEFT|RIGHT JOIN
+    <base> b ON <one column-to-column INTERSECTS>`` -- the shape a ``UNION ALL``
+    of an INNER half and an unmatched-rows half reproduces exactly (#95).
+
+    Everything else returns ``None`` so the caller keeps the naive-predicate
+    plan. In particular:
+
+    - ``FULL OUTER`` preserves rows on both sides and has no two-half form here.
+    - An ``INTERSECTS`` in the top-level ``WHERE`` under an outer join is a
+      different query -- the filter drops the very unmatched rows the outer join
+      preserves -- so it must keep declining, as must any other ``WHERE``
+      residual this rewrite does not yet thread through both halves.
+    - Top-level modifiers (``GROUP BY`` / ``HAVING`` / ``ORDER BY`` / ``LIMIT``
+      / ``OFFSET`` / ``DISTINCT``) belong on the union, but the recursive
+      transpile of each half would apply them per branch instead.
+    - A projection that is not a side-attributable qualified column (a star, an
+      expression, an aggregate) cannot be split into "survives" and "becomes
+      NULL", which is exactly what the unmatched half needs. This is also why
+      the ``bedtools -wao`` ``CASE`` projection still declines until #109 lands.
+    """
+    # Whitelist, not a blocklist: the rewrite re-emits the query as a UNION ALL
+    # of two independently transpiled halves, so ANY top-level clause it does
+    # not itself read would be applied per-half instead of over the union --
+    # silently changing the answer. Enumerating clauses to *reject* leaves the
+    # rewrite exposed to every clause sqlglot grows later, which is exactly how
+    # ``QUALIFY`` slipped onto the fast path and had its filter dropped. Reject
+    # anything outside the set ``_build_outer_join_parts`` actually consumes.
+    if any(
+        value is not None and value != []
+        for key, value in query.args.items()
+        if key not in ("expressions", "from_", "joins")
+    ):
+        return None
+
+    join = _IntersectsJoin.from_query(query, ("left", "right"))
+    if join is None:
+        return None
+    # A TABLESAMPLE hangs off the table node rather than the top-level SELECT,
+    # so the clause whitelist above cannot see it. Each half would sample the
+    # relation independently, making the union neither a superset nor a subset
+    # of a real outer join over one sample -- and the sample clause lands in a
+    # position the per-chromosome template cannot even parse.
+    if join.from_table.args.get("sample") is not None:
+        return None
+    if join.join_table.args.get("sample") is not None:
+        return None
+
+    if join.side == "left":
+        preserved_alias, other_alias = join.from_alias, join.join_alias
+    else:
+        preserved_alias, other_alias = join.join_alias, join.from_alias
+
+    if not query.expressions:
+        return None
+    preserved_indexes: list[int] = []
+    null_indexes: list[int] = []
+    for idx, sel in enumerate(query.expressions):
+        target = _unwrap_projection_target(sel)
+        if (
+            not isinstance(target, exp.Column)
+            or isinstance(target.this, exp.Star)
+            or not target.table
+        ):
+            return None
+        tbl = _fold_identifier(target.table)
+        if tbl == preserved_alias:
+            preserved_indexes.append(idx)
+        elif tbl == other_alias:
+            null_indexes.append(idx)
+        else:
+            return None
+
+    # The unmatched half re-projects the preserved columns out of a subquery by
+    # their output names, so duplicates there would bind ambiguously. The
+    # comparison must be case-INSENSITIVE: DuckDB resolves identifiers that way
+    # even when they are quoted, so ``AS x`` alongside ``AS X`` would otherwise
+    # pass this gate and then bind both positions to whichever column came
+    # first -- returning the wrong value and, because the branch's type then
+    # wins the UNION ALL unification, corrupting the matched rows too.
+    # Deliberately preserved-side only: duplicate names among the NULL-filled
+    # positions are never re-projected by name, so they stay supported.
+    preserved_names = [
+        _fold_identifier(query.expressions[i].output_name) for i in preserved_indexes
+    ]
+    if len(set(preserved_names)) != len(preserved_names):
+        return None
+
+    return _OuterJoinShape(
+        join=join,
+        preserved_indexes=tuple(preserved_indexes),
+        null_indexes=tuple(null_indexes),
     )
 
 
 class IntersectsDuckDBIEJoinTransformer:
     """Transform column-to-column INTERSECTS joins into a DuckDB IEJoin pattern.
 
-    Emits a two-step dynamic SQL output:
+    Emits dynamic SQL in two steps per declared session variable — one
+    variable for the INNER / SEMI / ANTI shapes, two for a decomposed outer
+    join:
 
     1. ``SET VARIABLE __giql_iejoin_<token> = COALESCE(<dynamic-sql>, <empty-schema>);``
        where ``<dynamic-sql>`` is a ``string_agg`` over the chromosome
@@ -565,10 +823,11 @@ class IntersectsDuckDBIEJoinTransformer:
 
     Each per-chromosome subquery uses pure inequality predicates which DuckDB
     plans through its range-join family (``IE_JOIN`` or ``PIECEWISE_MERGE_JOIN``).
-    The dialect supports INNER, SEMI, and ANTI variants. Crucially, DuckDB only
-    selects ``IE_JOIN`` for INNER pure-inequality joins — a bare ``SEMI JOIN`` /
-    ``ANTI JOIN`` inequality join is planned as a ``BLOCKWISE_NL_JOIN`` (a nested
-    loop, quadratic). So the left-only shapes are emitted as a correlated
+    The dialect supports INNER, SEMI, and ANTI variants, plus LEFT / RIGHT
+    outer joins. Crucially, DuckDB only selects ``IE_JOIN`` for INNER
+    pure-inequality joins — a bare ``SEMI JOIN`` / ``ANTI JOIN`` inequality join
+    is planned as a ``BLOCKWISE_NL_JOIN`` (a nested loop, quadratic). So the
+    left-only shapes are emitted as a correlated
     ``WHERE EXISTS`` (SEMI) / ``WHERE NOT EXISTS`` (ANTI) subquery instead of a
     semi/anti join keyword, which reaches ``IE_JOIN`` while preserving exact
     semantics (#208). SEMI / ANTI restrict the outer SELECT to left-side
@@ -602,9 +861,18 @@ class IntersectsDuckDBIEJoinTransformer:
       (wrapped to :class:`ValueError` at the public boundary). A right-side
       ``b.*`` under SEMI / ANTI declines to the naive plan with every other
       star (which then rejects the out-of-scope right table at bind time).
-    - ``ANTI JOIN`` partitions on the left table's distinct chromosomes
-      only (not the chromosome INTERSECT used by INNER / SEMI) so that
-      left rows on chromosomes absent from the right table are preserved.
+    - ``ANTI JOIN`` partitions on the chromosome INTERSECT like INNER and
+      SEMI, then unions one non-partitioned branch carrying the left rows
+      whose chromosome the right table lacks. Those rows cannot match, so a
+      branch apiece would scan both tables to prove an emptiness the
+      partition already knows (#95).
+    - ``LEFT`` / ``RIGHT`` outer joins are not emitted as outer joins at all:
+      DuckDB's ``IE_JOIN`` is INNER-only, so the query is decomposed into an
+      INNER half and a ``NOT EXISTS`` unmatched half combined with
+      ``UNION ALL``, plus a third branch carrying the preserved side's
+      NULL-chromosome rows, which no per-chromosome partition can reach
+      (#95). ``RIGHT`` is served by swapping the FROM and joined tables so a
+      single LEFT-shaped path covers both orientations.
     """
 
     def __init__(self, tables: Tables):
@@ -616,7 +884,36 @@ class IntersectsDuckDBIEJoinTransformer:
         self.tables = tables
 
     def transform_to_sql(self, query: exp.Expression) -> str | None:
-        """Return DuckDB IEJoin SQL for *query* if applicable, else None.
+        """Return DuckDB IEJoin SQL for *query* if applicable, else ``None``.
+
+        Renders what :meth:`transform_to_parts` returns as one script. Both
+        reach the same primitive: a rewrite composing on top of this one calls
+        that method instead of splitting this string, which cannot be taken
+        apart safely -- the separator appears inside the script itself whenever
+        an identifier contains it.
+
+        The result is a multi-statement script whose ``SET VARIABLE`` setup and
+        final ``SELECT`` must run on one connection, in order.
+
+        *query* is borrowed, not owned: it is never mutated. The registry entry
+        point passes the live statement AST that pass 3 goes on transforming,
+        and the naive-predicate fallback rewrites that same node in place when
+        this path declines, so that has to hold.
+
+        Raises
+        ------
+        ValueError
+            If a projection names a column the rewrite cannot attribute to a
+            side.
+        """
+        parts = self.transform_to_parts(query)
+        if parts is None:
+            return None
+        setup, select = parts
+        return f"{setup};\n{select}"
+
+    def transform_to_parts(self, query: exp.Expression) -> tuple[str, str] | None:
+        """Return ``(setup statements, final SELECT)`` for *query*, else ``None``.
 
         The dialect rewrites the *whole* query as
         ``SET VARIABLE __giql_iejoin_<token> = ...; SELECT ... FROM
@@ -656,7 +953,19 @@ class IntersectsDuckDBIEJoinTransformer:
         # Checked before the outer-join decline below since it *is* an outer join.
         count_shape = _match_count_overlaps(query)
         if count_shape is not None:
-            return self._build_count_overlaps_sql(query, count_shape)
+            return self._build_count_overlaps_parts(query, count_shape)
+
+        # Outer-join decomposition (#95): a LEFT / RIGHT JOIN whose projections
+        # are side-attributable columns is emitted as the INNER pairs UNION ALL
+        # the unmatched preserved-side rows with NULL fills, so both halves reach
+        # IE_JOIN. Checked after count_overlaps -- also a LEFT JOIN, with its own
+        # faster zero-fill path -- and before the decline below, which still
+        # catches FULL OUTER and the WHERE-INTERSECTS shape.
+        outer_shape = _match_outer_join_decomposition(query)
+        if outer_shape is not None:
+            decomposed = self._build_outer_join_parts(query, outer_shape)
+            if decomposed is not None:
+                return decomposed
 
         if _has_outer_join_intersects(query):
             return None
@@ -699,23 +1008,21 @@ class IntersectsDuckDBIEJoinTransformer:
             ):
                 return None
         for sel in query.expressions:
-            target = sel.this if isinstance(sel, exp.Alias) else sel
-            while isinstance(target, exp.Paren):
-                target = target.this
+            target = _unwrap_projection_target(sel)
             if isinstance(target, exp.AggFunc) and (
                 target.find(exp.Subquery) is not None
                 or target.find(exp.Select) is not None
             ):
                 return None
 
-        # The supported shape connects exactly two tables via one INTERSECTS,
-        # so the top level has exactly one join (either an explicit JOIN ...
-        # ON or an implicit comma-join in WHERE). A third comma/CROSS-joined
-        # table would otherwise be silently dropped by _build_sql.
-        joins = query.args.get("joins") or []
-        if len(joins) != 1:
+        # The supported shape connects exactly two named base tables via one
+        # INTERSECTS (either an explicit JOIN ... ON or an implicit comma-join
+        # in WHERE). A third comma/CROSS-joined table would otherwise be
+        # silently dropped by _build_sql.
+        resolved = _resolve_two_base_tables(query)
+        if resolved is None:
             return None
-        the_join = joins[0]
+        the_join, from_table, join_table = resolved
 
         # NATURAL needs schema introspection we don't have at transpile time
         # (Table configs only expose chrom/start/end/strand; user columns
@@ -736,31 +1043,19 @@ class IntersectsDuckDBIEJoinTransformer:
 
         # INNER (the default), CROSS (functionally equivalent to INNER once
         # the chromosome partition is in place), SEMI, and ANTI all engage.
-        # Everything else falls back so the naive-predicate plan can preserve its
-        # semantics (e.g. RIGHT / FULL outer joins, which the naive overlap
-        # predicate expresses as a plain outer ``ON`` condition).
+        # Everything else falls back so the naive-predicate plan can preserve
+        # its semantics -- FULL OUTER, and the LEFT / RIGHT shapes the outer-join
+        # decomposition declined before handing the query here (#95), which the
+        # naive overlap predicate expresses as a plain outer ``ON`` condition.
         kind_str = the_join.args.get("kind")
         if kind_str and kind_str.upper() not in ("INNER", "CROSS", "SEMI", "ANTI"):
             return None
 
-        intersects, the_join = self._find_target_join(query)
-        if intersects is None or the_join is None:
-            return None
-
-        from_table = query.args["from_"].this
-        if not isinstance(from_table, exp.Table):
-            return None
-
-        # Reject non-base-table operands. A GIQL table-function operand such
-        # as ``DISJOIN(genes)`` parses as an ``exp.Table`` with an empty
-        # ``name`` and would be interpolated as an empty identifier into
-        # broken SQL. (A CTE-named operand is already handled by the
-        # ``with_`` guard above; an unregistered base table is fine — the
-        # dialect uses default columns just like the naive-predicate path does.)
-        if not from_table.name:
-            return None
-        join_table = the_join.this
-        if not isinstance(join_table, exp.Table) or not join_table.name:
+        # Locates which of the two relations carries the INTERSECTS, and where
+        # (an explicit ON, or the top-level WHERE of a comma join). The single
+        # join gate above means it can only return the join already resolved.
+        intersects, _ = self._find_target_join(query)
+        if intersects is None:
             return None
 
         sides = _IEJoinSides.from_intersects(from_table, the_join, intersects)
@@ -802,56 +1097,6 @@ class IntersectsDuckDBIEJoinTransformer:
             return None
         except _UnqualifiedProjectionError as exc:
             raise ValueError(str(exc)) from exc
-
-    def _build_count_overlaps_sql(
-        self, query: exp.Select, shape: "_CountOverlapsShape"
-    ) -> str | None:
-        """Render the count_overlaps zero-fill SQL for a matched LEFT-join shape (#209).
-
-        Reuses the INNER IEJoin path: an INNER copy of the query (same
-        projections and GROUP BY, LEFT downgraded to INNER) is transpiled by
-        :meth:`transform_to_sql` into ``SET VARIABLE ...; <count SELECT>``, which
-        DuckDB plans through ``IE_JOIN`` + hash aggregate. The INNER count drops
-        left rows with no overlap, so its ``SELECT`` is wrapped as a CTE and
-        LEFT-joined back onto the distinct left keys, zero-filling the missing
-        counts. Returns ``None`` (fall back to the naive plan) if the INNER copy
-        itself declines.
-        """
-        inner_query = query.copy()
-        inner_join = inner_query.args["joins"][0]
-        inner_join.set("side", None)
-        inner_join.set("kind", None)
-        inner_sql = self.transform_to_sql(inner_query)
-        if inner_sql is None or ";\n" not in inner_sql:
-            return None
-        set_var_stmt, inner_select = inner_sql.split(";\n", 1)
-
-        q = self._sql_quote_ident
-        key_names = [item.output_name for item in shape.key_items]
-        key_projections = [item.sql(dialect="duckdb") for item in shape.key_items]
-        group_exprs = [
-            (item.this if isinstance(item, exp.Alias) else item).sql(dialect="duckdb")
-            for item in shape.key_items
-        ]
-        agg_name = shape.agg_item.output_name
-
-        # Distinct left-key relation, rendering the FROM table with its own alias
-        # so the key projections (``a.chrom`` ...) resolve against it.
-        base_cte = (
-            f"SELECT {', '.join(key_projections)} "
-            f"FROM {shape.left_table.sql(dialect='duckdb')} "
-            f"GROUP BY {', '.join(group_exprs)}"
-        )
-        using_cols = ", ".join(q(name) for name in key_names)
-        base_out = ", ".join(f"base.{q(name)}" for name in key_names)
-        wrapper = (
-            f"WITH __giql_counts AS ({inner_select}), "
-            f"__giql_base AS ({base_cte}) "
-            f"SELECT {base_out}, COALESCE(c.{q(agg_name)}, 0) AS {q(agg_name)} "
-            f"FROM __giql_base AS base "
-            f"LEFT JOIN __giql_counts AS c USING ({using_cols})"
-        )
-        return set_var_stmt + ";\n" + wrapper
 
     @staticmethod
     def _sql_escape(s: str) -> str:
@@ -931,7 +1176,7 @@ class IntersectsDuckDBIEJoinTransformer:
         valid_aliases = {sides.left_user_alias, sides.right_user_alias}
         for predicate in extras:
             for col in predicate.find_all(exp.Column):
-                col_table = _normalize_alias(col.table) if col.table else ""
+                col_table = _fold_identifier(col.table) if col.table else ""
                 if not col_table:
                     raise _UnqualifiedProjectionError(
                         f"dialect='duckdb' cannot inline extra predicate "
@@ -980,7 +1225,7 @@ class IntersectsDuckDBIEJoinTransformer:
         def replace(n: exp.Expression) -> exp.Expression:
             if not isinstance(n, exp.Column):
                 return n
-            col_table = _normalize_alias(n.table) if n.table else ""
+            col_table = _fold_identifier(n.table) if n.table else ""
             if col_table == sides.left_user_alias:
                 new = n.copy()
                 new.set("table", exp.to_identifier(sides.left_inner_alias))
@@ -1032,7 +1277,7 @@ class IntersectsDuckDBIEJoinTransformer:
         def replace(n: exp.Expression) -> exp.Expression:
             if not isinstance(n, exp.Column):
                 return n
-            col_table = _normalize_alias(n.table) if n.table else ""
+            col_table = _fold_identifier(n.table) if n.table else ""
             if col_table not in valid_aliases:
                 return n
             key = (col_table, n.name)
@@ -1047,6 +1292,205 @@ class IntersectsDuckDBIEJoinTransformer:
 
         rewritten = node.transform(replace, copy=True)
         return rewritten.sql(dialect="duckdb")
+
+    def _iejoin_variant_parts(
+        self, query: exp.Select, *, kind: str | None
+    ) -> tuple[str, str] | None:
+        """Transpile a copy of *query* with its single join retargeted to *kind*.
+
+        The copy is taken here rather than by the caller, so no caller ever hands
+        its own node to the transform. Whether the emission mutates what it is
+        given stops being something each composed rewrite has to know and get
+        right; before this, one of them defended the invariant with a comment
+        and a second defensive copy.
+        """
+        variant = query.copy()
+        join = variant.args["joins"][0]
+        join.set("side", None)
+        join.set("kind", kind)
+        return self.transform_to_parts(variant)
+
+    def _build_count_overlaps_parts(
+        self, query: exp.Select, shape: "_CountOverlapsShape"
+    ) -> tuple[str, str] | None:
+        """Render the count_overlaps zero-fill SQL for a matched LEFT-join shape (#209).
+
+        Reuses the INNER IEJoin path: an INNER copy of the query (same
+        projections and GROUP BY, LEFT downgraded to INNER) is transpiled by
+        :meth:`transform_to_parts` into a setup statement and a count
+        ``SELECT``, which DuckDB plans through ``IE_JOIN`` + hash aggregate. The
+        INNER count drops left rows with no overlap, so its ``SELECT`` is
+        wrapped as a CTE and LEFT-joined back onto the distinct left keys,
+        zero-filling the missing counts. Returns ``None`` (fall back to the
+        naive plan) if the INNER copy itself declines.
+        """
+        inner_parts = self._iejoin_variant_parts(query, kind=None)
+        if inner_parts is None:
+            return None
+        set_var_stmt, inner_select = inner_parts
+
+        q = self._sql_quote_ident
+        key_names = [item.output_name for item in shape.key_items]
+        key_projections = [item.sql(dialect="duckdb") for item in shape.key_items]
+        group_exprs = [
+            (item.this if isinstance(item, exp.Alias) else item).sql(dialect="duckdb")
+            for item in shape.key_items
+        ]
+        agg_name = shape.agg_item.output_name
+
+        # Distinct left-key relation, rendering the FROM table with its own alias
+        # so the key projections (``a.chrom`` ...) resolve against it.
+        base_cte = (
+            f"SELECT {', '.join(key_projections)} "
+            f"FROM {shape.left_table.sql(dialect='duckdb')} "
+            f"GROUP BY {', '.join(group_exprs)}"
+        )
+        using_cols = ", ".join(q(name) for name in key_names)
+        base_out = ", ".join(f"base.{q(name)}" for name in key_names)
+        wrapper = (
+            f"WITH __giql_counts AS ({inner_select}), "
+            f"__giql_base AS ({base_cte}) "
+            f"SELECT {base_out}, COALESCE(c.{q(agg_name)}, 0) AS {q(agg_name)} "
+            f"FROM __giql_base AS base "
+            f"LEFT JOIN __giql_counts AS c USING ({using_cols})"
+        )
+        return set_var_stmt, wrapper
+
+    def _build_outer_join_parts(
+        self, query: exp.Select, shape: "_OuterJoinShape"
+    ) -> tuple[str, str] | None:
+        """Render an outer join as INNER pairs UNION ALL unmatched rows (#95).
+
+        Reuses the two IEJoin paths that already exist rather than emitting an
+        outer join: an INNER copy supplies the matched pairs, and an ANTI copy
+        (the #208 correlated ``NOT EXISTS`` rewrite) supplies the preserved-side
+        rows with no overlap. Both reach ``IE_JOIN``. A per-chromosome ``LEFT
+        JOIN`` does not, even though ``EXPLAIN`` reports ``IE_JOIN`` for it.
+        Measured, that plan runs in about 0.04s at 100,000 rows per side and
+        does not finish within 300s at 4,194,304, where this decomposition
+        returns in about two seconds. Plan inspection alone does not separate
+        them; only execution at scale does.
+
+        Both halves partition on the chromosome ``INTERSECT``, since a
+        chromosome present on one side only yields no pairs. What completes the
+        union is what the ANTI half adds on top: one non-partitioned branch for
+        the preserved side's chromosomes the other side lacks, so preserved rows
+        there still surface with NULLs.
+
+        Returns ``None`` (fall back to the naive-predicate plan) when either
+        half declines, so the query falls back as one unit.
+        """
+        # RIGHT JOIN is the mirror of LEFT: swapping the FROM and joined tables
+        # rewrites ``a RIGHT JOIN b`` as the equivalent ``b LEFT JOIN a``, so a
+        # single code path serves both. The projections are alias-qualified and
+        # resolve unchanged across the swap.
+        work = query.copy()
+        if shape.side == "right":
+            work_join = work.args["joins"][0]
+            from_node = work.args["from_"]
+            swapped_from = work_join.this
+            work_join.set("this", from_node.this)
+            from_node.set("this", swapped_from)
+
+        inner_parts = self._iejoin_variant_parts(work, kind=None)
+        if inner_parts is None:
+            return None
+        inner_setup, inner_select = inner_parts
+
+        # The unmatched half projects the preserved side only: the other side is
+        # out of scope under ANTI, and a NULL literal in the SELECT list would
+        # itself decline the projection rebuild. The NULLs are re-inserted by the
+        # wrapper below instead.
+        preserved_config = self.tables.get(shape.preserved_table.name)
+        chrom_col = preserved_config.chrom_col if preserved_config else DEFAULT_CHROM_COL
+
+        preserved_sels = [query.expressions[i].copy() for i in shape.preserved_indexes]
+        if not preserved_sels:
+            # Nothing from the preserved side is projected (``SELECT b.chrom FROM
+            # a LEFT JOIN b ...``). The half still needs a column to select, so
+            # carry the preserved side's chromosome column and drop it in the
+            # wrapper, which projects NULL for every original position anyway.
+            preserved_sels = [exp.column(chrom_col, table=shape.preserved_alias)]
+        # Safe to mutate in place: the INNER half above transpiled a copy, so
+        # nothing downstream holds a reference to ``work``.
+        work.set("expressions", preserved_sels)
+        anti_parts = self._iejoin_variant_parts(work, kind="ANTI")
+        if anti_parts is None:
+            return None
+        anti_setup, anti_select = anti_parts
+
+        # Both remaining branches re-project the original SELECT order, filling
+        # the other side's positions with NULL. That NULL-fill rule is what makes
+        # the union reproduce outer-join semantics, so it is expressed once here
+        # rather than once per branch. DuckDB resolves each NULL's type from the
+        # first UNION ALL branch, so the dialect needs no schema knowledge.
+        #
+        # They differ only in how a preserved position is spelled: the unmatched
+        # half reads it back out of a subquery by output name, while the
+        # NULL-chromosome branch selects from the base table and so renders the
+        # original qualified column.
+        q = self._sql_quote_ident
+        preserved_names = [
+            query.expressions[i].output_name for i in shape.preserved_indexes
+        ]
+        wrapper_items: list[str] = []
+        null_chrom_items: list[str] = []
+        preserved_seen = 0
+        for idx, sel in enumerate(query.expressions):
+            output = q(sel.output_name)
+            if idx in shape.null_indexes:
+                null_fill = f"NULL AS {output}"
+                wrapper_items.append(null_fill)
+                null_chrom_items.append(null_fill)
+                continue
+            wrapper_items.append(f"{q(preserved_names[preserved_seen])} AS {output}")
+            preserved_seen += 1
+            column = _unwrap_projection_target(sel)
+            null_chrom_items.append(f"{column.sql(dialect='duckdb')} AS {output}")
+
+        unmatched_select = (
+            f"SELECT {', '.join(wrapper_items)} FROM ({anti_select}) AS __giql_unmatched"
+        )
+
+        # A preserved-side row whose chromosome is NULL can never match: the
+        # per-chromosome partition is an equality on chrom and ``NULL = x`` is
+        # never true. Neither half can surface those rows on its own -- both
+        # partitions come from ``SELECT DISTINCT <chrom>``, where a NULL renders
+        # as a NULL literal that ``string_agg`` skips, so no branch is ever
+        # emitted for it. Union them in directly, or the decomposition would
+        # silently drop the very rows an outer join exists to preserve.
+        # Qualify the WHERE with the same identifier node the FROM clause renders
+        # rather than with the case-folded alias. The two bind to one relation
+        # today only because DuckDB folds identifiers -- quoted ones included --
+        # so ``FROM peaks AS "A"`` happened to accept ``a.chrom``. Deriving both
+        # from one node removes that dependency instead of resting on it.
+        #
+        # The sibling above, which carries the preserved chromosome into the
+        # ANTI half, deliberately keeps the folded alias: that column is fed
+        # back through transform_to_parts, which matches aliases
+        # case-insensitively and re-emits it against the per-chromosome
+        # subquery's own ``a``, never against the user's alias.
+        alias_node = shape.preserved_table.args.get("alias")
+        preserved_qualifier = (
+            alias_node.this if alias_node is not None else shape.preserved_table.this
+        )
+        preserved_chrom = exp.column(chrom_col, table=preserved_qualifier)
+        null_chrom_select = (
+            f"SELECT {', '.join(null_chrom_items)} "
+            f"FROM {shape.preserved_table.sql(dialect='duckdb')} "
+            f"WHERE {preserved_chrom.sql(dialect='duckdb')} IS NULL"
+        )
+
+        # The matched half is used as a UNION ALL branch directly. Wrapping it in
+        # ``SELECT * FROM (...)`` would make DuckDB de-duplicate any repeated
+        # output name (``chrom`` becoming ``chrom_1``), and that renaming would
+        # become the union's schema -- so a flag documented as a pure performance
+        # opt-in would silently relabel the result columns, and precisely for the
+        # ``a.chrom, ..., b.chrom`` projection bedtools users write.
+        union = (
+            f"{inner_select} UNION ALL {unmatched_select} UNION ALL {null_chrom_select}"
+        )
+        return ";\n".join([inner_setup, anti_setup]), union
 
     def _extract_extra_predicates(
         self,
@@ -1123,13 +1567,13 @@ class IntersectsDuckDBIEJoinTransformer:
                 from_table = query.args["from_"].this
                 if not isinstance(from_table, exp.Table):
                     return None, None
-                from_alias = _normalize_alias(from_table.alias_or_name)
-                left_alias = _normalize_alias(intersects.this.table)
-                right_alias = _normalize_alias(intersects.expression.table)
+                from_alias = _fold_identifier(from_table.alias_or_name)
+                left_alias = _fold_identifier(intersects.this.table)
+                right_alias = _fold_identifier(intersects.expression.table)
                 target_alias = right_alias if left_alias == from_alias else left_alias
                 for join in query.args.get("joins") or []:
                     if isinstance(join.this, exp.Table):
-                        if _normalize_alias(join.this.alias_or_name) == target_alias:
+                        if _fold_identifier(join.this.alias_or_name) == target_alias:
                             return intersects, join
 
         return None, None
@@ -1140,8 +1584,12 @@ class IntersectsDuckDBIEJoinTransformer:
         intersects: Intersects,
         sides: "_IEJoinSides",
         the_join: exp.Join,
-    ) -> str | None:
-        """Render the multi-statement DuckDB IEJoin SQL string for *query*.
+    ) -> tuple[str, str] | None:
+        """Render the DuckDB IEJoin ``(setup statements, final SELECT)`` for *query*.
+
+        The two halves are returned separately rather than pre-joined so a
+        rewrite composed on top never has to recover them by splitting rendered
+        SQL, which would break on an identifier containing ``";\\n"``.
 
         Returns ``None`` when a soft-fallback condition fires (the residual
         of the join carries a shape the naive-predicate plan can handle but the
@@ -1149,7 +1597,7 @@ class IntersectsDuckDBIEJoinTransformer:
         that is not both tables' ``chrom_col``). May propagate
         :class:`_DeclineIEJoin` from the :meth:`_resolve_projections` projection
         pre-scan (a naive-valid projection the rebuild cannot express — #204,
-        #205); :meth:`transform_to_sql` catches it and declines to the naive
+        #205); :meth:`transform_to_parts` catches it and declines to the naive
         plan. Raises :class:`_UnqualifiedProjectionError` when a user-mistake
         condition fires; callers translating to the public surface wrap the
         raise to :class:`ValueError`.
@@ -1195,10 +1643,10 @@ class IntersectsDuckDBIEJoinTransformer:
         # USING equi-join for the engine to resolve.
         using_cols = the_join.args.get("using") or []
         if using_cols:
-            using_name = _normalize_alias(using_cols[0].name)
+            using_name = _fold_identifier(using_cols[0].name)
             if (
-                _normalize_alias(l_chrom) != _normalize_alias(r_chrom)
-                or _normalize_alias(l_chrom) != using_name
+                _fold_identifier(l_chrom) != _fold_identifier(r_chrom)
+                or _fold_identifier(l_chrom) != using_name
             ):
                 return None
 
@@ -1211,8 +1659,6 @@ class IntersectsDuckDBIEJoinTransformer:
             sides,
             outer_where_residuals,
         )
-
-        var_name = new_variable_name("__giql_iejoin")
 
         # Canonicalize endpoints to 0-based half-open and use strict
         # operators. Mixing inclusive operators with raw closed-closed
@@ -1314,23 +1760,64 @@ class IntersectsDuckDBIEJoinTransformer:
                 f"FROM {l_table_ident} a, {r_table_ident} b WHERE FALSE"
             )
 
-        # Partition source: INTERSECT for INNER / SEMI (a chromosome only
-        # on one side produces no matches anyway), left-distinct for ANTI
-        # (a chromosome present only on the left must still emit its rows
-        # under ANTI semantics).
+        # Partition source: the chromosomes both sides share. A chromosome
+        # present on only one side can never satisfy the overlap predicate, so a
+        # per-chromosome branch for it is wasted work -- it scans both tables to
+        # prove an emptiness the partition already knows. ANTI must still emit
+        # its left-only chromosomes' rows, but as one non-partitioned tail
+        # branch rather than one branch apiece (#95).
+        chrom_partition_subquery = (
+            f"SELECT DISTINCT {q(l_chrom)} AS chrom FROM {l_table_ident} "
+            f"INTERSECT SELECT DISTINCT {q(r_chrom)} AS chrom "
+            f"FROM {r_table_ident}"
+        )
+
+        # ANTI's left-only chromosomes, in one branch. Both NULL guards are
+        # load-bearing: ``x NOT IN (<set containing NULL>)`` is never true, and a
+        # left row whose chromosome is NULL must stay out of this branch to match
+        # the per-chromosome path, which drops it because ``string_agg`` skips
+        # the NULL partition row (#224). The outer-join decomposition depends on
+        # that exclusion -- it emits NULL-chromosome rows from its own third
+        # branch and would otherwise double-count them.
+        tail_branch: str | None = None
         if sides.kind == "ANTI":
-            chrom_partition_subquery = (
-                f"SELECT DISTINCT {q(l_chrom)} AS chrom FROM {l_table_ident}"
-            )
-        else:
-            chrom_partition_subquery = (
-                f"SELECT DISTINCT {q(l_chrom)} AS chrom FROM {l_table_ident} "
-                f"INTERSECT SELECT DISTINCT {q(r_chrom)} AS chrom "
-                f"FROM {r_table_ident}"
+            tail_branch = (
+                f"SELECT {inner_select_list} FROM {l_table_ident} a "
+                f"WHERE a.{q(l_chrom)} IS NOT NULL "
+                f"AND a.{q(l_chrom)} NOT IN ("
+                f"SELECT DISTINCT {q(r_chrom)} FROM {r_table_ident} "
+                f"WHERE {q(r_chrom)} IS NOT NULL)"
             )
 
-        set_var_stmt = set_variable_statement(
-            var_name, per_chrom_sql_expr, chrom_partition_subquery, empty_schema
+        # The same result without the per-chromosome partition, selected at
+        # execution time when the chromosome count exceeds the ceiling. The
+        # chromosome equality moves from the partition filter into the join or
+        # correlation predicate; ANTI keeps the IS NOT NULL guard so both forms
+        # agree about NULL-chromosome rows.
+        chrom_equality = f"a.{q(l_chrom)} = b.{q(r_chrom)}"
+        if sides.is_left_only_join:
+            null_guard = ""
+            if sides.kind == "ANTI":
+                null_guard = f"a.{q(l_chrom)} IS NOT NULL AND "
+            unpartitioned_query = (
+                f"SELECT {inner_select_list} FROM {l_table_ident} a "
+                f"WHERE {null_guard}{exists_keyword} ("
+                f"SELECT 1 FROM {r_table_ident} b "
+                f"WHERE {chrom_equality} AND {predicate_sql})"
+            )
+        else:
+            unpartitioned_query = (
+                f"SELECT {inner_select_list} FROM {l_table_ident} a "
+                f"JOIN {r_table_ident} b "
+                f"ON {chrom_equality} AND {predicate_sql}"
+            )
+
+        var_name, set_var_stmt = set_variable_statement(
+            per_chrom_sql_expr,
+            chrom_partition_subquery,
+            empty_schema,
+            unpartitioned_query,
+            tail_branch=tail_branch,
         )
 
         # Constant wrapper alias — uniqueness is provided by the
@@ -1397,7 +1884,7 @@ class IntersectsDuckDBIEJoinTransformer:
 
         outer_select = " ".join(outer_select_parts)
 
-        return set_var_stmt + ";\n" + outer_select
+        return set_var_stmt, outer_select
 
     def _resolve_projections(
         self,
@@ -1450,9 +1937,7 @@ class IntersectsDuckDBIEJoinTransformer:
         # A projection with an out-of-scope column reference is a user error the
         # naive plan also rejects, so it is left to the dispatch below to raise.
         for sel in query.expressions:
-            target = sel.this if isinstance(sel, exp.Alias) else sel
-            while isinstance(target, exp.Paren):
-                target = target.this
+            target = _unwrap_projection_target(sel)
             if _projection_declines_to_naive(
                 target, l_alias, r_alias, sides.is_left_only_join
             ):
@@ -1486,7 +1971,7 @@ class IntersectsDuckDBIEJoinTransformer:
             ``__giql_p<n>`` ↔ source-column mapping (e.g.
             ``assert projection_map[(a, start)] == "__giql_p3"``).
             """
-            tbl = _normalize_alias(tbl)
+            tbl = _fold_identifier(tbl)
             key = (tbl, col)
             existing = projection_map.get(key)
             if existing is not None:
@@ -1508,7 +1993,7 @@ class IntersectsDuckDBIEJoinTransformer:
         def render_aggregate(agg_node: exp.Expression, user_alias: str | None) -> None:
             """Validate aggregate-argument qualifiers and emit the outer projection."""
             for col in agg_node.find_all(exp.Column):
-                col_table = _normalize_alias(col.table) if col.table else ""
+                col_table = _fold_identifier(col.table) if col.table else ""
                 if col_table not in (l_alias, r_alias):
                     raise _UnqualifiedProjectionError(
                         "dialect='duckdb' requires qualified aggregate "
@@ -1536,7 +2021,7 @@ class IntersectsDuckDBIEJoinTransformer:
             if modifier_node is None:
                 continue
             for col in modifier_node.find_all(exp.Column):
-                col_table = _normalize_alias(col.table) if col.table else ""
+                col_table = _fold_identifier(col.table) if col.table else ""
                 if col_table in (l_alias, r_alias):
                     reject_right_side_if_left_only(col_table, col.sql())
                     allocate(col_table, col.name)
@@ -1548,7 +2033,7 @@ class IntersectsDuckDBIEJoinTransformer:
         # cannot resolve it), matching the SELECT-list / modifier behavior.
         for residual in outer_where_residuals or []:
             for col in residual.find_all(exp.Column):
-                col_table = _normalize_alias(col.table) if col.table else ""
+                col_table = _fold_identifier(col.table) if col.table else ""
                 if col_table in (l_alias, r_alias):
                     reject_right_side_if_left_only(col_table, col.sql())
                     allocate(col_table, col.name)
@@ -1556,16 +2041,12 @@ class IntersectsDuckDBIEJoinTransformer:
         # Pre-allocate inner aliases for columns referenced inside any
         # aggregate function in the SELECT list (we'll rewrite the
         # aggregate's argument to use the inner alias when rendering the
-        # outer projection below). Peel any ``exp.Paren`` wrapper first
-        # so a paren-wrapped aggregate like ``(SUM(a.score)) AS s`` is
-        # treated identically to its bare form.
+        # outer projection below).
         for sel in query.expressions:
-            target = sel.this if isinstance(sel, exp.Alias) else sel
-            while isinstance(target, exp.Paren):
-                target = target.this
+            target = _unwrap_projection_target(sel)
             if isinstance(target, exp.AggFunc):
                 for col in target.find_all(exp.Column):
-                    col_table = _normalize_alias(col.table) if col.table else ""
+                    col_table = _fold_identifier(col.table) if col.table else ""
                     if col_table in (l_alias, r_alias):
                         reject_right_side_if_left_only(col_table, col.sql())
                         allocate(col_table, col.name)
@@ -1573,13 +2054,8 @@ class IntersectsDuckDBIEJoinTransformer:
         outer_projections: list[str] = []
 
         for sel in query.expressions:
-            target = sel.this if isinstance(sel, exp.Alias) else sel
+            target = _unwrap_projection_target(sel)
             user_alias = sel.alias if isinstance(sel, exp.Alias) else None
-            # Peel paren wrappers at the top of dispatch so a paren-wrapped
-            # aggregate like ``(SUM(a.score)) AS s`` routes through the AggFunc
-            # branch below rather than the generic catch-all.
-            while isinstance(target, exp.Paren):
-                target = target.this
 
             # Star projections (bare ``*`` and ``a.*`` / ``b.*``) never reach
             # here — :func:`_has_star_projection` declines them upstream (#202) —
@@ -1592,7 +2068,7 @@ class IntersectsDuckDBIEJoinTransformer:
                 continue
 
             if isinstance(target, exp.Column) and target.table:
-                tbl = _normalize_alias(target.table)
+                tbl = _fold_identifier(target.table)
                 reject_right_side_if_left_only(tbl, target.sql())
                 col = target.name
                 alias = allocate(tbl, col)
@@ -1614,7 +2090,7 @@ class IntersectsDuckDBIEJoinTransformer:
             # than the generic "qualify the column" one, which would steer the
             # user toward another invalid form (``b.col`` is never valid here).
             for col in target.find_all(exp.Column):
-                col_table = _normalize_alias(col.table) if col.table else ""
+                col_table = _fold_identifier(col.table) if col.table else ""
                 reject_right_side_if_left_only(col_table, target.sql())
             # Otherwise the fault is an unqualified / unknown-table column; the
             # accurate guidance is to qualify it (once qualified, the wrapper
@@ -1671,6 +2147,30 @@ def _has_sibling_spatial_predicate(node: Intersects, root: exp.Expression) -> bo
     return False
 
 
+def _decline_to_generic(node: exp.Expression, ctx: ExpansionContext) -> exp.Expression:
+    """Expand *node* with whatever expander serves ``(GenericTarget, Intersects)``.
+
+    Going through the registry keeps this target's fallback and the generic
+    target's expansion the same thing by construction. Calling the built-in
+    directly made them the same only by coincidence: a user override registered
+    on ``(GenericTarget, Intersects)`` took effect under ``dialect=None`` and was
+    silently ignored under ``dialect="duckdb"`` for every shape this override
+    declines.
+
+    Only the generic slot is consulted. Resolving this target's own slot would
+    return this function's caller and recurse without bound, since
+    :meth:`~giql.expander.ExpanderRegistry.resolve` tries the exact
+    ``(target, operator)`` entry first.
+
+    Falls back to the built-in when the generic slot is empty, which a cleared
+    registry produces.
+    """
+    generic = REGISTRY.resolve(GenericTarget(), Intersects)
+    if generic is not None:
+        return generic(node, ctx)
+    return _expand_spatial_op(node, ctx, "intersects")
+
+
 @register(DuckDBTarget, Intersects)
 def expand_intersects_duckdb(
     node: exp.Expression, ctx: ExpansionContext
@@ -1688,12 +2188,13 @@ def expand_intersects_duckdb(
     built SQL (which serializes verbatim), and returns the ``Intersects`` node
     unchanged (mirroring the CLUSTER / MERGE whole-query expanders).
 
-    Every other shape — a join the IEJoin path declines (LEFT/RIGHT/FULL, self-join,
-    multiple INTERSECTS, extra predicates, non-base operands, 3+ tables), a
-    literal-range predicate, or a residual column-to-column predicate — defers to
-    :func:`giql.expanders.intersects._expand_spatial_op`, the same naive overlap
-    predicate the ``(GenericTarget, Intersects)`` expander emits on every target
-    (#167). A query carrying any *sibling* spatial predicate also defers (see
+    Every other shape — a join the IEJoin path declines (FULL OUTER, the LEFT /
+    RIGHT shapes the decomposition declines, self-join, multiple INTERSECTS,
+    extra predicates, non-base operands, 3+ tables), a literal-range predicate,
+    or a residual column-to-column predicate — defers to whichever expander
+    serves ``(GenericTarget, Intersects)`` (see :func:`_decline_to_generic`),
+    which by default is the same naive overlap predicate every other target
+    emits (#167). A query carrying any *sibling* spatial predicate also defers (see
     :func:`_has_sibling_spatial_predicate`), so the IEJoin never inlines a
     residual it cannot see. ``transform_to_sql`` then runs on the pass-3 AST, which
     for the shapes the IEJoin path accepts is structurally identical to the raw
@@ -1712,4 +2213,4 @@ def expand_intersects_duckdb(
             if iejoin_sql is not None:
                 ctx.add_statement_finalizer(lambda _root: exp.Command(this=iejoin_sql))
                 return node
-    return _expand_spatial_op(node, ctx, "intersects")
+    return _decline_to_generic(node, ctx)

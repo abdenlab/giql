@@ -105,7 +105,11 @@ def cross_target_oracle():
         ``columns``.
 
     Returns the per-target normalized result so callers may make extra
-    assertions.
+    assertions, and records the per-target SQL on the fixture callable as
+    ``cross_target_oracle.sql_by_target`` so a case can additionally assert
+    which plan a target took. Row identity alone cannot: a target that stops
+    taking its intended fast path still returns the same rows, so a case
+    written to cover that path would keep passing while covering nothing.
     """
 
     def _oracle(
@@ -148,6 +152,7 @@ def cross_target_oracle():
             results[target] = ENGINE_RUNNERS[engine](sql, table_data, columns)
 
         assert_cross_target(results, expected_rows, sql_by_target)
+        _oracle.sql_by_target = sql_by_target
         return results
 
     return _oracle

@@ -1843,6 +1843,70 @@ class TestIEJoinRegistryDeferral:
         # Assert
         assert "SET VARIABLE __giql_iejoin_" in sql
 
+    def test_declined_shape_should_expand_user_generic_override(self, clean_registry):
+        """Test that a generic Intersects override reaches shapes DuckDB declines.
+
+        Given:
+            A user ``(GenericTarget, Intersects)`` expander registered alongside
+            the built-in DuckDB override, and a FULL OUTER join — a shape the
+            IEJoin path declines.
+        When:
+            Transpiling with dialect='duckdb' and with dialect=None.
+        Then:
+            Both should emit the user override's predicate.
+
+        The DuckDB override called the built-in naive predicate directly, so the
+        two agreed only by coincidence: a user override took effect under
+        ``dialect=None`` and was silently ignored under ``dialect="duckdb"`` for
+        every shape the IEJoin path declines. Resolving the fallback through the
+        registry makes them the same expander by construction.
+        """
+        # Arrange
+        clean_registry.register(DuckDBTarget(), Intersects, expand_intersects_duckdb)
+        clean_registry.register(
+            GenericTarget(), Intersects, lambda n, c: exp.condition("1 = 2")
+        )
+        query = (
+            "SELECT a.chrom, b.start FROM peaks a "
+            "FULL JOIN genes b ON a.interval INTERSECTS b.interval"
+        )
+
+        # Act
+        duckdb_sql = transpile(query, tables=["peaks", "genes"], dialect="duckdb")
+        generic_sql = transpile(query, tables=["peaks", "genes"])
+
+        # Assert
+        assert "1 = 2" in duckdb_sql
+        assert "1 = 2" in generic_sql
+
+    def test_declined_shape_should_expand_when_generic_slot_is_empty(
+        self, clean_registry
+    ):
+        """Test that a declined shape still expands with no generic expander.
+
+        Given:
+            Only the built-in DuckDB override registered, leaving
+            ``(GenericTarget, Intersects)`` unresolvable.
+        When:
+            Transpiling a FULL OUTER join with dialect='duckdb'.
+        Then:
+            It should fall back to the built-in naive overlap predicate rather
+            than calling ``None``.
+        """
+        # Arrange
+        clean_registry.register(DuckDBTarget(), Intersects, expand_intersects_duckdb)
+        query = (
+            "SELECT a.chrom, b.start FROM peaks a "
+            "FULL JOIN genes b ON a.interval INTERSECTS b.interval"
+        )
+
+        # Act
+        sql = transpile(query, tables=["peaks", "genes"], dialect="duckdb")
+
+        # Assert
+        assert clean_registry.resolve(GenericTarget(), Intersects) is None
+        assert 'a."chrom" = b."chrom"' in sql
+
     def test_registry_should_resolve_duckdb_intersects_to_iejoin_override(self):
         """Test that the built-in DuckDB IEJoin override is registered.
 
