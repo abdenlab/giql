@@ -556,7 +556,7 @@ them):
   ``RIGHT`` outer join an expression projection still declines, since the
   decomposition's unmatched half only NULL-fills columns.
 - **Extra JOIN / WHERE predicates.** Additional non-INTERSECTS
-  predicates ANDed onto the join ON or WHERE (e.g. ``a.score >
+  predicates ANDed onto the join ON or WHERE (e.g., ``a.score >
   b.score`` or ``WHERE a.score > 100``) are inlined into each
   per-chromosome subquery's ON, so DuckDB filters them inside each
   IEJoin candidate set. **Limitations:** the dialect peels extra
@@ -572,6 +572,50 @@ them):
   ``dialect=None`` path, ``dialect="duckdb"`` is one workaround — the
   dialect inlines extras directly into each per-chromosome subquery
   and is unaffected by that bug.
+- **Strand-equality residuals.** A cross-side equality inlined into a
+  per-chromosome subquery's ON turns the join into a hash join on that
+  key, with the position inequalities demoted to a residual filter, and
+  a two-valued key such as ``strand`` makes that join quadratic inside
+  every partition. The dialect therefore emits the equality between the
+  two tables' registered strand columns as the equivalent pair
+  ``a.strand >= b.strand AND a.strand <= b.strand`` (identical for
+  NULLs, which fail both forms), placed after the two position
+  inequalities so the range join still sorts on position and filters on
+  strand. The rewrite applies to the per-chromosome branches only: the
+  unpartitioned query the dialect selects above the partition ceiling is
+  a hash join on the chromosome, and the strand equality stays in its
+  key there.
+
+  Only a top-level ``AND`` conjunct, parenthesised or not, whose two
+  operands are bare columns naming each table's registered
+  ``strand_col`` (``Table(strand_col=...)``; ``None`` disables the
+  rewrite for that table) is rewritten. Every other equality is emitted
+  as written. Shapes DuckDB does not hash on need no rewrite: a
+  one-sided equality (``a.strand = '+'``, a scan filter DuckDB pushes
+  below the join), an equality under ``OR`` or as ``NOT (a = b)``, or
+  one mixing both sides in a single operand. Shapes it does hash on are
+  left alone deliberately: a cross-side equality on any other column
+  (``a.name = b.name``), ``IS NOT DISTINCT FROM``, ``IN (b.col)``,
+  ``NOT (a <> b)``, and an expression, quantified (``= ANY``), or
+  collated operand. One shape binds under the naive plan but fails at
+  bind time under the dialect: strand columns of incompatible types on
+  the two sides, since DuckDB casts implicitly for ``=`` but not for
+  ``>=`` / ``<=``.
+
+  The gate is the strand column rather than any cross-side key because
+  it is the one cardinality signal the transpiler has without
+  statistics. A key more selective than the position overlap prunes more
+  pairs as a hash key than the pair does as a per-candidate filter, and
+  the loss grows with overlap density; choosing per key is the
+  cost-based optimizer's job (#67). Measured on DuckDB 1.5.5 with 1e6
+  intervals per side over 24 chromosomes (the :doc:`bedtools -s
+  <../recipes/bedtools-migration>` shape, ``SELECT a.chrom, a.start,
+  a."end" FROM a SEMI JOIN b ON a.interval INTERSECTS b.interval AND
+  a.strand = b.strand``), the naive plan takes 45.6s at one thread and
+  14.0s at eight; the dialect takes 0.86s and 0.37s. The same query
+  keyed on a 10,000-value ``sid`` column over a 100,000-position span
+  runs in 0.32s at eight threads as the hash join the dialect keeps,
+  against 7.1s as a pair.
 
 The dialect splits unsupported shapes into two buckets. Soft-fallback
 shapes route to the naive-predicate plan automatically and return correct
