@@ -1,9 +1,11 @@
 """Tests for the DuckDB IEJoin dialect path on column-to-column INTERSECTS joins."""
 
+import json
 import re
 import time
 
 import pytest
+from sqlglot import exp
 from sqlglot import parse_one
 
 from giql import Table
@@ -28,6 +30,24 @@ _SCALAR_LEAVES = ("a.start", 'a."end"', "b.start", 'b."end"')
 #: The left side's leaves only, for trees projected under SEMI / ANTI joins
 #: whose output may not reference the right side.
 _LEFT_ONLY_LEAVES = ("a.start", 'a."end"')
+
+#: Equality-residual shapes the dialect must answer like the naive plan, keyed
+#: by a short id. Only the bare strand-column pairs (``strand_eq``,
+#: ``reversed``, ``paren_eq``, and the strand half of ``both_eq`` /
+#: ``eq_plus_ineq``) are rewritten; every other shape is emitted as written.
+_EQUALITY_RESIDUAL_SHAPES = {
+    "strand_eq": "a.strand = b.strand",
+    "reversed": "b.strand = a.strand",
+    "paren_eq": "(a.strand = b.strand)",
+    "both_eq": "a.strand = b.strand AND a.score = b.score",
+    "eq_plus_ineq": "a.strand = b.strand AND a.score > b.score",
+    "score_eq": "a.score = b.score",
+    "name_eq": "a.name = b.name",
+    "expr_eq": "a.score + 1 = b.score",
+    "one_sided": "a.strand = '+'",
+    "under_not": "NOT (a.strand = b.strand)",
+    "collated": "a.strand COLLATE NOCASE = b.strand",
+}
 
 
 def _make_table(conn, name: str, rows: list[tuple]) -> None:
@@ -124,33 +144,37 @@ def _make_interval_tables(conn, peak_rows: list[tuple], gene_rows: list[tuple]) 
             conn.executemany(f"INSERT INTO {table} VALUES (?, ?, ?)", rows)
 
 
-def _make_planner_scale_tables(conn, *, genes_where: str | None = None) -> None:
-    """Recreate 20k-row peaks/genes tables over four chromosomes.
+def _make_planner_scale_tables(
+    conn, *, genes_where: str | None = None, strand: bool = False, chroms: int = 4
+) -> None:
+    """Recreate 20k-row peaks/genes tables over *chroms* chromosomes.
 
     Sized so DuckDB's planner picks a range join rather than a nested loop,
     which is what the ``IE_JOIN`` plan assertions read. The two strides (37
     and 41, the latter offset by 17) are coprime with the 100000 modulus, so
     starts spread evenly and the interval sets overlap without either side
     being a shifted copy of the other. *genes_where* restricts genes to a
-    subset of the chromosomes, leaving peaks with unmatched contigs.
+    subset of the chromosomes, leaving peaks with unmatched contigs. *strand*
+    adds a ``strand`` column alternating ``+`` / ``-`` by row, so a
+    strand-equality residual halves each per-chromosome candidate set.
+    *chroms* above ``MAX_PER_CHROM_PARTITIONS`` makes the dialect take its
+    unpartitioned branch.
     """
-    conn.execute("DROP TABLE IF EXISTS peaks")
-    conn.execute("""
-        CREATE TABLE peaks AS
-        SELECT 'chr' || ((i % 4) + 1) AS chrom,
-               ((i * 37) % 100000)::INTEGER AS "start",
-               (((i * 37) % 100000) + 200)::INTEGER AS "end"
-        FROM range(20000) t(i)
-    """)
-    conn.execute("DROP TABLE IF EXISTS genes")
-    conn.execute(f"""
-        CREATE TABLE genes AS
-        SELECT 'chr' || ((i % 4) + 1) AS chrom,
-               ((i * 41 + 17) % 100000)::INTEGER AS "start",
-               (((i * 41 + 17) % 100000) + 200)::INTEGER AS "end"
-        FROM range(20000) t(i)
-        {f"WHERE {genes_where}" if genes_where else ""}
-    """)
+    strand_column = ", CASE WHEN i % 2 = 0 THEN '+' ELSE '-' END AS strand"
+    for table, stride, offset, where in (
+        ("peaks", 37, 0, None),
+        ("genes", 41, 17, genes_where),
+    ):
+        conn.execute(f"DROP TABLE IF EXISTS {table}")
+        conn.execute(f"""
+            CREATE TABLE {table} AS
+            SELECT 'chr' || ((i % {chroms}) + 1) AS chrom,
+                   ((i * {stride} + {offset}) % 100000)::INTEGER AS "start",
+                   (((i * {stride} + {offset}) % 100000) + 200)::INTEGER AS "end"
+                   {strand_column if strand else ""}
+            FROM range(20000) t(i)
+            {f"WHERE {where}" if where else ""}
+        """)
 
 
 def _null_key(row: tuple) -> tuple:
@@ -307,23 +331,66 @@ def _interval_lists(
     )
 
 
-def _explain_dynamic_sql(conn, sql: str, half: int = 0) -> str:
-    """Return the DuckDB EXPLAIN text of the per-chromosome dynamic SQL for *sql*.
+def _dynamic_sql(conn, sql: str, half: int = 0) -> str:
+    """Return the dynamic SQL that the ``SET VARIABLE`` statements of *sql* build.
 
-    Runs the leading ``SET VARIABLE`` statements, reads the aggregated
-    per-chromosome ``UNION ALL`` string back out of the session variable named by
-    *half*, and returns the plain EXPLAIN for it. The outer
-    ``query(getvariable(...))`` wrapper is opaque to EXPLAIN, so the dynamic SQL
-    must be planned directly. *half* selects which variable to plan: ``0`` is the
-    only one for a single-relation shape and the matched half of a decomposed
-    outer join, ``1`` is that decomposition's unmatched half.
+    Runs the leading ``SET VARIABLE`` statements and reads the aggregated
+    per-chromosome ``UNION ALL`` string (or the unpartitioned query, above the
+    partition ceiling) back out of the session variable named by *half*: ``0``
+    is the only one for a single-relation shape and the matched half of a
+    decomposed outer join, ``1`` is that decomposition's unmatched half.
     """
     statements = [s for s in sql.split(";\n") if s.strip()]
     for statement in statements[:-1]:
         conn.execute(statement)
     var_names = _dynamic_sql_variables(sql)
-    dynamic_sql = conn.execute(f"SELECT getvariable('{var_names[half]}')").fetchone()[0]
-    return conn.execute("EXPLAIN " + dynamic_sql).fetchone()[1]
+    return conn.execute(f"SELECT getvariable('{var_names[half]}')").fetchone()[0]
+
+
+def _explain_dynamic_sql(conn, sql: str, half: int = 0) -> str:
+    """Return the DuckDB EXPLAIN text of the per-chromosome dynamic SQL for *sql*.
+
+    The outer ``query(getvariable(...))`` wrapper is opaque to EXPLAIN, so the
+    dynamic SQL must be planned directly.
+    """
+    return conn.execute("EXPLAIN " + _dynamic_sql(conn, sql, half)).fetchone()[1]
+
+
+def _plan_json(conn, sql: str, half: int = 0) -> dict:
+    """Return the DuckDB structured EXPLAIN of the per-chromosome dynamic SQL for *sql*.
+
+    The JSON form carries each join's conditions as an ordered list under
+    ``extra_info``, which the text form only draws.
+    """
+    plan = conn.execute(
+        "EXPLAIN (FORMAT JSON) " + _dynamic_sql(conn, sql, half)
+    ).fetchone()[1]
+    return json.loads(plan)[0]
+
+
+def _find_operator(node: dict, name: str) -> dict | None:
+    """Return the first operator named *name* in a structured EXPLAIN tree."""
+    if node.get("name") == name:
+        return node
+    for child in node.get("children", []):
+        found = _find_operator(child, name)
+        if found is not None:
+            return found
+    return None
+
+
+def _join_predicate(conn, sql: str) -> exp.Expression:
+    """Return the join predicate of the dynamic SQL for *sql* as a parsed AST.
+
+    Reads the first branch's ``JOIN ... ON`` predicate, or the ``EXISTS``
+    subquery's ``WHERE`` for the SEMI / ANTI form, so a test can assert on the
+    conjunct order and shape without matching rendered SQL text.
+    """
+    tree = parse_one(_dynamic_sql(conn, sql), read="duckdb")
+    join = tree.find(exp.Join)
+    if join is not None and join.args.get("on") is not None:
+        return join.args["on"]
+    return tree.find(exp.Exists).this.args["where"].this
 
 
 @pytest.fixture
@@ -355,6 +422,43 @@ def peaks_genes(conn):
             ("chr1", 700, 800, "g3", 3, "+"),
             ("chr2", 50, 150, "g4", 4, "-"),
             ("chr2", 250, 350, "g5", 5, "+"),
+        ],
+    )
+    return conn
+
+
+@pytest.fixture
+def stranded_peaks_genes(conn):
+    """Peaks / genes whose strand column exercises every equality outcome.
+
+    Strand ``.`` appears only on the left, NULL strands appear on both sides
+    (and can never match each other), and chr3 appears only on the left.
+    """
+    _make_table(
+        conn,
+        "peaks",
+        [
+            ("chr1", 100, 200, "p1", 10, "+"),
+            ("chr1", 150, 250, "p2", 20, "-"),
+            ("chr1", 300, 400, "p3", 30, "+"),
+            ("chr1", 500, 600, "p4", 40, "."),
+            ("chr2", 100, 200, "p5", 50, "-"),
+            ("chr2", 700, 800, "p6", 60, None),
+            ("chr3", 100, 200, "p7", 70, "+"),
+        ],
+    )
+    _make_table(
+        conn,
+        "genes",
+        [
+            ("chr1", 120, 180, "g1", 5, "+"),
+            ("chr1", 160, 260, "g2", 21, "-"),
+            ("chr1", 350, 450, "g3", 30, "-"),
+            ("chr1", 320, 380, "g8", 30, "+"),
+            ("chr1", 550, 650, "g4", 45, "+"),
+            ("chr2", 150, 250, "g5", 55, "-"),
+            ("chr2", 750, 850, "g6", 65, None),
+            ("chr2", 780, 800, "g7", 66, "+"),
         ],
     )
     return conn
@@ -3798,6 +3902,227 @@ class TestTranspileDuckDBIEJoinSQLStructure:
         with pytest.raises(ValueError) as excinfo:
             transpile(query, tables=["peaks", "genes"], dialect="duckdb")
         assert "left-side" in str(excinfo.value)
+
+    @pytest.mark.parametrize("join_kind", ["JOIN", "SEMI JOIN"])
+    def test_transpile_should_rewrite_strand_equality_as_inequality_pair_after_overlap_predicates(  # noqa: E501
+        self, peaks_genes, join_kind
+    ):
+        """Test that a strand-equality residual is emitted as a ``>=`` / ``<=`` pair.
+
+        Given:
+            Stranded peaks / genes and a JOIN / SEMI JOIN INTERSECTS query whose
+            ON carries ``a.strand = b.strand``.
+        When:
+            The query is transpiled with ``dialect='duckdb'`` and its
+            per-chromosome dynamic SQL is read back and parsed.
+        Then:
+            The join predicate should be the two positional overlap predicates
+            followed by ``a.strand >= b.strand`` and ``a.strand <= b.strand``,
+            with no equality left.
+        """
+        # Arrange
+        sql = transpile(
+            f"SELECT a.start FROM peaks a {join_kind} genes b "
+            "ON a.interval INTERSECTS b.interval AND a.strand = b.strand",
+            tables=["peaks", "genes"],
+            dialect="duckdb",
+        )
+
+        # Act
+        conjuncts = list(_join_predicate(peaks_genes, sql).flatten())
+
+        # Assert
+        assert [type(c) for c in conjuncts] == [exp.LT, exp.GT, exp.GTE, exp.LTE]
+        assert conjuncts[2:] == [
+            parse_one("a.strand >= b.strand", read="duckdb"),
+            parse_one("a.strand <= b.strand", read="duckdb"),
+        ]
+
+    @pytest.mark.parametrize("join_kind", ["JOIN", "SEMI JOIN"])
+    def test_transpile_should_keep_strand_equality_when_partition_exceeds_ceiling(
+        self, conn, join_kind
+    ):
+        """Test that the unpartitioned fallback keeps a strand equality as written.
+
+        Given:
+            Stranded peaks / genes over 300 shared chromosomes -- above
+            ``MAX_PER_CHROM_PARTITIONS`` -- and a JOIN / SEMI JOIN INTERSECTS
+            query whose ON carries ``a.strand = b.strand``.
+        When:
+            The query is transpiled with ``dialect='duckdb'`` and the query the
+            session variable selects is read back and parsed.
+        Then:
+            The join predicate should carry the chromosome equality, the
+            positional overlap predicates, and ``a.strand = b.strand`` as an
+            equality, with no ``>=`` / ``<=`` pair.
+        """
+        # Arrange
+        _make_planner_scale_tables(conn, strand=True, chroms=300)
+        sql = transpile(
+            f"SELECT a.start FROM peaks a {join_kind} genes b "
+            "ON a.interval INTERSECTS b.interval AND a.strand = b.strand",
+            tables=["peaks", "genes"],
+            dialect="duckdb",
+        )
+
+        # Act
+        conjuncts = list(_join_predicate(conn, sql).flatten())
+
+        # Assert
+        assert [type(c) for c in conjuncts] == [exp.EQ, exp.LT, exp.GT, exp.EQ]
+        assert conjuncts[-1] == parse_one("a.strand = b.strand", read="duckdb")
+
+    @pytest.mark.parametrize(
+        "residual",
+        [
+            *(
+                _EQUALITY_RESIDUAL_SHAPES[kind]
+                for kind in (
+                    "score_eq",
+                    "name_eq",
+                    "expr_eq",
+                    "one_sided",
+                    "under_not",
+                    "collated",
+                )
+            ),
+            "a.score = ANY(list_value(b.score, b.score + 4))",
+            "a.score = b.score + CAST(random() * 3 AS INTEGER)",
+            "a.score = b.score + nextval('s')",
+        ],
+        ids=[
+            "score_eq",
+            "name_eq",
+            "expr_eq",
+            "one_sided",
+            "under_not",
+            "collated",
+            "any_eq",
+            "volatile_random",
+            "volatile_nextval",
+        ],
+    )
+    def test_transpile_should_keep_equality_residual_when_not_a_strand_pair(
+        self, peaks_genes, residual
+    ):
+        """Test that an equality other than a bare strand pair is emitted as written.
+
+        Given:
+            A JOIN INTERSECTS query whose ON residual is an equality on a
+            non-strand column, over an expression, one-sided, under ``NOT``,
+            collated, quantified with ``ANY``, or carrying a volatile operand.
+        When:
+            The query is transpiled with ``dialect='duckdb'`` and its
+            per-chromosome dynamic SQL is read back and parsed.
+        Then:
+            The residual should follow the two positional overlap predicates
+            unchanged, with no ``>=`` / ``<=`` pair anywhere in the predicate.
+        """
+        # Arrange
+        sql = transpile(
+            "SELECT a.start FROM peaks a JOIN genes b "
+            f"ON a.interval INTERSECTS b.interval AND {residual}",
+            tables=["peaks", "genes"],
+            dialect="duckdb",
+        )
+
+        # Act
+        predicate = _join_predicate(peaks_genes, sql)
+
+        # Assert
+        assert list(predicate.flatten())[2:] == [parse_one(residual, read="duckdb")]
+        assert predicate.find(exp.GTE, exp.LTE) is None
+
+    @pytest.mark.parametrize(
+        "residual",
+        [
+            _EQUALITY_RESIDUAL_SHAPES[kind]
+            for kind in ("strand_eq", "reversed", "paren_eq", "both_eq", "eq_plus_ineq")
+        ],
+        ids=["strand_eq", "reversed", "paren_eq", "both_eq", "eq_plus_ineq"],
+    )
+    def test_transpile_should_rewrite_only_the_strand_pair_when_residual_is_compound(
+        self, peaks_genes, residual
+    ):
+        """Test that the strand pair is rewritten wherever it sits in an AND tree.
+
+        Given:
+            A JOIN INTERSECTS query whose ON residual carries a bare strand
+            pair -- in either operand order, parenthesised, or beside another
+            equality or inequality.
+        When:
+            The query is transpiled with ``dialect='duckdb'`` and its
+            per-chromosome dynamic SQL is read back and parsed.
+        Then:
+            The predicate should carry a ``>=`` / ``<=`` pair over the two
+            strand columns and no strand equality, while any other conjunct
+            is left as written.
+        """
+        # Arrange
+        sql = transpile(
+            "SELECT a.start FROM peaks a JOIN genes b "
+            f"ON a.interval INTERSECTS b.interval AND {residual}",
+            tables=["peaks", "genes"],
+            dialect="duckdb",
+        )
+
+        # Act
+        predicate = _join_predicate(peaks_genes, sql)
+
+        # Assert
+        bounds = list(predicate.find_all(exp.GTE, exp.LTE))
+        assert sorted(type(b).__name__ for b in bounds) == ["GTE", "LTE"]
+        for bound in bounds:
+            assert {c.name for c in bound.find_all(exp.Column)} == {"strand"}
+        for equality in predicate.find_all(exp.EQ):
+            assert {c.name for c in equality.find_all(exp.Column)} != {"strand"}
+
+    @pytest.mark.parametrize(
+        ("tables", "residual", "rewritten"),
+        [
+            (
+                [Table("peaks", strand_col="str"), Table("genes", strand_col="str")],
+                "a.str = b.str",
+                True,
+            ),
+            (
+                [Table("peaks", strand_col="str"), Table("genes", strand_col="str")],
+                "a.strand = b.strand",
+                False,
+            ),
+            ([Table("peaks", strand_col=None), "genes"], "a.strand = b.strand", False),
+        ],
+        ids=["registered_name", "unregistered_name", "no_strand_column"],
+    )
+    def test_transpile_should_gate_the_rewrite_on_the_registered_strand_column(
+        self, peaks_genes, tables, residual, rewritten
+    ):
+        """Test that the rewrite follows each table's registered ``strand_col``.
+
+        Given:
+            A JOIN INTERSECTS query with a cross-side equality, and table
+            configs whose ``strand_col`` is a custom name, or ``None``.
+        When:
+            The query is transpiled with ``dialect='duckdb'`` and its
+            per-chromosome dynamic SQL is read back and parsed.
+        Then:
+            The equality should be rewritten only when both operands name the
+            registered strand column of their side.
+        """
+        # Arrange
+        sql = transpile(
+            "SELECT a.start FROM peaks a JOIN genes b "
+            f"ON a.interval INTERSECTS b.interval AND {residual}",
+            tables=tables,
+            dialect="duckdb",
+        )
+
+        # Act
+        predicate = _join_predicate(peaks_genes, sql)
+
+        # Assert
+        assert (predicate.find(exp.GTE) is not None) is rewritten
+        assert (predicate.find(exp.EQ) is None) is rewritten
 
 
 class TestTranspileDuckDBIEJoinCountOverlaps:
@@ -9510,6 +9835,386 @@ class TestTranspileDuckDBIEJoinExecution:
         # Assert
         assert rows_duckdb == [(900,), (700,)]
         assert rows_duckdb == rows_naive
+
+    def test_inner_join_plan_should_reach_iejoin_when_residual_is_strand_equality(
+        self, conn
+    ):
+        """Test that a strand-equality residual plans through IE_JOIN, not a hash join.
+
+        Given:
+            20k stranded rows per side over four chromosomes and an INNER JOIN
+            INTERSECTS query whose ON carries ``a.strand = b.strand``.
+        When:
+            The ``dialect='duckdb'`` per-chromosome dynamic SQL is planned with
+            ``EXPLAIN``.
+        Then:
+            It should plan through ``IE_JOIN`` with no ``HASH_JOIN``, sorting on
+            the two positional predicates and filtering on the strand pair.
+        """
+        # Arrange
+        _make_planner_scale_tables(conn, strand=True)
+        sql = transpile(
+            "SELECT a.start, b.start AS b_start FROM peaks a "
+            "JOIN genes b ON a.interval INTERSECTS b.interval "
+            "AND a.strand = b.strand",
+            tables=["peaks", "genes"],
+            dialect="duckdb",
+        )
+
+        # Act
+        plan = _plan_json(conn, sql)
+
+        # Assert
+        assert _find_operator(plan, "HASH_JOIN") is None
+        conditions = _find_operator(plan, "IE_JOIN")["extra_info"]["Conditions"]
+        assert set(conditions[:2]) == {"start < end", "end > start"}
+        assert set(conditions[2:]) == {"strand >= strand", "strand <= strand"}
+
+    @pytest.mark.parametrize("join_kind", ["SEMI JOIN", "ANTI JOIN"])
+    def test_left_only_join_plan_should_avoid_nested_loop_when_residual_is_strand_equality(  # noqa: E501
+        self, conn, join_kind
+    ):
+        """Test that the SEMI / ANTI EXISTS form reaches IE_JOIN with a strand equality.
+
+        Given:
+            20k stranded rows per side over four chromosomes and a SEMI / ANTI
+            JOIN INTERSECTS query whose ON carries ``a.strand = b.strand``.
+        When:
+            The ``dialect='duckdb'`` per-chromosome dynamic SQL is planned with
+            ``EXPLAIN``.
+        Then:
+            It should plan through ``IE_JOIN`` and not the quadratic
+            ``BLOCKWISE_NL_JOIN``, sorting on the two positional predicates and
+            filtering on the strand pair.
+        """
+        # Arrange
+        _make_planner_scale_tables(conn, strand=True)
+        sql = transpile(
+            f"SELECT a.start FROM peaks a {join_kind} genes b "
+            "ON a.interval INTERSECTS b.interval AND a.strand = b.strand",
+            tables=["peaks", "genes"],
+            dialect="duckdb",
+        )
+
+        # Act
+        plan = _plan_json(conn, sql)
+
+        # Assert
+        assert _find_operator(plan, "BLOCKWISE_NL_JOIN") is None
+        conditions = _find_operator(plan, "IE_JOIN")["extra_info"]["Conditions"]
+        assert set(conditions[:2]) == {"start < end", "end > start"}
+        assert set(conditions[2:]) == {"strand >= strand", "strand <= strand"}
+
+    def test_inner_join_plan_should_keep_hash_join_when_residual_is_another_equality(
+        self, peaks_genes
+    ):
+        """Test that a cross-side equality on a non-strand column stays a hash key.
+
+        Given:
+            Peaks / genes and an INNER JOIN INTERSECTS query whose ON carries
+            ``a.name = b.name``.
+        When:
+            The ``dialect='duckdb'`` per-chromosome dynamic SQL is planned with
+            ``EXPLAIN``.
+        Then:
+            It should plan a ``HASH_JOIN`` keyed on the name equality, since
+            the rewrite is gated on the registered strand column.
+        """
+        # Arrange
+        sql = transpile(
+            "SELECT a.start FROM peaks a JOIN genes b "
+            "ON a.interval INTERSECTS b.interval AND a.name = b.name",
+            tables=["peaks", "genes"],
+            dialect="duckdb",
+        )
+
+        # Act
+        plan = _plan_json(peaks_genes, sql)
+
+        # Assert
+        hash_join = _find_operator(plan, "HASH_JOIN")
+        assert "name = name" in hash_join["extra_info"]["Conditions"]
+
+    def test_unpartitioned_plan_should_hash_on_strand_when_partition_exceeds_ceiling(
+        self, conn
+    ):
+        """Test that the unpartitioned fallback hashes on the strand equality.
+
+        Given:
+            20k stranded rows per side over 300 shared chromosomes -- above
+            ``MAX_PER_CHROM_PARTITIONS`` -- and an INNER JOIN INTERSECTS query
+            whose ON carries ``a.strand = b.strand``.
+        When:
+            The query the ``dialect='duckdb'`` session variable selects is
+            planned with ``EXPLAIN``.
+        Then:
+            It should plan a ``HASH_JOIN`` whose key carries both the
+            chromosome and the strand equality.
+        """
+        # Arrange
+        _make_planner_scale_tables(conn, strand=True, chroms=300)
+        sql = transpile(
+            "SELECT a.start, b.start AS b_start FROM peaks a "
+            "JOIN genes b ON a.interval INTERSECTS b.interval "
+            "AND a.strand = b.strand",
+            tables=["peaks", "genes"],
+            dialect="duckdb",
+        )
+
+        # Act
+        plan = _plan_json(conn, sql)
+
+        # Assert
+        hash_join = _find_operator(plan, "HASH_JOIN")
+        conditions = hash_join["extra_info"]["Conditions"]
+        assert "chrom = chrom" in conditions
+        assert "strand = strand" in conditions
+
+    @pytest.mark.parametrize(
+        ("join_kind", "expected"),
+        [
+            (
+                "SEMI JOIN",
+                [("chr1", 100), ("chr1", 150), ("chr1", 300), ("chr2", 100)],
+            ),
+            ("ANTI JOIN", [("chr1", 500), ("chr2", 700), ("chr3", 100)]),
+        ],
+        ids=["semi", "anti"],
+    )
+    def test_query_should_match_strand_equality_truth_table_when_dialect_is_duckdb(
+        self, stranded_peaks_genes, join_kind, expected
+    ):
+        """Test the strand-equality SEMI / ANTI truth table end to end.
+
+        Given:
+            Stranded peaks / genes where one strand value (``.``) exists on the
+            left only, NULL strands exist on both sides, and one chromosome
+            exists on the left only.
+        When:
+            A SEMI / ANTI JOIN INTERSECTS query with ``a.strand = b.strand``
+            is transpiled with ``dialect='duckdb'`` and executed.
+        Then:
+            SEMI should return exactly the left rows with a same-strand overlap
+            and ANTI the rest; a left-only strand value, a NULL strand (even
+            against another NULL) and a left-only chromosome should all count as
+            unmatched, and both should agree with the naive plan.
+        """
+        # Arrange
+        query = (
+            f"SELECT a.chrom, a.start FROM peaks a {join_kind} genes b "
+            "ON a.interval INTERSECTS b.interval AND a.strand = b.strand"
+        )
+
+        # Act
+        sql = _assert_agrees_with_naive(stranded_peaks_genes, query)
+        rows = sorted(stranded_peaks_genes.execute(sql).fetchall())
+
+        # Assert
+        assert rows == expected
+
+    @pytest.mark.parametrize("join_kind", ["JOIN", "SEMI JOIN", "ANTI JOIN"])
+    @pytest.mark.parametrize(
+        "residual",
+        list(_EQUALITY_RESIDUAL_SHAPES.values()),
+        ids=list(_EQUALITY_RESIDUAL_SHAPES),
+    )
+    def test_query_should_match_naive_plan_for_equality_residual_shapes(
+        self, stranded_peaks_genes, residual, join_kind
+    ):
+        """Test dialect / naive equivalence across the equality-residual shapes.
+
+        Given:
+            Stranded peaks / genes with left-only and NULL strand values, and a
+            JOIN / SEMI JOIN / ANTI JOIN INTERSECTS query whose ON residual is
+            one of ``_EQUALITY_RESIDUAL_SHAPES``.
+        When:
+            The query is transpiled with and without ``dialect='duckdb'`` and
+            both are executed.
+        Then:
+            Both plans should return the same rows and result schema.
+        """
+        # Arrange
+        query = (
+            f"SELECT a.chrom, a.start FROM peaks a {join_kind} genes b "
+            f"ON a.interval INTERSECTS b.interval AND {residual}"
+        )
+
+        # Act & assert
+        _assert_agrees_with_naive(stranded_peaks_genes, query)
+
+    def test_query_should_match_naive_plan_for_where_strand_equality_when_join_is_inner(  # noqa: E501
+        self, stranded_peaks_genes
+    ):
+        """Test that an INNER-join WHERE strand equality is rewritten.
+
+        Given:
+            Stranded peaks / genes and an INNER JOIN INTERSECTS query whose
+            ``a.strand = b.strand`` sits in the top-level WHERE rather than the
+            ON.
+        When:
+            The query is transpiled with and without ``dialect='duckdb'`` and
+            both are executed.
+        Then:
+            Both plans should return the same rows, and the per-chromosome join
+            predicate should carry the ``>=`` / ``<=`` pair.
+        """
+        # Arrange
+        query = (
+            "SELECT a.chrom, a.start, b.start AS b_start FROM peaks a "
+            "JOIN genes b ON a.interval INTERSECTS b.interval "
+            "WHERE a.strand = b.strand"
+        )
+
+        # Act
+        sql = _assert_agrees_with_naive(stranded_peaks_genes, query)
+
+        # Assert
+        predicate = _join_predicate(stranded_peaks_genes, sql)
+        assert predicate.find(exp.GTE) is not None
+        assert predicate.find(exp.EQ) is None
+
+    def test_query_should_match_naive_plan_when_equality_operands_differ_in_type(
+        self, conn
+    ):
+        """Test that a cross-type equality on a non-strand column binds as it did.
+
+        Given:
+            Peaks whose ``gene_id`` is VARCHAR and genes whose ``gene_id`` is
+            INTEGER, and an INNER JOIN INTERSECTS query whose ON carries
+            ``a.gene_id = b.gene_id``.
+        When:
+            The query is transpiled with and without ``dialect='duckdb'`` and
+            both are executed.
+        Then:
+            Both plans should return the same rows, because the equality is
+            emitted as written and DuckDB casts implicitly for ``=``.
+        """
+        # Arrange
+        conn.execute(
+            'CREATE TABLE peaks (chrom VARCHAR, "start" INTEGER, "end" INTEGER, '
+            "gene_id VARCHAR)"
+        )
+        conn.execute(
+            'CREATE TABLE genes (chrom VARCHAR, "start" INTEGER, "end" INTEGER, '
+            "gene_id INTEGER)"
+        )
+        conn.execute(
+            "INSERT INTO peaks VALUES ('chr1', 100, 200, '7'), ('chr1', 300, 400, '8')"
+        )
+        conn.execute(
+            "INSERT INTO genes VALUES ('chr1', 150, 250, 7), ('chr1', 350, 450, 9)"
+        )
+        query = (
+            "SELECT a.chrom, a.start FROM peaks a JOIN genes b "
+            "ON a.interval INTERSECTS b.interval AND a.gene_id = b.gene_id"
+        )
+
+        # Act & assert
+        _assert_agrees_with_naive(conn, query)
+
+    def test_query_should_raise_binder_error_when_strand_columns_differ_in_type(
+        self, conn
+    ):
+        """Test the one shape the strand rewrite cannot bind: unlike strand types.
+
+        Given:
+            Peaks whose ``strand`` is VARCHAR and genes whose ``strand`` is
+            INTEGER, and an INNER JOIN INTERSECTS query whose ON carries
+            ``a.strand = b.strand``.
+        When:
+            The query is transpiled with ``dialect='duckdb'`` and executed.
+        Then:
+            It should raise DuckDB's binder error, since the rewritten ``>=`` /
+            ``<=`` pair has no implicit cast between the two types.
+        """
+        # Arrange
+        conn.execute(
+            'CREATE TABLE peaks (chrom VARCHAR, "start" INTEGER, "end" INTEGER, '
+            "strand VARCHAR)"
+        )
+        conn.execute(
+            'CREATE TABLE genes (chrom VARCHAR, "start" INTEGER, "end" INTEGER, '
+            "strand INTEGER)"
+        )
+        conn.execute("INSERT INTO peaks VALUES ('chr1', 100, 200, '1')")
+        conn.execute("INSERT INTO genes VALUES ('chr1', 150, 250, 1)")
+        sql = transpile(
+            "SELECT a.chrom, a.start FROM peaks a JOIN genes b "
+            "ON a.interval INTERSECTS b.interval AND a.strand = b.strand",
+            tables=["peaks", "genes"],
+            dialect="duckdb",
+        )
+
+        # Act & assert
+        with pytest.raises(duckdb.BinderException):
+            conn.execute(sql).fetchall()
+
+    @settings(
+        max_examples=40,
+        deadline=None,
+        suppress_health_check=[HealthCheck.function_scoped_fixture],
+    )
+    @given(
+        peaks=st.lists(
+            st.tuples(
+                st.sampled_from(["chr1", "chr2"]),
+                st.integers(min_value=0, max_value=100),
+                st.integers(min_value=1, max_value=30),
+                st.sampled_from(["+", "-", None]),
+                st.one_of(st.none(), st.integers(min_value=0, max_value=3)),
+            ),
+            min_size=0,
+            max_size=6,
+        ),
+        genes=st.lists(
+            st.tuples(
+                st.sampled_from(["chr1", "chr2"]),
+                st.integers(min_value=0, max_value=100),
+                st.integers(min_value=1, max_value=30),
+                st.sampled_from(["+", "-", None]),
+                st.one_of(st.none(), st.integers(min_value=0, max_value=3)),
+            ),
+            min_size=0,
+            max_size=6,
+        ),
+        residual_kind=st.sampled_from(sorted(_EQUALITY_RESIDUAL_SHAPES)),
+        join_kind=st.sampled_from(["JOIN", "SEMI JOIN", "ANTI JOIN"]),
+    )
+    def test_query_should_match_naive_plan_for_random_equality_residuals(
+        self, conn, peaks, genes, residual_kind, join_kind
+    ):
+        """Test cross-plan equivalence under random equality residuals.
+
+        Given:
+            Hypothesis-generated peak / gene interval lists with (possibly
+            NULL) strand and score columns, a residual sampled from
+            ``_EQUALITY_RESIDUAL_SHAPES``, and a sampled INNER / SEMI / ANTI
+            join.
+        When:
+            The composed query is transpiled under both ``dialect=None`` and
+            ``dialect="duckdb"`` and executed.
+        Then:
+            Both plans should return the same rows and result schema.
+        """
+        # Arrange
+        peak_rows = [
+            (c, s, s + n, None, score, strand) for c, s, n, strand, score in peaks
+        ]
+        gene_rows = [
+            (c, s, s + n, None, score, strand) for c, s, n, strand, score in genes
+        ]
+        conn.execute("DROP TABLE IF EXISTS peaks")
+        conn.execute("DROP TABLE IF EXISTS genes")
+        _make_table(conn, "peaks", peak_rows)
+        _make_table(conn, "genes", gene_rows)
+        query = (
+            f'SELECT a.chrom, a.start, a."end" FROM peaks a {join_kind} genes b '
+            "ON a.interval INTERSECTS b.interval "
+            f"AND {_EQUALITY_RESIDUAL_SHAPES[residual_kind]}"
+        )
+
+        # Act & assert
+        _assert_agrees_with_naive(conn, query)
 
 
 class TestTranspileDuckDBIEJoinKwargs:
