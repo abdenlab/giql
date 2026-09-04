@@ -41,6 +41,7 @@ from giql.canonical import canonical_start
 from giql.constants import DEFAULT_CHROM_COL
 from giql.constants import DEFAULT_END_COL
 from giql.constants import DEFAULT_START_COL
+from giql.constants import DEFAULT_STRAND_COL
 from giql.dialect import GIQLDialect
 from giql.expander import REGISTRY
 from giql.expander import ExpansionContext
@@ -502,6 +503,130 @@ def _strip_intersects(
             return left
         return exp.And(this=left, expression=right)
     return expr
+
+
+def _rewrite_strand_equalities(
+    residuals: list[exp.Expression], strand_cols: dict[str, str]
+) -> list[exp.Expression]:
+    """Return copies of ``residuals`` with each strand equality as an inequality pair.
+
+    A conjunct is rewritten when it is a top-level ``=``, ``NOT (<>)``, or
+    single-element ``IN`` (under ``AND`` or parentheses) whose two operands
+    are bare columns naming the strand column of each side, one per side.
+    ``strand_cols`` maps each side's alias to its strand column name; a side
+    with no strand column is absent from the map. No residual is rewritten
+    when any other cross-side equality remains among them, because the join
+    would hash on that key regardless. Assumes the residuals have passed
+    `_validate_extra_qualifiers`, so every column carries a side alias. The
+    caller must emit the rewritten pair *after* the two positional overlap
+    predicates.
+
+    The pair is the equality spelled without ``=``: over a totally ordered
+    domain ``x = y`` holds exactly when ``x >= y`` and ``x <= y`` both hold,
+    strand values are strings DuckDB orders by collation, and NULL is NULL,
+    hence false, in both forms. The pair carries no implicit cast, so strand
+    columns of unlike types bind under the equality and raise DuckDB's binder
+    error under the pair; an operand that is not a bare column is emitted as
+    written, which is the escape hatch. See :doc:`/transpilation/performance`
+    for the catalogue of shapes and the measurements.
+
+    .. rubric:: Implementation notes
+
+    DuckDB plans a join with any equality among its conditions as a
+    ``HASH_JOIN`` on that key, demoting the inequalities to a residual filter;
+    ``IE_JOIN`` requires no equality among the join conditions, sorts on the
+    first two inequalities in ``ON`` order, and evaluates the rest as a filter
+    over each candidate pair. Position therefore decides the sort keys: the
+    pair placed first makes the join sort on the strand and enumerate nearly
+    every pair in the partition (#98). ``NOT (a <> b)`` and a single-element
+    ``IN`` are the two spellings DuckDB's binder normalizes to the same hash
+    key, so they take the same rewrite. ``IS NOT DISTINCT FROM`` is NULL-safe,
+    and its pure-inequality form needs an ``OR`` arm for the both-NULL case,
+    so it is left as written. DuckDB derives collated ordering and equality
+    from the same collation key, so a collated pair agrees with the collated
+    equality.
+    """
+
+    def strand_side(node: exp.Expression) -> str | None:
+        if not isinstance(node, exp.Column):
+            return None
+        alias = _fold_identifier(node.table)
+        strand = strand_cols.get(alias)
+        if strand is None or _fold_identifier(strand) != _fold_identifier(node.name):
+            return None
+        return alias
+
+    def as_equality(
+        node: exp.Expression,
+    ) -> tuple[exp.Expression, exp.Expression] | None:
+        if isinstance(node, exp.EQ):
+            return node.this, node.expression
+        if isinstance(node, exp.Not):
+            inner = node.this
+            while isinstance(inner, exp.Paren):
+                inner = inner.this
+            if isinstance(inner, exp.NEQ):
+                return inner.this, inner.expression
+        if (
+            isinstance(node, exp.In)
+            and len(node.expressions) == 1
+            and not any(node.args.get(key) for key in ("query", "unnest", "field"))
+        ):
+            return node.this, node.expressions[0]
+        return None
+
+    def sides_of(node: exp.Expression) -> set[str]:
+        return {_fold_identifier(col.table) for col in node.find_all(exp.Column)}
+
+    def strand_pair(
+        node: exp.Expression,
+    ) -> tuple[exp.Expression, exp.Expression] | None:
+        operands = as_equality(node)
+        if operands is None:
+            return None
+        left, right = (strand_side(operand) for operand in operands)
+        if left is None or right is None or left == right:
+            return None
+        return operands
+
+    def is_hash_key(node: exp.Expression) -> bool:
+        if isinstance(node, exp.NullSafeEQ):
+            operands: tuple[exp.Expression, exp.Expression] | None
+            operands = node.this, node.expression
+        else:
+            operands = as_equality(node)
+        if operands is None:
+            return False
+        left, right = (sides_of(operand) for operand in operands)
+        return len(left) == 1 and len(right) == 1 and left != right
+
+    def conjuncts(node: exp.Expression) -> list[exp.Expression]:
+        if isinstance(node, (exp.And, exp.Paren)):
+            return [c for child in node.args.values() for c in conjuncts(child)]
+        return [node]
+
+    def rewrite(node: exp.Expression) -> exp.Expression:
+        if isinstance(node, exp.And):
+            return exp.And(this=rewrite(node.this), expression=rewrite(node.expression))
+        if isinstance(node, exp.Paren):
+            return exp.Paren(this=rewrite(node.this))
+        operands = strand_pair(node)
+        if operands is None:
+            return node
+        left, right = operands
+        return exp.And(
+            this=exp.GTE(this=left, expression=right),
+            expression=exp.LTE(this=left.copy(), expression=right.copy()),
+        )
+
+    copies = [residual.copy() for residual in residuals]
+    if any(
+        is_hash_key(conjunct) and strand_pair(conjunct) is None
+        for residual in copies
+        for conjunct in conjuncts(residual)
+    ):
+        return copies
+    return [rewrite(residual) for residual in copies]
 
 
 def _count_column_intersects(query: exp.Select) -> int:
@@ -1031,6 +1156,13 @@ class IntersectsDuckDBIEJoinTransformer:
       (wrapped to :class:`ValueError` at the public boundary). A right-side
       ``b.*`` under SEMI / ANTI declines to the naive plan with every other
       star (which then rejects the out-of-scope right table at bind time).
+    - A cross-side equality on the two tables' registered strand columns is
+      emitted as the equivalent ``>=`` / ``<=`` pair after the overlap
+      predicates, in every branch, so the per-chromosome join stays on
+      ``IE_JOIN`` (#98); `_rewrite_strand_equalities` has the mechanics.
+      Strand columns of unlike types bind under the equality but not under
+      the pair and raise DuckDB's binder error at execution; wrapping an
+      operand in an expression keeps the equality as written.
     - ``ANTI JOIN`` partitions on the chromosome INTERSECT like INNER and
       SEMI, then unions one non-partitioned branch carrying the left rows
       whose chromosome the right table lacks. Those rows cannot match, so a
@@ -1733,14 +1865,14 @@ class IntersectsDuckDBIEJoinTransformer:
         is only sound for INNER (where ``ON overlap WHERE r`` ≡ ``ON overlap
         AND r``) and SEMI (a left-only ``r`` is invariant over the right side);
         for ANTI it inverts the anti-join for rows failing ``r`` (#200). See
-        :meth:`_build_sql`, which routes WHERE residuals to an outer filter for
-        the left-only (SEMI / ANTI) shapes.
+        `_build_sql`, which routes WHERE residuals to an outer filter for the
+        left-only (SEMI / ANTI) shapes.
 
-        Note: :func:`_strip_intersects` only descends ``exp.And``. Predicates
-        whose AND tree wraps the INTERSECTS in ``exp.Or`` / ``exp.Not`` /
+        Note: `_strip_intersects` only descends ``exp.And``. Predicates whose
+        AND tree wraps the INTERSECTS in ``exp.Or`` / ``exp.Not`` /
         ``exp.Paren`` surface here with the INTERSECTS still embedded;
-        :meth:`_classify_extras` then routes them to the naive-predicate plan, while
-        :meth:`_validate_extra_qualifiers` enforces qualifier rules for the
+        `_classify_extras` then routes them to the naive-predicate plan, while
+        `_validate_extra_qualifiers` enforces qualifier rules for the
         remaining inlinable residuals.
         """
         on_residuals: list[exp.Expression] = []
@@ -1811,17 +1943,20 @@ class IntersectsDuckDBIEJoinTransformer:
         rewrite composed on top never has to recover them by splitting rendered
         SQL, which would break on an identifier containing ``";\\n"``.
 
+        Inline residuals pass through `_rewrite_strand_equalities` before
+        rendering, in the per-chromosome and the unpartitioned form alike.
+
         Returns ``None`` when a soft-fallback condition fires (the residual
         of the join carries a shape the naive-predicate plan can handle but the
         dialect cannot inline, or a single-column USING references a column
         that is not both tables' ``chrom_col``). May propagate
-        :class:`_DeclineIEJoin` from the :meth:`_resolve_projections` projection
-        pre-scan (a naive-valid projection the rebuild cannot express — a
-        window / FILTER / subquery / aggregate-nested wrapper or a bare
-        literal, #204, #205); :meth:`transform_to_parts` catches it and
-        declines to the naive plan. Raises :class:`_UnqualifiedProjectionError`
-        when a user-mistake condition fires; callers translating to the public
-        surface wrap the raise to :class:`ValueError`.
+        `_DeclineIEJoin` from the `_resolve_projections` projection pre-scan
+        (a naive-valid projection the rebuild cannot express — a window /
+        FILTER / subquery / aggregate-nested wrapper or a bare literal, #204,
+        #205); `transform_to_parts` catches it and declines to the naive plan.
+        Raises `_UnqualifiedProjectionError` when a user-mistake condition
+        fires; callers translating to the public surface wrap the raise to
+        `ValueError`.
         """
         on_residuals, where_residuals = self._extract_extra_predicates(query, intersects)
         all_residuals = on_residuals + where_residuals
@@ -1855,6 +1990,16 @@ class IntersectsDuckDBIEJoinTransformer:
         r_chrom = r_table.chrom_col if r_table else DEFAULT_CHROM_COL
         r_start = r_table.start_col if r_table else DEFAULT_START_COL
         r_end = r_table.end_col if r_table else DEFAULT_END_COL
+        l_strand = l_table.strand_col if l_table else DEFAULT_STRAND_COL
+        r_strand = r_table.strand_col if r_table else DEFAULT_STRAND_COL
+        strand_cols = {
+            alias: strand
+            for alias, strand in (
+                (sides.left_user_alias, l_strand),
+                (sides.right_user_alias, r_strand),
+            )
+            if strand is not None
+        }
 
         # USING(<col>) admission check (the gate already restricted to
         # single-column USING). The dialect's per-chromosome partition IS
@@ -1898,16 +2043,21 @@ class IntersectsDuckDBIEJoinTransformer:
         r_table_ident = self._qualified_table_ident(sides.right_table)
 
         # The overlap predicate (canonical, strict) plus any inline residuals,
-        # shared by both the INNER join-ON form and the SEMI / ANTI EXISTS form.
+        # shared by the INNER join-ON form, the SEMI / ANTI EXISTS form, and
+        # the unpartitioned fallback. Residuals follow the overlap predicates
+        # -- the IE_JOIN ordering precondition in `_rewrite_strand_equalities`
+        # (#98).
         overlap_predicates = [
             f"{l_start_expr} < {r_end_expr}",
             f"{l_end_expr} > {r_start_expr}",
         ]
-        for residual in inline_residuals:
-            overlap_predicates.append(
+        predicate_sql = " AND ".join(
+            overlap_predicates
+            + [
                 self._rewrite_refs_for_per_chrom_subquery(residual, sides)
-            )
-        predicate_sql = " AND ".join(overlap_predicates)
+                for residual in _rewrite_strand_equalities(inline_residuals, strand_cols)
+            ]
+        )
 
         # The dynamic SQL builder, expressed as a SQL string-concat that
         # ``string_agg`` aggregates per-chromosome. Single quotes are
