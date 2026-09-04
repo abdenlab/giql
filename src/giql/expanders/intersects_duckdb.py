@@ -41,6 +41,7 @@ from giql.canonical import canonical_start
 from giql.constants import DEFAULT_CHROM_COL
 from giql.constants import DEFAULT_END_COL
 from giql.constants import DEFAULT_START_COL
+from giql.constants import DEFAULT_STRAND_COL
 from giql.dialect import GIQLDialect
 from giql.expander import REGISTRY
 from giql.expander import ExpansionContext
@@ -502,6 +503,79 @@ def _strip_intersects(
             return left
         return exp.And(this=left, expression=right)
     return expr
+
+
+def _strand_equality_as_range_pair(
+    residual: exp.Expression, strand_cols: dict[str, str]
+) -> exp.Expression:
+    """Return a copy of ``residual`` with each strand equality as a ``>=`` / ``<=`` pair.
+
+    A conjunct is rewritten when it is a top-level ``=`` (under ``AND`` or
+    parentheses) whose two operands are bare columns naming the registered
+    strand column of each side, one per side. ``strand_cols`` maps each side's
+    case-folded alias to its case-folded strand column name; a side with no
+    strand column is absent from the map, and an unqualified column never
+    matches. The caller must emit the rewritten pair *after* the two positional
+    overlap predicates.
+
+    Every other equality is returned as written. Shapes DuckDB will not hash
+    on need no rewrite: a one-sided equality (``a.strand = '+'``, a scan
+    filter pushed below the join), an equality under ``OR`` or as
+    ``NOT (a = b)``, an operand mixing both sides, and a cross-side
+    inequality (``<>``). Shapes DuckDB does hash on are left alone
+    deliberately: a cross-side equality on any other column (``a.name =
+    b.name``), whose selectivity the transpiler cannot judge, and
+    ``IS NOT DISTINCT FROM``, ``IN (b.col)``, ``NOT (a <> b)``, or an
+    expression, quantified, or collated operand, none of which is a pure
+    ``>=`` / ``<=`` identity over a bare column.
+
+    .. rubric:: Implementation notes
+
+    DuckDB plans a join with any equality among its conditions as a
+    ``HASH_JOIN`` on that key, demoting the inequalities to a residual filter;
+    ``IE_JOIN`` requires no equality among the join conditions, sorts on the
+    first two inequalities in ``ON`` order, and evaluates the rest as a filter
+    over each candidate pair. ``x = y`` is ``x >= y AND x <= y``, for NULLs
+    too, since both forms are NULL, hence false, when either side is NULL. So
+    the pair reaches the range join, and its position decides which columns
+    the join sorts on: placed first, the join sorts on the strand and
+    enumerates nearly every pair in the partition (#98).
+
+    The gate is the strand column because it is the one cardinality signal
+    the transpiler has without statistics. Inside a per-chromosome partition
+    a two-valued key makes the hash join quadratic, whereas a key more
+    selective than the positional overlap prunes more pairs as a hash key
+    than the pair does as a filter; choosing per key is the cost-based
+    optimizer's job (#67). Collation is not what the gate protects against:
+    DuckDB derives collated ordering and equality from the same collation
+    key, so a collated pair would agree with the collated equality.
+    """
+
+    def strand_side(node: exp.Expression) -> str | None:
+        if not isinstance(node, exp.Column) or node.args.get("db"):
+            return None
+        alias = _fold_identifier(node.table) if node.table else ""
+        if strand_cols.get(alias) != _fold_identifier(node.name):
+            return None
+        return alias
+
+    def rewrite(node: exp.Expression) -> exp.Expression:
+        if isinstance(node, exp.And):
+            return exp.And(this=rewrite(node.this), expression=rewrite(node.expression))
+        if isinstance(node, exp.Paren):
+            return exp.Paren(this=rewrite(node.this))
+        if isinstance(node, exp.EQ):
+            left, right = strand_side(node.this), strand_side(node.expression)
+            if left is not None and right is not None and left != right:
+                return exp.And(
+                    this=exp.GTE(this=node.this, expression=node.expression),
+                    expression=exp.LTE(
+                        this=node.this.copy(), expression=node.expression.copy()
+                    ),
+                )
+        return node
+
+    return rewrite(residual.copy())
 
 
 def _count_column_intersects(query: exp.Select) -> int:
@@ -1733,14 +1807,14 @@ class IntersectsDuckDBIEJoinTransformer:
         is only sound for INNER (where ``ON overlap WHERE r`` ≡ ``ON overlap
         AND r``) and SEMI (a left-only ``r`` is invariant over the right side);
         for ANTI it inverts the anti-join for rows failing ``r`` (#200). See
-        :meth:`_build_sql`, which routes WHERE residuals to an outer filter for
-        the left-only (SEMI / ANTI) shapes.
+        `_build_sql`, which routes WHERE residuals to an outer filter for the
+        left-only (SEMI / ANTI) shapes.
 
-        Note: :func:`_strip_intersects` only descends ``exp.And``. Predicates
-        whose AND tree wraps the INTERSECTS in ``exp.Or`` / ``exp.Not`` /
+        Note: `_strip_intersects` only descends ``exp.And``. Predicates whose
+        AND tree wraps the INTERSECTS in ``exp.Or`` / ``exp.Not`` /
         ``exp.Paren`` surface here with the INTERSECTS still embedded;
-        :meth:`_classify_extras` then routes them to the naive-predicate plan, while
-        :meth:`_validate_extra_qualifiers` enforces qualifier rules for the
+        `_classify_extras` then routes them to the naive-predicate plan, while
+        `_validate_extra_qualifiers` enforces qualifier rules for the
         remaining inlinable residuals.
         """
         on_residuals: list[exp.Expression] = []
@@ -1855,6 +1929,16 @@ class IntersectsDuckDBIEJoinTransformer:
         r_chrom = r_table.chrom_col if r_table else DEFAULT_CHROM_COL
         r_start = r_table.start_col if r_table else DEFAULT_START_COL
         r_end = r_table.end_col if r_table else DEFAULT_END_COL
+        l_strand = l_table.strand_col if l_table else DEFAULT_STRAND_COL
+        r_strand = r_table.strand_col if r_table else DEFAULT_STRAND_COL
+        strand_cols = {
+            alias: _fold_identifier(strand)
+            for alias, strand in (
+                (sides.left_user_alias, l_strand),
+                (sides.right_user_alias, r_strand),
+            )
+            if strand is not None
+        }
 
         # USING(<col>) admission check (the gate already restricted to
         # single-column USING). The dialect's per-chromosome partition IS
@@ -1899,15 +1983,30 @@ class IntersectsDuckDBIEJoinTransformer:
 
         # The overlap predicate (canonical, strict) plus any inline residuals,
         # shared by both the INNER join-ON form and the SEMI / ANTI EXISTS form.
+        # Residuals follow the overlap predicates -- the IE_JOIN ordering
+        # precondition in `_strand_equality_as_range_pair` (#98).
         overlap_predicates = [
             f"{l_start_expr} < {r_end_expr}",
             f"{l_end_expr} > {r_start_expr}",
         ]
-        for residual in inline_residuals:
-            overlap_predicates.append(
+        partitioned_predicate_sql = " AND ".join(
+            overlap_predicates
+            + [
+                self._rewrite_refs_for_per_chrom_subquery(
+                    _strand_equality_as_range_pair(residual, strand_cols), sides
+                )
+                for residual in inline_residuals
+            ]
+        )
+        # The unpartitioned fallback is a hash join on the chromosome, so a
+        # strand equality belongs in its composite key and is emitted as written.
+        unpartitioned_predicate_sql = " AND ".join(
+            overlap_predicates
+            + [
                 self._rewrite_refs_for_per_chrom_subquery(residual, sides)
-            )
-        predicate_sql = " AND ".join(overlap_predicates)
+                for residual in inline_residuals
+            ]
+        )
 
         # The dynamic SQL builder, expressed as a SQL string-concat that
         # ``string_agg`` aggregates per-chromosome. Single quotes are
@@ -1939,7 +2038,7 @@ class IntersectsDuckDBIEJoinTransformer:
                 f") a WHERE {exists_keyword} (SELECT 1 FROM "
                 f"(SELECT * FROM {r_table_ident} WHERE {q(r_chrom)} = "
             )
-            exists_close = f") b WHERE {predicate_sql})"
+            exists_close = f") b WHERE {partitioned_predicate_sql})"
             per_chrom_sql_expr = (
                 f"'{esc(select_from_left)}' "
                 f"|| {chrom_literal} "
@@ -1956,7 +2055,7 @@ class IntersectsDuckDBIEJoinTransformer:
             from_right_open = (
                 f") a JOIN (SELECT * FROM {r_table_ident} WHERE {q(r_chrom)} = "
             )
-            on_clause = f") b ON {predicate_sql}"
+            on_clause = f") b ON {partitioned_predicate_sql}"
             per_chrom_sql_expr = (
                 f"'{esc(per_chrom_select_prefix)}{esc(from_left)}' "
                 f"|| {chrom_literal} "
@@ -2024,13 +2123,13 @@ class IntersectsDuckDBIEJoinTransformer:
                 f"SELECT {inner_select_list} FROM {l_table_ident} a "
                 f"WHERE {null_guard}{exists_keyword} ("
                 f"SELECT 1 FROM {r_table_ident} b "
-                f"WHERE {chrom_equality} AND {predicate_sql})"
+                f"WHERE {chrom_equality} AND {unpartitioned_predicate_sql})"
             )
         else:
             unpartitioned_query = (
                 f"SELECT {inner_select_list} FROM {l_table_ident} a "
                 f"JOIN {r_table_ident} b "
-                f"ON {chrom_equality} AND {predicate_sql}"
+                f"ON {chrom_equality} AND {unpartitioned_predicate_sql}"
             )
 
         var_name, set_var_stmt = set_variable_statement(
