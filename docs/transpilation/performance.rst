@@ -556,7 +556,7 @@ them):
   ``RIGHT`` outer join an expression projection still declines, since the
   decomposition's unmatched half only NULL-fills columns.
 - **Extra JOIN / WHERE predicates.** Additional non-INTERSECTS
-  predicates ANDed onto the join ON or WHERE (e.g. ``a.score >
+  predicates ANDed onto the join ON or WHERE (e.g., ``a.score >
   b.score`` or ``WHERE a.score > 100``) are inlined into each
   per-chromosome subquery's ON, so DuckDB filters them inside each
   IEJoin candidate set. **Limitations:** the dialect peels extra
@@ -572,6 +572,75 @@ them):
   ``dialect=None`` path, ``dialect="duckdb"`` is one workaround — the
   dialect inlines extras directly into each per-chromosome subquery
   and is unaffected by that bug.
+- **Strand-equality residuals.** A cross-side equality inlined into a
+  per-chromosome subquery's ON turns the join into a hash join on that
+  key, with the two positional overlap predicates demoted to a residual
+  filter, and a two-valued key such as ``strand`` makes that join
+  quadratic inside every partition. The dialect therefore emits the
+  equality between the two tables' strand columns as the pair
+  ``a.strand >= b.strand AND a.strand <= b.strand``, placed after the
+  two positional overlap predicates. The pair is the equality spelled
+  without ``=``: over a totally ordered domain ``x = y`` holds exactly
+  when ``x >= y`` and ``x <= y`` both hold, strand values are strings
+  DuckDB orders by collation, and NULL is NULL, hence false, in both
+  forms, so the conjunction admits exactly the rows the equality does.
+  ``IE_JOIN`` requires no equality among the join conditions and sorts
+  on the first two inequalities it is given, so the join sorts on
+  position and filters on strand. The pair is emitted in every branch,
+  including the unpartitioned fallback above the partition ceiling, so a
+  query binds the same way regardless of its chromosome count; on that
+  branch the chromosome hash join carries the pair as a residual filter
+  at roughly 1.8x the cost of the composite key (INNER 1.48s against
+  2.71s at 300 chromosomes and 1,000,000 intervals per side, eight
+  threads).
+
+  The strand column is each table's registered ``strand_col``, which
+  defaults to ``strand`` and applies to an unregistered table too;
+  ``Table(strand_col=...)`` renames it and ``strand_col=None`` disables
+  the rewrite for that table. A conjunct is rewritten when it is a
+  top-level ``=``, ``NOT (<>)``, or single-element ``IN``, parenthesized
+  or not and in either operand order, whose two operands are bare
+  columns naming each side's strand column. The rewrite stands down
+  entirely when any other cross-side equality remains in the residuals,
+  because the join would hash on that key regardless. Every other
+  equality is emitted as written. Shapes DuckDB does not hash on need no
+  rewrite: a one-sided equality (``a.strand = '+'``, a scan filter
+  DuckDB pushes below the join), an equality under ``OR`` or as
+  ``NOT (a = b)``, or one mixing both sides in a single operand. Shapes
+  it does hash on are left alone deliberately: a cross-side equality on
+  any other column (``a.name = b.name``), whose selectivity the
+  transpiler cannot judge, and an expression, quantified (``= ANY``), or
+  collated operand. ``IS NOT DISTINCT FROM`` is NULL-safe, so its
+  pure-inequality form needs an ``OR`` arm and it is left as written
+  too. The pair carries no implicit cast: strand columns of incompatible
+  types on the two sides bind under the equality and fail at bind time
+  under the dialect, since DuckDB casts implicitly for ``=`` but not for
+  ``>=`` / ``<=``; wrapping either operand in an expression
+  (``CAST(a.strand AS INTEGER) = b.strand``) keeps the equality as
+  written. The rewrite reaches the INNER, SEMI, and ANTI shapes; a
+  ``LEFT`` / ``RIGHT`` join or the ``count_overlaps`` fast path carrying
+  a strand equality declines the dialect on any ON residual and keeps
+  the naive plan's hash join.
+
+  The gate is the strand column rather than any cross-side key because
+  it is the one cardinality signal the transpiler has without
+  statistics. A key more selective than the positional overlap prunes
+  more pairs as a hash key than the pair does as a per-candidate filter,
+  and the loss grows with overlap density; choosing per key is the
+  cost-based optimizer's job
+  (`#67 <https://github.com/abdenlab/giql/issues/67>`_). Measured on
+  DuckDB 1.5.5 with 1,000,000 intervals per side over 24 chromosomes,
+  ``SELECT a.chrom, a.start, a."end" FROM a SEMI JOIN b ON a.interval
+  INTERSECTS b.interval AND a.strand = b.strand`` (the ``bedtools
+  intersect -s -u`` shape with its columns spelled out; see
+  :doc:`../recipes/bedtools-migration`), the naive plan takes 45.6s at
+  one thread and 14.0s at eight; the dialect takes 0.86s and 0.37s. The
+  same query keyed on an arbitrary high-cardinality column (10,000
+  distinct values over a 100,000-position span) runs in 0.32s at eight
+  threads as the hash join the dialect keeps, against 7.1s as a pair.
+  Below roughly a thousand rows per chromosome the two sorts the range
+  join needs cost more than the hash key saves, a bounded loss of tens
+  of milliseconds.
 
 The dialect splits unsupported shapes into two buckets. Soft-fallback
 shapes route to the naive-predicate plan automatically and return correct
@@ -580,6 +649,10 @@ without risk of silent incorrectness. Hard-error shapes (enumerated
 further below) raise ``ValueError`` at transpile time — the dialect
 deliberately refuses them rather than silently producing the wrong
 SQL.
+One supported shape is neither: a strand equality whose two columns have
+incompatible types binds under the naive plan but fails at bind time
+under the dialect, deterministically, with the escape hatch described
+under **Strand-equality residuals** above.
 
 The soft-fallback shapes are:
 
@@ -588,12 +661,12 @@ The soft-fallback shapes are:
   IEJoin path instead (see **Outer joins** above), except for the shapes
   listed there. A fallback also applies to any outer join that keeps its
   side modifier while the ``INTERSECTS`` lives in the top-level ``WHERE``
-  (e.g. ``LEFT JOIN ... ON TRUE WHERE a.interval INTERSECTS b.interval``) —
+  (e.g., ``LEFT JOIN ... ON TRUE WHERE a.interval INTERSECTS b.interval``) —
   there the filter discards the very unmatched rows the outer join
   preserves, so it is a different query.
 - **SEMI / ANTI join with the INTERSECTS in the WHERE.** A ``SEMI`` /
   ``ANTI`` join whose column-to-column ``INTERSECTS`` sits in the
-  top-level ``WHERE`` rather than its own ``ON`` (e.g. ``ANTI JOIN ... ON
+  top-level ``WHERE`` rather than its own ``ON`` (e.g., ``ANTI JOIN ... ON
   TRUE WHERE a.interval INTERSECTS b.interval``) falls back. The right
   table is out of scope in the ``WHERE`` after a left-only join, so the
   reference plans reject it with a binder error; the dialect declines so

@@ -46,7 +46,9 @@ class Table:
         (default: "end").
     strand_col : str | None
         The physical column name storing strand information, or None if the
-        table has no strand column (default: "strand").
+        table has no strand column (default: "strand"). The DuckDB IEJoin
+        dialect treats this column as low-cardinality and emits a cross-side
+        equality on it as a range pair; see :doc:`/transpilation/performance`.
     coordinate_system : Literal["0based", "1based"]
         The coordinate system used for positions (default: "0based").
     interval_type : Literal["half_open", "closed"]
