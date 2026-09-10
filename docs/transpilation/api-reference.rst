@@ -46,3 +46,5 @@ Targets and capabilities
 .. autoclass:: giql.targets.DuckDBTarget
 
 .. autoclass:: giql.targets.DataFusionTarget
+
+.. autoclass:: giql.targets.DataFusionBioTarget

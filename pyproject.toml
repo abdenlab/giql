@@ -45,6 +45,7 @@ dev = [
     "ruff>=0.1.0",
     "datafusion>=52.3.0",
     "pytest-manifest>=1.0",
+    "polars-bio>=0.35.1",
 ]
 docs = [
     "sphinx>=7.0",
@@ -88,7 +89,7 @@ bedtools = ">=2.31.0"
 pybedtools = ">=0.9.0"
 pytest = ">=7.0.0"
 pytest-cov = ">=4.0.0"
-datafusion = ">=43.0.0"
+datafusion = ">=52.3.0,<54"
 duckdb = ">=1.4.0"
 pandas = ">=2.0.0"
 sqlglot = ">=20.0.0,<30"
@@ -99,3 +100,6 @@ hypothesis = ">=6.148.2,<7"
 # pytest-manifest has no conda-forge package; the test suite's snapshot
 # fixtures need it, so install it from PyPI into the pixi environment.
 pytest-manifest = ">=1.0"
+# polars-bio (the datafusion-bio target's engine) is PyPI-only as well; it pins
+# datafusion<54, which the conda pin above mirrors so the two resolvers agree.
+polars-bio = ">=0.35.1"

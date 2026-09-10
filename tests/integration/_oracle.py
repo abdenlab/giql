@@ -17,7 +17,8 @@ Layout:
   ``expected``. Both assertions are genuinely reachable.
 * :func:`register_record_batches` -- the single pyarrow loader dance reused by
   :func:`run_datafusion` and the #132 ``datafusion_ctx`` fixture (Finding 8).
-* :func:`run_duckdb` / :func:`run_datafusion` -- the per-engine runners.
+* :func:`run_duckdb` / :func:`run_datafusion` / :func:`run_polars_bio` -- the
+  per-engine runners.
 """
 
 from __future__ import annotations
@@ -28,6 +29,7 @@ import math
 TARGET_ENGINE: dict[str, str] = {
     "generic": "datafusion",
     "datafusion": "datafusion",
+    "datafusion-bio": "datafusion-bio",
     "duckdb": "duckdb",
 }
 
@@ -35,11 +37,20 @@ TARGET_ENGINE: dict[str, str] = {
 TARGET_DIALECT: dict[str, str | None] = {
     "generic": None,
     "datafusion": "datafusion",
+    "datafusion-bio": "datafusion-bio",
     "duckdb": "duckdb",
 }
 
 # The engines a target may be routed onto.
-KNOWN_ENGINES: frozenset[str] = frozenset({"duckdb", "datafusion"})
+KNOWN_ENGINES: frozenset[str] = frozenset({"duckdb", "datafusion", "datafusion-bio"})
+
+# The importable modules each engine's runner needs; the fixture ``importorskip``s
+# each one so a lane skips cleanly on a machine without that engine installed.
+ENGINE_MODULES: dict[str, tuple[str, ...]] = {
+    "duckdb": ("duckdb",),
+    "datafusion": ("datafusion", "pyarrow"),
+    "datafusion-bio": ("polars_bio", "polars"),
+}
 
 
 def scalar(value):
@@ -227,10 +238,8 @@ def arrow_schema(columns):
     """Build a :class:`pyarrow.Schema` from a ``(name, kind)`` column spec."""
     import pyarrow as pa
 
-    fields = [
-        (col, pa.utf8() if kind == "utf8" else pa.int64()) for col, kind in columns
-    ]
-    return pa.schema(fields)
+    types = {"utf8": pa.utf8(), "int64": pa.int64(), "int32": pa.int32()}
+    return pa.schema([(col, types[kind]) for col, kind in columns])
 
 
 def run_duckdb(sql: str, table_data: dict, columns) -> list[tuple]:
@@ -240,10 +249,8 @@ def run_duckdb(sql: str, table_data: dict, columns) -> list[tuple]:
     conn = duckdb.connect(":memory:")
     try:
         for name, rows in table_data.items():
-            cols_ddl = ", ".join(
-                f'"{col}" {"VARCHAR" if kind == "utf8" else "BIGINT"}'
-                for col, kind in columns
-            )
+            types = {"utf8": "VARCHAR", "int64": "BIGINT", "int32": "INTEGER"}
+            cols_ddl = ", ".join(f'"{col}" {types[kind]}' for col, kind in columns)
             conn.execute(f"CREATE TABLE {name} ({cols_ddl})")
             if rows:
                 placeholders = ", ".join("?" for _ in columns)
@@ -267,7 +274,30 @@ def run_datafusion(sql: str, table_data: dict, columns) -> list[tuple]:
     return normalize(ctx.sql(sql).to_pandas().itertuples(index=False, name=None))
 
 
+def run_polars_bio(sql: str, table_data: dict, columns) -> list[tuple]:
+    """Register tables on polars-bio's session and return normalized result rows.
+
+    polars-bio keeps one process-global ``BioSessionContext``; ``pb.from_polars``
+    deregisters any existing table of the same name before registering, so
+    re-registering every table per call is the isolation mechanism (a query that
+    names a table absent from ``table_data`` would silently read a previous
+    call's data). Dtypes come from the ``(name, kind)`` spec, never inferred, so
+    an empty table registers with the declared schema and an ``int32`` column
+    really is 32-bit at the engine.
+    """
+    import polars as pl
+    import polars_bio as pb
+
+    types = {"utf8": pl.Utf8, "int64": pl.Int64, "int32": pl.Int32}
+    schema = {col: types[kind] for col, kind in columns}
+    for name, rows in table_data.items():
+        frame = pl.DataFrame([tuple(r) for r in rows], schema=schema, orient="row")
+        pb.from_polars(name, frame)
+    return normalize(pb.sql(sql).collect().rows())
+
+
 ENGINE_RUNNERS = {
     "duckdb": run_duckdb,
     "datafusion": run_datafusion,
+    "datafusion-bio": run_polars_bio,
 }

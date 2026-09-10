@@ -46,7 +46,9 @@ The column-to-column INTERSECTS *join* strategy is **not** a capability flag: it
 selected by the operator-expander registry. Every target emits the naive overlap
 predicate (the ``(GenericTarget, Intersects)`` expander) unless it registers a
 target-specific ``(YourTarget, Intersects)`` override — as DuckDB does for its
-per-chromosome IEJoin plan (:mod:`giql.expanders.intersects_duckdb`).
+per-chromosome IEJoin plan (:mod:`giql.expanders.intersects_duckdb`), and as the
+``datafusion-bio`` target does to reach polars-bio's native ``IntervalJoinExec``
+(:mod:`giql.expanders.intersects_datafusion_bio`).
 
 Define a custom target by subclassing :class:`~giql.targets.Target` as a frozen
 dataclass. Give every field a default so the class is constructible with no
@@ -91,8 +93,8 @@ capabilities and dialect — needs nothing more than
 ``dialect="postgres"`` resolves the registered target; its
 ``supports_star_replace=False`` capability selects the portable projection form,
 and its ``sqlglot_dialect="postgres"`` serializes the final SQL. (The built-in
-names ``"duckdb"`` and ``"datafusion"`` and ``None`` for the generic target still
-resolve as before; ``"generic"`` is *not* a selectable name — ``None`` is the
+names ``"duckdb"``, ``"datafusion"`` and ``"datafusion-bio"`` and ``None`` for the
+generic target still resolve as before; ``"generic"`` is *not* a selectable name — ``None`` is the
 sole way to select the generic target.)
 
 

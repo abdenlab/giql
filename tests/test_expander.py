@@ -1950,7 +1950,7 @@ class TestTranspileExpanderDispatch:
         # Assert
         assert "DUCK_SENTINEL" in sql
 
-    @pytest.mark.parametrize("dialect", [None, "datafusion"])
+    @pytest.mark.parametrize("dialect", [None, "datafusion", "datafusion-bio"])
     def test_target_entry_falls_through_for_other_dialects(
         self, clean_registry, dialect
     ):
@@ -1982,7 +1982,7 @@ class TestTranspileExpanderDispatch:
         assert "DUCK_SENTINEL" not in sql
         assert "GENERIC_SENTINEL" in sql
 
-    @pytest.mark.parametrize("dialect", [None, "duckdb", "datafusion"])
+    @pytest.mark.parametrize("dialect", [None, "duckdb", "datafusion", "datafusion-bio"])
     def test_generic_entry_covers_all_dialects(self, clean_registry, dialect):
         """Test that a (GenericTarget, op) entry dispatches via fallback everywhere.
 

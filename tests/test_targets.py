@@ -15,6 +15,7 @@ from giql import register
 from giql import transpile
 from giql.expressions import Within
 from giql.targets import Capabilities
+from giql.targets import DataFusionBioTarget
 from giql.targets import DataFusionTarget
 from giql.targets import DuckDBTarget
 from giql.targets import GenericTarget
@@ -194,6 +195,54 @@ class TestDataFusionTarget:
         assert target.capabilities.supports_qualify is False
 
 
+class TestDataFusionBioTarget:
+    """Tests for the DataFusionBioTarget."""
+
+    def test___init___should_expose_datafusion_capabilities(self):
+        """Test the datafusion-bio target's identity and capabilities.
+
+        Given:
+            The DataFusionBioTarget class.
+        When:
+            An instance is constructed.
+        Then:
+            It should be named "datafusion-bio", serialize through the generic
+            (dialect-less) sqlglot form, and carry the same conservative
+            capabilities as the vanilla DataFusion target.
+        """
+        # Act
+        target = DataFusionBioTarget()
+
+        # Assert
+        assert target.name == "datafusion-bio"
+        assert target.sqlglot_dialect is None
+        assert target.capabilities == DataFusionTarget().capabilities
+        assert target.capabilities.supports_lateral is False
+        assert target.capabilities.supports_star_replace is False
+        assert target.capabilities.supports_qualify is False
+
+    def test___eq___should_differ_from_datafusion_target(self):
+        """Test that the sibling target is a distinct registry key.
+
+        Given:
+            A DataFusionBioTarget and a DataFusionTarget with identical
+            serialization and capability values.
+        When:
+            They are compared for equality and hashed.
+        Then:
+            It should treat them as unequal, since equality is class-scoped, so
+            the operator-expander registry can hold a datafusion-bio override
+            without touching the vanilla DataFusion slot.
+        """
+        # Act
+        bio = DataFusionBioTarget()
+        vanilla = DataFusionTarget()
+
+        # Assert
+        assert bio != vanilla
+        assert hash(bio) != hash(vanilla) or bio != vanilla
+
+
 class TestTarget:
     """Tests for the shared Target value semantics."""
 
@@ -296,10 +345,28 @@ def test_resolve_target_with_datafusion_returns_datafusion():
     assert isinstance(target, DataFusionTarget)
 
 
+def test_resolve_target_with_datafusion_bio_returns_datafusion_bio():
+    """Test resolution of the datafusion-bio dialect.
+
+    Given:
+        The dialect name "datafusion-bio".
+    When:
+        resolve_target is called.
+    Then:
+        It should return a DataFusionBioTarget, not the vanilla DataFusion one.
+    """
+    # Act
+    target = resolve_target("datafusion-bio")
+
+    # Assert
+    assert isinstance(target, DataFusionBioTarget)
+    assert not isinstance(target, DataFusionTarget)
+
+
 @pytest.mark.parametrize(
     "target",
-    [GenericTarget(), DuckDBTarget(), DataFusionTarget()],
-    ids=["generic", "duckdb", "datafusion"],
+    [GenericTarget(), DuckDBTarget(), DataFusionTarget(), DataFusionBioTarget()],
+    ids=["generic", "duckdb", "datafusion", "datafusion-bio"],
 )
 def test_resolve_target_with_target_instance_returns_it_unchanged(target):
     """Test resolution of a Target instance passed in place of a name.
@@ -352,19 +419,19 @@ def test_resolve_target_with_unsupported_dialect_raises(dialect):
     pattern = (
         re.escape(f"Unknown dialect: {dialect!r}.")
         + r".*"
-        + re.escape("'duckdb', 'datafusion', None,")
+        + re.escape("'duckdb', 'datafusion', 'datafusion-bio', None,")
     )
     with pytest.raises(ValueError, match=pattern):
         resolve_target(dialect)
 
 
-@given(st.text().filter(lambda s: s not in ("duckdb", "datafusion")))
+@given(st.text().filter(lambda s: s not in ("duckdb", "datafusion", "datafusion-bio")))
 def test_resolve_target_with_arbitrary_unsupported_string_raises(dialect):
     """Test resolution over the open domain of unsupported strings.
 
     Given:
         Any string that is not a registered public dialect name (the only
-        public string names are "duckdb" and "datafusion").
+        public string names are "duckdb", "datafusion" and "datafusion-bio").
     When:
         resolve_target is called.
     Then:

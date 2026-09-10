@@ -73,6 +73,8 @@ The transpiled SQL can be executed with fast genome-unaware databases or in-memo
 
 By default a column-to-column `INTERSECTS` join emits the naive overlap predicate (`a.chrom = b.chrom AND a.start < b.end AND b.start < a.end`) as a plain `ON` condition, which each engine's optimizer plans as a range join. For DuckDB you can additionally pass `dialect="duckdb"` to opt into a per-chromosome IEJoin plan for INNER, SEMI, ANTI, and LEFT/RIGHT outer joins; shapes it declines fall through to the naive predicate. See [DuckDB IEJoin Dialect](https://giql.readthedocs.io/en/latest/transpilation/performance.html#duckdb-iejoin-dialect) for the supported shapes and fallback rules.
 
+For [polars-bio](https://pypi.org/project/polars-bio/), the DataFusion distribution with a native interval join, pass `dialect="datafusion-bio"`: inner `INTERSECTS` / `CONTAINS` / `WITHIN` joins and the `LEFT JOIN ... COUNT(...) GROUP BY` counting shape reach its `IntervalJoinExec` on both 32-bit and 64-bit coordinates, and the output stays valid vanilla-DataFusion SQL. See [datafusion-bio (polars-bio) Dialect](https://giql.readthedocs.io/en/latest/transpilation/performance.html#datafusion-bio-polars-bio-dialect) for the shapes it accelerates and the ones it deliberately keeps on the hash join.
+
 You can also use [oxbow](https://oxbow.readthedocs.io) to efficiently stream specialized genomics formats into DuckDB. 
 
 ```python

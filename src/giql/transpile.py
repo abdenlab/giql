@@ -46,8 +46,8 @@ def transpile(
     dialect : DialectName | str | Target | None
         Optional target engine, as either a :class:`giql.targets.Target` or the
         name of one. A Target carries the engine's capability set; ``None``
-        selects the generic portable target, ``"duckdb"`` / ``"datafusion"`` the
-        built-in targets, and any other name a custom
+        selects the generic portable target, ``"duckdb"`` / ``"datafusion"`` /
+        ``"datafusion-bio"`` the built-in targets, and any other name a custom
         :class:`giql.targets.Target` registered on the plugin hub (see
         :func:`giql.expander.register` /
         :meth:`giql.expander.ExpanderRegistry.register_target`). Passing the
@@ -74,7 +74,14 @@ def transpile(
         ``None`` always emit that naive predicate — a plain
         ``ON a.chrom = b.chrom AND a.start < b.end AND b.start < a.end``
         condition the engine's own optimizer plans as a range join — for both
-        inner and outer column-to-column INTERSECTS joins. For the INNER /
+        inner and outer column-to-column INTERSECTS joins. ``"datafusion-bio"``
+        (the polars-bio distribution of DataFusion) emits the same statement
+        with the closed, non-strict overlap form
+        ``a.start <= b.end - 1 AND a.end - 1 >= b.start`` instead, which its
+        interval-join optimizer rule plans as a native ``IntervalJoinExec`` on
+        ``Int64`` as well as ``Int32`` coordinates, and rewrites a bare
+        ``COUNT(*)`` over such a join to ``COUNT(<preserved-side start>)``; the
+        output remains valid vanilla-DataFusion SQL. For the INNER /
         SEMI / ANTI shapes, a projection the rewrite cannot attribute to a side
         raises ``ValueError`` at transpile time. The outer-join form instead
         declines silently to the naive predicate for every projection it cannot
@@ -176,10 +183,13 @@ def transpile(
     # pass 3, where ``ExpandOperators`` dispatches it to its registered expander:
     # the ``(GenericTarget, Intersects)`` expander renders the naive overlap
     # predicate (a plain ``ON`` condition the engine plans as a range join) on
-    # ``None`` / ``"datafusion"``, and the ``(DuckDBTarget, Intersects)`` override
+    # ``None`` / ``"datafusion"``, the ``(DuckDBTarget, Intersects)`` override
     # (giql.expanders.intersects_duckdb) rewrites it into the per-chromosome IEJoin
     # plan on ``"duckdb"``, deferring to that same naive predicate for the shapes it
-    # declines. Literal-range and residual INTERSECTS predicates flow the same way.
+    # declines, and the ``(DataFusionBioTarget, Intersects)`` override
+    # (giql.expanders.intersects_datafusion_bio) emits the closed overlap form
+    # polars-bio's interval-join rule accepts on ``"datafusion-bio"``. Literal-range
+    # and residual INTERSECTS predicates flow the same way.
     # There is no capability-gated pre-pass anymore — the former DuckDB IEJoin
     # pre-pass (and the CLUSTER / MERGE pre-passes, #144) were all relocated into
     # the operator-expander registry, and the generic binned equi-join was dropped

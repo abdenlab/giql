@@ -181,9 +181,9 @@ If your data uses 1-based coordinates (like VCF or GFF), configure the
    GIQL canonicalizes its coordinates by wrapping the relation in a hidden CTE.
    The wrapper's projection form is chosen from the target's capabilities: the
    ``"duckdb"`` target emits ``SELECT * REPLACE (...)`` (also supported by
-   BigQuery, Snowflake, and ClickHouse), while the generic (``dialect=None``)
-   and ``"datafusion"`` targets emit the portable ``SELECT * EXCEPT (start, end),
-   <start>, <end>`` form. The ``* EXCEPT`` form runs on ``* EXCEPT``-capable
+   BigQuery, Snowflake, and ClickHouse), while the generic (``dialect=None``),
+   ``"datafusion"`` and ``"datafusion-bio"`` targets emit the portable ``SELECT *
+   EXCEPT (start, end), <start>, <end>`` form. The ``* EXCEPT`` form runs on ``* EXCEPT``-capable
    engines (the DataFusion family) but is **not** SQL-92 and is **not**
    DuckDB-runnable; it is row-equivalent to the ``* REPLACE`` form but re-appends
    the recomputed interval columns at the end of the projection. Tables in the

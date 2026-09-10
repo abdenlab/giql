@@ -179,17 +179,53 @@ class DataFusionTarget(Target):
     )
 
 
+@dataclass(frozen=True)
+class DataFusionBioTarget(Target):
+    """DataFusion with the biodatageeks interval-join extensions (polars-bio).
+
+    ``datafusion-bio`` targets the DataFusion distribution shipped by
+    `polars-bio <https://pypi.org/project/polars-bio/>`_, whose optimizer rule
+    replaces a join carrying exactly two range comparisons (plus any equality
+    keys) with its native ``IntervalJoinExec``. Serialization and capabilities
+    are those of :class:`DataFusionTarget` -- ``sqlglot_dialect = None`` and the
+    same three capability values -- so every capability-driven emission path
+    (the decorrelated NEAREST fallback, the ``* EXCEPT`` canonicalization form,
+    the reserved-column finalizer) is inherited unchanged, and the output stays
+    valid on vanilla DataFusion.
+
+    This is a *sibling* of :class:`DataFusionTarget`, not a subclass: target
+    equality is class-scoped, so ``DataFusionBioTarget() != DataFusionTarget()``
+    and the two are distinct operator-expander registry keys. That distinction is
+    the whole point of the target -- it registers a
+    ``(DataFusionBioTarget, Intersects)`` override
+    (:mod:`giql.expanders.intersects_datafusion_bio`, #77) that emits the
+    closed, non-strict overlap form the interval-join rule accepts on ``Int64``
+    as well as ``Int32`` coordinates, and rewrites a bare ``COUNT(*)`` over such
+    a join to a carried column. CONTAINS / WITHIN already emit the non-strict
+    comparisons the rule wants, so they ride the generic expander.
+    """
+
+    name: str = "datafusion-bio"
+    sqlglot_dialect: str | None = None
+    capabilities: Capabilities = Capabilities(
+        supports_lateral=False,
+        supports_star_replace=False,
+        supports_qualify=False,
+    )
+
+
 # Public dialect names only. ``generic`` is intentionally absent: ``None`` is
 # the sole public way to select it (see :func:`resolve_target`).
 #: The dialect names ``transpile`` ships. Typing the parameter as
 #: ``DialectName | str`` keeps editor completion for the built-ins while still
 #: admitting a custom target's registered name; the union widens to ``str`` for
 #: a type checker, which is the point -- the registry is open.
-DialectName = Literal["duckdb", "datafusion"]
+DialectName = Literal["duckdb", "datafusion", "datafusion-bio"]
 
 _TARGETS_BY_NAME: dict[str, type[Target]] = {
     DuckDBTarget.name: DuckDBTarget,
     DataFusionTarget.name: DataFusionTarget,
+    DataFusionBioTarget.name: DataFusionBioTarget,
 }
 
 
@@ -201,8 +237,9 @@ def resolve_target(dialect: DialectName | str | Target | None) -> Target:
     dialect : DialectName | str | Target | None
         A :class:`Target` instance, which resolves to itself, or the name of
         one. ``None`` resolves to :class:`GenericTarget`;
-        ``"duckdb"`` and ``"datafusion"`` resolve to their respective built-in
-        targets. Any other name is resolved against the plugin registry — a
+        ``"duckdb"``, ``"datafusion"`` and ``"datafusion-bio"`` resolve to their
+        respective built-in targets. Any other name is resolved against the plugin
+        registry — a
         custom :class:`Target` declared through
         :meth:`giql.expander.ExpanderRegistry.register_target` (or as a side
         effect of :func:`giql.expander.register`) is selectable by its ``name``.
@@ -240,7 +277,7 @@ def resolve_target(dialect: DialectName | str | Target | None) -> Target:
         return registered
 
     raise ValueError(
-        f"Unknown dialect: {dialect!r}. Supported: 'duckdb', 'datafusion', None, "
-        "or a custom target registered via "
+        f"Unknown dialect: {dialect!r}. Supported: 'duckdb', 'datafusion', "
+        "'datafusion-bio', None, or a custom target registered via "
         "giql.expander.REGISTRY.register_target()."
     )

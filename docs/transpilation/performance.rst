@@ -752,13 +752,115 @@ The one argument-validation ``ValueError`` raise (it fires before any AST
 inspection and is independent of the query shape):
 
 - **Unknown dialect string.** A dialect that resolves to neither a built-in
-  target (``None``, ``"duckdb"``, ``"datafusion"``) nor a custom target
-  registered on the plugin hub raises with the offending value echoed.
+  target (``None``, ``"duckdb"``, ``"datafusion"``, ``"datafusion-bio"``) nor a
+  custom target registered on the plugin hub raises with the offending value
+  echoed.
 
 Literal-range ``INTERSECTS`` (e.g. ``WHERE interval INTERSECTS
 'chr1:1000-2000'``) is single-table and has no column-to-column join
 to rewrite, so the dialect declines and the standard range-predicate
 emission handles it identically to the ``dialect=None`` path.
+
+datafusion-bio (polars-bio) Dialect
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+`polars-bio <https://pypi.org/project/polars-bio/>`_ ships DataFusion with the
+biodatageeks interval-join extensions: an optimizer rule that replaces any join
+whose filter is exactly two range comparisons (plus any equality keys) with a
+native ``IntervalJoinExec``. GIQL's naive overlap predicate already has that
+shape, so ``dialect="datafusion"`` output *plans* as an interval join there —
+and then meets three upstream defects (measured on polars-bio 0.35.1 /
+datafusion-bio-functions 0.20). The ``dialect="datafusion-bio"`` target emits
+the same statement in a shape that steers around each of them; its output is
+still valid vanilla-DataFusion SQL, so it also runs unchanged on
+``datafusion``.
+
+.. code-block:: python
+
+   import polars_bio as pb
+   from giql import Table, transpile
+
+   pb.from_polars("ccres", ccres_df)                    # any polars frame
+   pb.register_view("insertions", "SELECT rname, ... FROM reads_raw")
+
+   sql = transpile(
+       """
+       SELECT c.ccre_id, COUNT(r.start) AS n
+       FROM ccres c
+       LEFT JOIN insertions r ON c.interval INTERSECTS r.interval
+       GROUP BY c.ccre_id
+       """,
+       tables=[
+           "ccres",
+           Table("insertions", chrom_col="rname", start_col="start",
+                 end_col="end", strand_col=None),
+       ],
+       dialect="datafusion-bio",
+   )
+   counts = pb.sql(sql).collect()
+
+**Shapes that reach** ``IntervalJoinExec``:
+
+- An inner column-to-column ``INTERSECTS`` join (``JOIN ... ON``, or a
+  comma join with the predicate in ``WHERE``), including inside a CTE or a
+  FROM-clause subquery, with or without a same-strand ``AND a.strand =
+  b.strand`` conjunct (an equality key the rule keeps as a hash key).
+- An inner ``CONTAINS`` / ``WITHIN`` join.
+- A grouped ``COUNT(*)`` / ``COUNT(col)`` over an inner join.
+- A bare ``SELECT COUNT(*)`` over an inner join.
+- The counting shape ``SELECT <left keys>, COUNT(<right col>) AS n FROM l
+  LEFT JOIN r ON <INTERSECTS> GROUP BY <left keys>`` — the shape a
+  region-by-sample count matrix is built from, and the one DuckDB's IEJoin
+  path accelerates as its count-overlaps fast path.
+
+**What the target emits, and why:**
+
+- *Closed overlap form on Int64.* The rule's strict-comparison adjustment
+  builds an ``Int32`` literal without coercion, so ``a.start < b.end AND
+  a.end > b.start`` plans and then fails at execution on ``Int64``
+  coordinates (the pyarrow / Parquet default) with ``Invalid arithmetic
+  operation: Int64 - Int32``. The target emits the equivalent non-strict
+  form ``a.start <= b.end - 1 AND a.end - 1 >= b.start``, which the rule
+  accepts unadjusted and which executes on ``Int32``, ``Int64`` and
+  mixed-width sides.
+- *Rule-defeating predicate for every non-inner join.* ``IntervalJoinExec``
+  returns the **inner** pairs whatever join type it was planned for, on every
+  ``bio.interval_join_algorithm``: a LEFT / RIGHT / FULL join loses its
+  unmatched rows, ``WHERE EXISTS`` returns one row per match, and ``WHERE NOT
+  EXISTS`` returns the matched rows. Because row identity across engines is
+  GIQL's contract, a predicate that would reach the operator through an outer,
+  semi or anti join (including a correlated scalar subquery) carries one more
+  comparison the others already imply (``a.start < b.end`` for the overlap,
+  ``a.start - 1 < b.start`` for CONTAINS, ``a.start + 1 > b.start`` for
+  WITHIN). Three range comparisons make the rule decline, and DataFusion plans
+  the join as a hash join on ``chrom`` with a residual filter — correct, not
+  accelerated.
+- *Zero-filled inner count for the counting shape.* Rather than defeat the
+  rule for the most common outer shape, the target rewrites it as an inner
+  interval-join count under a hash ``LEFT JOIN`` against the distinct left keys
+  (``COALESCE(n, 0)`` for the unmatched ones), so the interval work still
+  reaches ``IntervalJoinExec``. Keys are compared with ``=``; a NULL key
+  zero-fills rather than matching, as DuckDB's ``USING`` zero-fill does.
+- *Carried projection for a bare* ``COUNT(*)``. An ``IntervalJoinExec``
+  planned with an empty projection fails (``must either specify a row count or
+  at least one column``), so ``SELECT COUNT(*)`` with no other projected
+  column is emitted as ``COUNT(<FROM-side start>)``. Coordinates are assumed
+  non-null throughout GIQL, so the count is unchanged.
+
+**What stays on the hash join:** every LEFT / RIGHT / FULL / semi / anti shape
+other than the counting shape above, and any join whose ``ON`` adds a
+non-equality conjunct referencing both sides (``AND a.strand <> b.strand``),
+which defeats the rule on its own. Both are correct on every engine; they are
+simply not accelerated. Each workaround retires when the corresponding
+upstream fix lands (tracked under GIQL issue #77).
+
+**Operational notes:** polars-bio keeps one process-global session, so
+``pb.from_polars`` / ``pb.register_view`` overwrite an existing name rather
+than failing, and concurrent ``pb.sql`` calls from a thread pool share it
+safely. Every ``collect()`` prints a tqdm progress bar to stderr; set
+``TQDM_DISABLE=1`` to silence it. polars-bio pins ``datafusion<54`` and
+``pyarrow<25``, so installing it alongside the vanilla ``datafusion`` package
+downgrades both.
 
 DuckDB Optimizations
 ~~~~~~~~~~~~~~~~~~~~

@@ -11,6 +11,7 @@ from giql.expander import StatementFinalizer
 from giql.expander import register
 from giql.table import Table
 from giql.targets import Capabilities
+from giql.targets import DataFusionBioTarget
 from giql.targets import DataFusionTarget
 from giql.targets import DuckDBTarget
 from giql.targets import GenericTarget
@@ -35,4 +36,5 @@ __all__ = [
     "GenericTarget",
     "DuckDBTarget",
     "DataFusionTarget",
+    "DataFusionBioTarget",
 ]

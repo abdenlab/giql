@@ -16,6 +16,9 @@ Engine routing per target:
 * ``"generic"`` (``dialect=None``) emits portable SQL -> executed on DataFusion.
 * ``"datafusion"`` emits the DataFusion target SQL -> executed on DataFusion.
 * ``"duckdb"`` emits the DuckDB-specific IEJoin SQL -> executed on DuckDB.
+* ``"datafusion-bio"`` emits the polars-bio interval-join form -> executed on
+  polars-bio's session (opt-in per case via ``targets``; it is not a default
+  target until its lane is green across the suite).
 
 Adding a new operator case is trivial: write one ``oracle(...)`` call with the
 query, the table data, and the expected rows. Cases where a target cannot run
@@ -42,6 +45,7 @@ import pytest
 from giql import Table
 from giql import transpile
 
+from ._oracle import ENGINE_MODULES
 from ._oracle import ENGINE_RUNNERS
 from ._oracle import assert_cross_target
 from ._oracle import normalize
@@ -96,7 +100,8 @@ def cross_target_oracle():
         correlated LATERAL has no DataFusion physical plan).
     ``engines``
         Optional ``{target: engine}`` overrides for the default routing
-        (``generic``/``datafusion`` -> DataFusion, ``duckdb`` -> DuckDB). Use
+        (``generic``/``datafusion`` -> DataFusion, ``duckdb`` -> DuckDB,
+        ``datafusion-bio`` -> polars-bio). Use
         this when a target's *portable* SQL must be executed on a different
         engine for the case at hand -- e.g. routing ``generic`` to DuckDB so a
         LATERAL-based operator can still be compared against the duckdb target.
@@ -143,9 +148,8 @@ def cross_target_oracle():
         # short-circuit the cross-target comparison (Finding 1).
         for target in targets:
             engine, dialect = routing[target]
-            pytest.importorskip("duckdb" if engine == "duckdb" else "datafusion")
-            if engine == "datafusion":
-                pytest.importorskip("pyarrow")
+            for module in ENGINE_MODULES[engine]:
+                pytest.importorskip(module)
 
             sql = transpile(query, tables=tables, dialect=dialect)
             sql_by_target[target] = sql

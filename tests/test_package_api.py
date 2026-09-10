@@ -30,6 +30,7 @@ _EXTENSION_HOOK_EXPORTS = [
     "GenericTarget",
     "DuckDBTarget",
     "DataFusionTarget",
+    "DataFusionBioTarget",
 ]
 
 #: Each re-export paired with the submodule it is defined in, so the facade can
@@ -46,6 +47,7 @@ _REEXPORT_ORIGINS = [
     ("GenericTarget", "giql.targets"),
     ("DuckDBTarget", "giql.targets"),
     ("DataFusionTarget", "giql.targets"),
+    ("DataFusionBioTarget", "giql.targets"),
 ]
 
 

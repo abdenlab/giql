@@ -478,6 +478,40 @@ class TestResolveRouting:
             "duckdb": ("duckdb", "duckdb"),
         }
 
+    def test_resolve_routing_should_map_datafusion_bio_to_its_own_engine(self):
+        """Test the datafusion-bio target routes to the polars-bio engine.
+
+        Given:
+            The datafusion-bio target alongside the vanilla datafusion one.
+        When:
+            resolve_routing() resolves them with no overrides.
+        Then:
+            datafusion-bio should execute on its own engine with its own dialect,
+            distinct from the vanilla DataFusion routing.
+        """
+        # Arrange / Act
+        routing = resolve_routing(("datafusion", "datafusion-bio"))
+
+        # Assert
+        assert routing["datafusion-bio"] == ("datafusion-bio", "datafusion-bio")
+        assert routing["datafusion"] == ("datafusion", "datafusion")
+
+    def test_resolve_routing_should_accept_datafusion_bio_engine_override(self):
+        """Test datafusion-bio is a valid override engine for another target.
+
+        Given:
+            The generic target routed onto the datafusion-bio engine.
+        When:
+            resolve_routing() applies the override.
+        Then:
+            generic should execute on polars-bio while keeping its None dialect.
+        """
+        # Arrange / Act
+        routing = resolve_routing(("generic",), engines={"generic": "datafusion-bio"})
+
+        # Assert
+        assert routing["generic"] == ("datafusion-bio", None)
+
     def test_engines_override_reroutes_target(self):
         """Test an engines override reroutes a target's engine but not its dialect.
 
