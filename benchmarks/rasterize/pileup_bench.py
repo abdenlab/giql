@@ -33,8 +33,10 @@ to the GPU, all executing on polars-bio / DataFusion:
     giql-disjoin  GIQL DISJOIN + GROUP BY pileup, then GIQL INTERSECTS extraction
     giql-groupby  hand-written GROUP BY pileup, then the same GIQL extraction
 
-The third arm is the pileup a RASTERIZE sweep-line fast path would be expected to
-match, so it turns "DISJOIN is slow" into a quantified gap.
+The third arm is the pileup a RASTERIZE fast path would be expected to match, so
+it turns "DISJOIN is slow" into a quantified gap. See `pileup_sql` for what that
+fast implementation is, why it is legal, and what it would require of a
+RASTERIZE operator; see REPORT.md for the measured comparison.
 
 Every (scale, arm) pair runs as its own subprocess so a blowup is capped and
 recorded as ``DNF`` rather than hanging the ladder. The GIQL arms hold the pileup
@@ -279,14 +281,63 @@ def cut_site_sql(bam_tables, chroms, restrict):
 def pileup_sql(arm):
     """The pileup query for an arm, over a registered `cuts` table.
 
-    Both spellings return one row per occupied position. The DISJOIN form is
-    the operator-level expression of coverage; the GROUP BY form is what a
-    RASTERIZE fast path would compile it to.
+    Both spellings return one row per occupied position, and the benchmark
+    gates on them producing bit-identical tensors downstream. They differ by
+    roughly 20x, which is the whole point of the exercise.
+
+    THE FAST IMPLEMENTATION
+    -----------------------
+    `giql-groupby` is a single hash aggregate::
+
+        SELECT chrom, start AS pos, COUNT(*) FROM cuts GROUP BY chrom, start
+
+    That is a *correct pileup only because a Tn5 cut site is one base wide*.
+    Coverage over width-1 intervals degenerates to counting occurrences per
+    position: no interval logic is required, no sort, no window, one pass.
+    Measured genome-wide over 99.4 M cut sites it runs in 13.2 s, against
+    155.5 s for a sweep-line and 264.9 s for the DISJOIN spelling below.
+
+    The same query over *wide* intervals is silently WRONG. It counts
+    interval starts per position, not depth: on the same input read as
+    92.5 bp alignments it returns 66.7 M rows where true coverage has
+    119.5 M runs. Width is what makes this plan legal, and nothing in the
+    SQL says so.
+
+    WHAT THIS REQUIRES OF A RASTERIZE OPERATOR (giql#246)
+    -----------------------------------------------------
+    For `RASTERIZE(cuts)` to emit the fast plan automatically it must know
+    the input is point-like, and that is exactly what GIQL cannot work out
+    for itself. GIQL is a transpiler with no access to table statistics, and
+    DataFusion's own statistics would not help either: they carry per-column
+    min, max, null and distinct counts, whereas interval width is a
+    two-column derived property (`max(end - start)`), and `max(end) -
+    min(start)` is merely the chromosome span.
+
+    So the requirement is a *declaration*, not an inference, and because
+    declaring it wrongly yields wrong answers rather than slow ones, it
+    belongs with the other load-bearing schema claims (`coordinate_system`,
+    `interval_type`) rather than being offered as a performance knob. The
+    corollary for the operator's expansion is that a self-grid RASTERIZE
+    needs at least three plans, not the two originally proposed:
+
+      * width-1 input, invertible aggregate  -> this hash aggregate
+      * wide input, invertible aggregate     -> sweep-line, flat in width
+                                                (143.9 s on 92.5 bp reads)
+      * anything else                        -> the general cells + join plan
+
+    A fourth, a dense per-contig array as `bam2bw` and `mosdepth` use, is
+    plausible where chrom sizes are declared and has not been measured.
     """
 
     from giql import Table
     from giql import transpile
 
+    # The operator-level spelling: correct on any width, and the identity a
+    # RASTERIZE self grid is defined by. EXPLAIN shows polars-bio does rewrite
+    # its breakpoint join into IntervalJoinExec, so the ~20x penalty is not a
+    # quadratic fallback: it is a deduplicating UNION over twice the input, an
+    # interval join that finds nothing on point input, a LEAD window and a
+    # three-key hash join back to the targets, in place of one aggregate.
     if arm == "giql-disjoin":
         return transpile(
             "SELECT disjoin_chrom AS chrom, disjoin_start AS pos, "
@@ -304,6 +355,7 @@ def pileup_sql(arm):
             dialect="datafusion-bio",
         )
 
+    # The fast plan. Legal only for width-1 intervals; see the docstring.
     return (
         "SELECT chrom, start AS pos, CAST(COUNT(*) AS DOUBLE) AS value "
         "FROM cuts GROUP BY chrom, start"
