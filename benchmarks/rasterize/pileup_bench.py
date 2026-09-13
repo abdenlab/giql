@@ -247,29 +247,31 @@ def cut_site_sql(bam_tables, chroms, restrict):
     """Strand-aware Tn5 cut sites, matching `bam2bw -ps 4 -ns -4` exactly.
 
     Forward reads cut at ``start + pos_shift``, reverse reads at
-    ``end - 1 + neg_shift``; unmapped records are dropped, as are contigs the
-    rung does not cover. Coordinates are Int32: hg38 fits comfortably, and
-    polars-bio's interval-join rule builds an uncoerced Int32 literal that
-    raises on Int64 operands, which DISJOIN's strict breakpoint join would
-    otherwise hit. Both bounds are cast *after* their arithmetic: casting
-    first and adding 1 afterwards silently promotes `end` back to Int64 and
-    reintroduces the crash.
+    ``end - 1 + neg_shift``, emitted as 1 bp half-open intervals. Unmapped
+    records are dropped, as are contigs the rung does not cover.
+
+    The provider hands back UInt32 coordinates, and no casts are needed to
+    work with them: DataFusion promotes `UInt32 + <integer literal>` to Int64
+    before evaluating, so a reverse read near position 0 yields a correct
+    negative rather than wrapping. Coordinates therefore come out Int64, which
+    is what every consumer here wants except the DISJOIN plan; see
+    `build_pileup` for the one narrowing that is still required.
     """
 
-    where = "(CAST(b.flags AS BIGINT) & 4) = 0"
+    where = "(b.flags & 4) = 0"
     if restrict:
         where += " AND b.chrom IN ({})".format(
             ", ".join("'{}'".format(c) for c in chroms)
         )
 
     branches = [
-        "SELECT CAST(b.chrom AS VARCHAR) AS chrom, "
-        "CAST(CASE WHEN (CAST(b.flags AS BIGINT) & 16) = 0 "
-        "THEN CAST(b.start AS BIGINT) + {pos} "
-        'ELSE CAST(b."end" AS BIGINT) + {neg} - 1 END AS INT) AS start, '
-        "CAST(CASE WHEN (CAST(b.flags AS BIGINT) & 16) = 0 "
-        "THEN CAST(b.start AS BIGINT) + {pos} + 1 "
-        'ELSE CAST(b."end" AS BIGINT) + {neg} END AS INT) AS "end" '
+        "SELECT b.chrom, "
+        "CASE WHEN (b.flags & 16) = 0 "
+        "THEN b.start + {pos} "
+        'ELSE b."end" + {neg} - 1 END AS start, '
+        "CASE WHEN (b.flags & 16) = 0 "
+        "THEN b.start + {pos} + 1 "
+        'ELSE b."end" + {neg} END AS "end" '
         "FROM {table} AS b WHERE {where}".format(
             pos=POS_SHIFT, neg=NEG_SHIFT, table=table, where=where
         )
@@ -384,6 +386,20 @@ def build_pileup(args, scale, arm, record):
 
     t = time.time()
     cuts = pb.sql(cut_site_sql(tables, chroms, restrict)).collect()
+    if arm == "giql-disjoin":
+        # The one cast that does real work, and only this plan needs it.
+        # DISJOIN's breakpoint join is a strict range comparison, which is the
+        # shape polars-bio rewrites into IntervalJoinExec, and that rule builds
+        # an uncoerced Int32 literal that raises `Invalid arithmetic operation:
+        # Int64 - Int32` against Int64 operands. hg38 fits in Int32 comfortably.
+        # The hash-aggregate plan never reaches that rule, and the downstream
+        # INTERSECTS extraction is safe because the datafusion-bio target emits
+        # the closed non-strict form, so neither pays for this.
+        cuts = cuts.with_columns(
+            polars.col("start").cast(polars.Int32),
+            polars.col("end").cast(polars.Int32),
+        )
+        record["narrowed_to_int32"] = True
     record["seconds_cut_sites"] = round(time.time() - t, 2)
     record["n_cut_sites"] = cuts.height
 
