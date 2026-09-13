@@ -1,0 +1,28 @@
+{
+  "arm": "giql-disjoin",
+  "n_batches": 27,
+  "n_cut_sites": 1284112,
+  "n_negatives_kept": 1388,
+  "n_peaks_kept": 1400,
+  "n_positions": 866088,
+  "n_skipped_ragged": 1,
+  "peak_rss_mb": 10734.7,
+  "pid": 1577632,
+  "pileup_sql": "SELECT disjoin_chrom AS chrom, disjoin_start AS pos, COUNT(*) AS value FROM (WITH __giql_dj_ref AS (SELECT * FROM cuts), __giql_dj_tgt AS (SELECT * FROM cuts), __giql_dj_bp AS (SELECT \"chrom\" AS chrom, \"start\" AS pos FROM __giql_dj_ref UNION SELECT \"chrom\" AS chrom, \"end\" AS pos FROM __giql_dj_ref), __giql_dj_cuts AS (SELECT t.\"chrom\" AS kc, t.\"start\" AS ks, t.\"end\" AS ke, t.\"start\" AS pos FROM __giql_dj_tgt AS t UNION SELECT t.\"chrom\" AS kc, t.\"start\" AS ks, t.\"end\" AS ke, t.\"end\" AS pos FROM __giql_dj_tgt AS t UNION SELECT t.\"chrom\" AS kc, t.\"start\" AS ks, t.\"end\" AS ke, bp.pos AS pos FROM __giql_dj_tgt AS t JOIN __giql_dj_bp AS bp ON bp.chrom = t.\"chrom\" AND bp.pos > t.\"start\" AND bp.pos < t.\"end\"), __giql_dj_segs AS (SELECT kc, ks, ke, pos AS seg_start, LEAD(pos) OVER (PARTITION BY kc, ks, ke ORDER BY pos) AS seg_end FROM __giql_dj_cuts) SELECT t.*, s.kc AS disjoin_chrom, s.seg_start AS disjoin_start, s.seg_end AS disjoin_end FROM __giql_dj_tgt AS t JOIN __giql_dj_segs AS s ON t.\"chrom\" = s.kc AND t.\"start\" = s.ks AND t.\"end\" = s.ke WHERE NOT s.seg_end IS NULL AND s.seg_end > s.seg_start) GROUP BY disjoin_chrom, disjoin_start",
+  "plan": "ProjectionExec: expr=[disjoin_chrom@0 as chrom, disjoin_start@1 as pos, count(Int64(1))@2 as value]\n  AggregateExec: mode=Single, gby=[disjoin_chrom@0 as disjoin_chrom, disjoin_start@1 as disjoin_start], aggr=[count(Int64(1))], ordering_mode=PartiallySorted([0])\n    ProjectionExec: expr=[kc@0 as disjoin_chrom, seg_start@1 as disjoin_start]\n      HashJoinExec: mode=CollectLeft, join_type=Inner, on=[(chrom@0, kc@0), (start@1, ks@1), (end@2, ke@2)], projection=[kc@3, seg_start@6]\n        StreamingTableExec: partition_sizes=1, projection=[chrom, start, end]\n        ProjectionExec: expr=[kc@0 as kc, ks@1 as ks, ke@2 as ke, pos@3 as seg_start]\n          FilterExec: lead(__giql_dj_cuts.pos) PARTITION BY [__giql_dj_cuts.kc, __giql_dj_cuts.ks, __giql_dj_cuts.ke] ORDER BY [__giql_dj_cuts.pos ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW@4 IS NOT NULL AND pos@3 < lead(__giql_dj_cuts.pos) PARTITION BY [__giql_dj_cuts.kc, __giql_dj_cuts.ks, __giql_dj_cuts.ke] ORDER BY [__giql_dj_cuts.pos ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW@4, projection=[kc@0, ks@1, ke@2, pos@3]\n            BoundedWindowAggExec: wdw=[lead(__giql_dj_cuts.pos) PARTITION BY [__giql_dj_cuts.kc, __giql_dj_cuts.ks, __giql_dj_cuts.ke] ORDER BY [__giql_dj_cuts.pos ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW: Field { \"lead(__giql_dj_cuts.pos) PARTITION BY [__giql_dj_cuts.kc, __giql_dj_cuts.ks, __giql_dj_cuts.ke] ORDER BY [__giql_dj_cuts.pos ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW\": nullable Int32 }, frame: RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW], mode=[Sorted]\n              SortExec: expr=[kc@0 ASC NULLS LAST, ks@1 ASC NULLS LAST, ke@2 ASC NULLS LAST, pos@3 ASC NULLS LAST], preserve_partitioning=[false]\n                AggregateExec: mode=Final, gby=[kc@0 as kc, ks@1 as ks, ke@2 as ke, pos@3 as pos], aggr=[]\n                  CoalescePartitionsExec\n                    AggregateExec: mode=Partial, gby=[kc@0 as kc, ",
+  "plan_operators": [
+    "HashJoinExec",
+    "IntervalJoinExec",
+    "WindowAggExec"
+  ],
+  "scale": "chr21",
+  "seconds_cut_sites": 17.46,
+  "seconds_epoch": 0.08,
+  "seconds_loader": 16.81,
+  "seconds_pileup": 2.28,
+  "seconds_total": 36.63,
+  "sha256": "40e3e3b854591d9675ce5a6063226664f82828d564c628f245ce3f0b3fbde872",
+  "status": "ok",
+  "torch_threads": 64,
+  "total_counts": 1284112.0
+}

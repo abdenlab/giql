@@ -1,0 +1,18 @@
+{
+  "arm": "reference",
+  "bam2bw_command": "/home/bzurac/.cache/uv/environments-v2/pileup-bench-c02eb020516951ac/bin/bam2bw -s /home/bzurac/giql-bench/results/rasterize/_chr21.chrom.sizes -n /home/bzurac/giql-bench/results/rasterize/_chr21.ref -ps 4 -ns -4 -sf 1 -p -1 -u /home/bzurac/giql-bench/data/ENCFF512VEZ.bam /home/bzurac/giql-bench/data/ENCFF987XOV.bam",
+  "n_batches": 27,
+  "n_negatives_kept": 1388,
+  "n_peaks_kept": 1400,
+  "n_skipped_ragged": 1,
+  "peak_rss_mb": 905.4,
+  "pid": 1576791,
+  "scale": "chr21",
+  "seconds_epoch": 0.09,
+  "seconds_loader": 0.44,
+  "seconds_pileup": 67.32,
+  "seconds_total": 67.85,
+  "sha256": "40e3e3b854591d9675ce5a6063226664f82828d564c628f245ce3f0b3fbde872",
+  "status": "ok",
+  "torch_threads": 64
+}
