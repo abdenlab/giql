@@ -8,10 +8,10 @@ Wall-clock comparison of cherimoya's ATAC-seq pre-processing, from BAM to the te
 
 | scale | cut sites | standard pipeline | GIQL | speedup |
 |---|---|---|---|---|
-| chr21 | 1.28 M | 67.9 s | 28.9 s | 2.35x |
-| chr8 | 4.12 M | 72.1 s | 28.9 s | 2.50x |
-| chr1 | 12.09 M | 82.2 s | 36.5 s | 2.25x |
-| genome | 99.39 M | 182.2 s | 76.5 s | **2.38x** |
+| chr21 | 1.28 M | 67.6 s | 30.8 s | 2.19x |
+| chr8 | 4.12 M | 72.1 s | 32.7 s | 2.20x |
+| chr1 | 12.09 M | 82.9 s | 37.1 s | 2.24x |
+| genome | 99.39 M | 183.6 s | 76.5 s | **2.40x** |
 
 The GIQL path also writes nothing to disk. The standard path's pileup exists only as a bigWig on the way to being read back one locus at a time.
 
@@ -29,7 +29,9 @@ Only the first two stages differ. Sampling, augmentation and batching are the sa
 
 `atlas`, AMD EPYC 7763, 128 cores, 503 GB RAM, Linux 6.8, no GPU, bare metal at load average 0.2. Python 3.12.14, polars-bio 0.35.1, polars 1.44.2, datafusion 53.0.0, pyarrow 24.0.0, torch 2.14.0, tangermeme 1.4.1, giql 0.7+12e772d, cherimoya 0.2.1, bam2bw 0.5.1.
 
-Data is ENCODE [ENCSR483RKN](https://www.encodeproject.org/experiments/ENCSR483RKN/), K562 ATAC-seq: filtered alignments `ENCFF512VEZ` and `ENCFF987XOV` totalling 99.4 M cut sites, IDR peaks `ENCFF925CYR`, exclusion list `ENCFF356LFX`, UCSC hg38. Tn5 shift `+4 / -4`, unstranded, per `docs/recipes/atacseq.rst`. Each arm ran as its own subprocess under a 3600 s cap; none timed out. Whole ladder: 15 min 57 s.
+Data is ENCODE [ENCSR483RKN](https://www.encodeproject.org/experiments/ENCSR483RKN/), K562 ATAC-seq: filtered alignments `ENCFF512VEZ` and `ENCFF987XOV` totalling 99.4 M cut sites, IDR peaks `ENCFF925CYR`, exclusion list `ENCFF356LFX`, UCSC hg38. Tn5 shift `+4 / -4`, unstranded, per `docs/recipes/atacseq.rst`. Each arm ran as its own subprocess under a 3600 s cap; none timed out.
+
+**cherimoya is used unmodified.** The benchmark depends on upstream `jmschrei/cherimoya` and needs no patches to it. Swapping the loci extractor would normally require one, since `PeakGenerator` hard-codes tangermeme's, so `peak_generator` in the script reproduces its body against the same public pieces and takes the extractor as an argument. `PeakNegativeSampler` is reused unchanged, which is what keeps the two arms comparable, and the `wrapper` subcommand pins the equivalence: over the chr21 reference bigWig the wrapper and cherimoya's own `PeakGenerator` produce the same sha256 across all 27 batches.
 
 ```bash
 uv run benchmarks/rasterize/pileup_bench.py run --data DIR --explain
@@ -42,10 +44,10 @@ Timings mean nothing if the arms disagree, so each rung is gated before it is re
 
 | scale | digest | peaks kept | batches |
 |---|---|---|---|
-| chr21 | `40e3e3b85459` | 1 400 | 27 |
-| chr8 | `861d1aac1c0c` | 4 796 | 93 |
-| chr1 | `e897938b1e36` | 14 134 | 276 |
-| genome | `afa0f272f665` | 85 065 | 1 661 |
+| chr21 | `523b0d9ed24a` | 1 400 | 27 |
+| chr8 | `3c8f906063ee` | 4 796 | 93 |
+| chr1 | `184b1cb72d26` | 14 134 | 276 |
+| genome | `65c5cb2098ec` | 85 065 | 1 661 |
 
 ## Where the time goes
 
@@ -53,18 +55,18 @@ Genome scale, seconds. `cut sites` is the BAM scan and Tn5 transform; the standa
 
 | stage | standard | GIQL |
 |---|---|---|
-| cut sites | - | 19.1 |
-| pileup | 151.0 | 13.7 |
-| loader (both extractions) | 26.2 | 38.3 |
-| epoch through the sink | 5.0 | 5.4 |
-| **total** | **182.2** | **76.5** |
-| peak RSS | 7.1 GB | 18.8 GB |
+| cut sites | - | 18.8 |
+| pileup | 152.3 | 13.9 |
+| loader (both extractions) | 26.3 | 39.0 |
+| epoch through the sink | 5.0 | 4.9 |
+| **total** | **183.6** | **76.5** |
+| peak RSS | 6.8 GB | 18.3 GB |
 
-The win is concentrated entirely in one stage. BAM to pileup takes 151.0 s in the standard path against 32.8 s in GIQL, a 4.6-fold difference, and that single stage is more than the entire GIQL path.
+The win is concentrated entirely in one stage. BAM to pileup takes 152.3 s in the standard path against 32.7 s in GIQL, a 4.7-fold difference, and that single stage alone is more than the entire GIQL path.
 
-Two honest counterpoints. GIQL's locus extraction is **slower**, 38.3 s against 26.2 s, so the INTERSECTS join and the FASTA provider give back about a third of what the pileup gains; that is where the next optimization belongs, not in the pileup. And GIQL uses 2.6 times the memory, because it holds the pileup and the extracted tensors in RAM where the standard path streams a bigWig from disk.
+Two honest counterpoints. GIQL's locus extraction is **slower**, 39.0 s against 26.3 s, so the INTERSECTS join, the FASTA provider and per-window one-hot encoding give back about a third of what the pileup gains; that is where the next optimization belongs, not in the pileup. And GIQL uses 2.7 times the memory, because it holds the pileup and the extracted tensors in RAM where the standard path streams a bigWig from disk.
 
-A shared GC-matched negatives step, identical in both arms, runs once per rung and is charged to neither total: 28.9 s at genome scale.
+A shared GC-matched negatives step, identical in both arms, runs once per rung and is charged to neither total: 28.8 s at genome scale.
 
 ## The DISJOIN arm, and giql#246
 
@@ -72,11 +74,11 @@ Coverage is already expressible in GIQL, since `DISJOIN` plus `GROUP BY` reprodu
 
 | genome scale | pileup | total path |
 |---|---|---|
-| GIQL, hand-written aggregate | 13.7 s | 76.5 s |
-| GIQL, `DISJOIN` spelling | 264.9 s | 318.5 s |
-| standard pipeline | 151.0 s | 182.2 s |
+| GIQL, hand-written aggregate | 13.9 s | 76.5 s |
+| GIQL, `DISJOIN` spelling | 263.1 s | 318.0 s |
+| standard pipeline | 152.3 s | 183.6 s |
 
-Expressing the pileup with `DISJOIN` costs about 20-fold on that stage and 2.5 times the memory, which is enough to turn a 2.4x speedup into a 1.75x slowdown. `EXPLAIN` confirms polars-bio genuinely rewrites `DISJOIN`'s breakpoint join into `IntervalJoinExec`, so this is not a quadratic fallback but the cost of the surrounding CTE chain: a deduplicating `UNION` over twice the input, an interval join that finds nothing on point input, a `LEAD` window, and a three-key hash join back to the targets, standing in for one aggregate.
+Expressing the pileup with `DISJOIN` costs about 19-fold on that stage and 2.6 times the memory, which is enough to turn a 2.4x speedup into a 1.73x slowdown. `EXPLAIN` confirms polars-bio genuinely rewrites `DISJOIN`'s breakpoint join into `IntervalJoinExec`, so this is not a quadratic fallback but the cost of the surrounding CTE chain: a deduplicating `UNION` over twice the input, an interval join that finds nothing on point input, a `LEAD` window, and a three-key hash join back to the targets, standing in for one aggregate.
 
 Plan comparison on identical input, 99.4 M intervals:
 
