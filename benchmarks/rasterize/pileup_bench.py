@@ -13,9 +13,14 @@
 #   "pybigtools",
 #   "bam2bw",
 #   "giql @ git+https://github.com/abdenlab/giql@cherimoya-mvp",
-#   "cherimoya @ git+https://github.com/conradbzura/cherimoya@giql-datafusion-pipeline",
+#   "cherimoya @ git+https://github.com/jmschrei/cherimoya@main",
 # ]
 # ///
+#
+# cherimoya is used UNMODIFIED. The GIQL extractor lives in the sibling
+# `giql_io.py`, and `peak_generator` below reuses cherimoya's sampler rather
+# than requiring an injection point in `PeakGenerator`, so nothing upstream
+# has to change for this benchmark to run.
 
 """Benchmark a DISJOIN-expressed pileup against cherimoya's standard pre-GPU path.
 
@@ -519,6 +524,117 @@ def build_bigwig(args, scale, record):
 ###
 
 
+def peak_generator(
+    peaks,
+    negatives,
+    sequences,
+    signals,
+    extractor,
+    chroms=None,
+    in_window=2114,
+    out_window=1000,
+    max_jitter=500,
+    negative_ratio=0.25,
+    reverse_complement=True,
+    shuffle=True,
+    summits=False,
+    exclusion_lists=None,
+    random_state=None,
+    signal_groups=None,
+    batch_size=64,
+    num_workers=0,
+    pin_memory=False,
+    verbose=False,
+):
+    """A drop-in `cherimoya.io.PeakGenerator` that takes the extractor as an argument.
+
+    Upstream `PeakGenerator` hard-codes `tangermeme.io.extract_loci`, so
+    swapping the loci loader would mean patching cherimoya. This reproduces its
+    body against the same public pieces -- `PeakNegativeSampler` and
+    `channel_permutation_from_groups` -- and takes `extractor` explicitly, so
+    the benchmark runs against unmodified upstream.
+
+    Deliberately *not* reimplemented: `PeakNegativeSampler` itself. All the
+    subtlety lives there (deterministic draws from `(seed, epoch, idx)`, epoch
+    detection by index wrap-around, jitter as a slice offset, reverse-complement
+    augmentation with per-group channel permutation), and both arms of this
+    benchmark share it unchanged. That is what makes comparing their tensors
+    meaningful; reimplementing it would turn an engine comparison into a
+    comparison of two whole pipelines.
+
+    Simplifications valid for this benchmark only: control tracks are not
+    supported (the GIQL engine raises on them and the ATAC recipe has none),
+    and `signals` is a flat list of channels rather than cherimoya's nested
+    group spec, since every arm here uses one unstranded channel.
+    """
+
+    import torch
+    from cherimoya.io import PeakNegativeSampler
+    from cherimoya.io import channel_permutation_from_groups
+
+    groups = list(signal_groups) if signal_groups else [1] * len(signals)
+    if sum(groups) != len(signals):
+        raise ValueError(
+            "signal_groups sum ({}) does not match channel count ({})".format(
+                sum(groups), len(signals)
+            )
+        )
+    signal_perm = channel_permutation_from_groups(groups) if groups else None
+
+    common = dict(
+        sequences=sequences,
+        signals=signals,
+        in_signals=None,
+        chroms=chroms,
+        in_window=in_window,
+        out_window=out_window,
+        min_counts=None,
+        max_counts=None,
+        exclusion_lists=exclusion_lists,
+        ignore=IGNORE,
+        return_mask=True,
+        verbose=verbose,
+    )
+    X_peaks = extractor(loci=peaks, max_jitter=max_jitter, summits=summits, **common)
+
+    # Per-group outlier filter, transcribed from PeakGenerator: drop a locus
+    # whose summed counts exceed 1.2x the 99th percentile in *any* group.
+    peak_signals = X_peaks[1]
+    outlier_idxs = torch.zeros(peak_signals.shape[0], dtype=torch.bool)
+    offset = 0
+    for g in groups if groups else [peak_signals.shape[1]]:
+        group_counts = peak_signals[:, offset : offset + g].sum(dim=(1, 2))
+        outlier_idxs |= group_counts > torch.quantile(group_counts, 0.99) * 1.2
+        offset += g
+
+    X_bg = extractor(loci=negatives, max_jitter=0, summits=False, **common)
+
+    sampler = PeakNegativeSampler(
+        peak_sequences=X_peaks[0][~outlier_idxs],
+        peak_signals=X_peaks[1][~outlier_idxs],
+        peak_controls=None,
+        negative_sequences=X_bg[0],
+        negative_signals=X_bg[1],
+        negative_controls=None,
+        negative_ratio=negative_ratio,
+        in_window=in_window,
+        out_window=out_window,
+        max_jitter=max_jitter,
+        reverse_complement=reverse_complement,
+        shuffle=shuffle,
+        random_state=random_state,
+        signal_perm=signal_perm,
+        control_perm=None,
+    )
+    return torch.utils.data.DataLoader(
+        sampler,
+        pin_memory=pin_memory,
+        num_workers=num_workers,
+        batch_size=batch_size,
+        persistent_workers=num_workers > 0,
+    )
+
+
 def sink_unpack(data, batch_size, device="cpu"):
     """What `Cherimoya.fit` does to a batch before the forward pass.
 
@@ -538,21 +654,24 @@ def run_arm(args, scale, arm):
     """Run one arm of one rung, from BAM to the GPU-ingestion boundary."""
 
     import torch
-    from cherimoya.io import PeakGenerator
 
     paths = scale_paths(args, scale)
     record = {"scale": scale, "arm": arm, "pid": os.getpid()}
 
     if arm == "reference":
-        signals, extractor = [build_bigwig(args, scale, record)], None
+        from tangermeme.io import extract_loci
+
+        signals, extractor = [build_bigwig(args, scale, record)], extract_loci
     else:
-        from cherimoya import giql_io
+        import giql_io
 
         signals = [build_pileup(args, scale, arm, record)]
         extractor = giql_io.extract_loci
 
+    # Both arms go through the same wrapper and therefore the same sampler;
+    # only `extractor` and the signal channel differ.
     t = time.time()
-    loader = PeakGenerator(
+    loader = peak_generator(
         peaks=paths["peaks"],
         negatives=paths["negatives"],
         sequences=args.fasta,
@@ -572,6 +691,7 @@ def run_arm(args, scale, arm):
         verbose=False,
         signal_groups=[1],
         extractor=extractor,
+        shuffle=True,
     )
     record["seconds_loader"] = round(time.time() - t, 2)
     record["n_peaks_kept"] = int(loader.dataset.peak_sequences.shape[0])
@@ -786,6 +906,86 @@ def _fmt(record, key):
     return "-" if value is None else "{:.1f}".format(value)
 
 
+def cmd_wrapper(args):
+    """Prove `peak_generator` is a faithful drop-in for cherimoya's own.
+
+    The whole benchmark rests on both arms sharing a sampler, so the wrapper
+    that lets an extractor be injected has to be indistinguishable from the
+    class it stands in for. Runs both over the reference arm's bigWig and
+    compares the digest over every batch.
+    """
+
+    import hashlib
+
+    from cherimoya.io import PeakGenerator
+    from tangermeme.io import extract_loci
+
+    args = resolve(args)
+    scale = args.scales[0]
+    paths = scale_paths(args, scale)
+    if not os.path.exists(paths["bigwig"]):
+        print("run the reference arm at {} first".format(scale))
+        return 1
+
+    kwargs = dict(
+        peaks=paths["peaks"],
+        negatives=paths["negatives"],
+        sequences=args.fasta,
+        signals=[paths["bigwig"]],
+        chroms=training_chroms_for(scale),
+        in_window=args.in_window,
+        out_window=args.out_window,
+        max_jitter=args.max_jitter,
+        negative_ratio=args.negative_ratio,
+        reverse_complement=True,
+        summits=False,
+        exclusion_lists=[args.exclusion],
+        random_state=args.random_state,
+        batch_size=args.batch_size,
+        num_workers=0,
+        pin_memory=False,
+        verbose=False,
+        signal_groups=[1],
+    )
+
+    def digest(loader):
+        h, n = hashlib.sha256(), 0
+        for data in loader:
+            unpacked = sink_unpack(data, args.batch_size)
+            if unpacked is None:
+                continue
+            X, _, y, labels = unpacked
+            for tensor in (X, y, labels):
+                h.update(tensor.numpy().tobytes())
+            n += 1
+        return h.hexdigest(), n
+
+    ours = digest(peak_generator(extractor=extract_loci, shuffle=True, **kwargs))
+    theirs = digest(PeakGenerator(**kwargs))
+    agree = ours == theirs
+    print(
+        "cherimoya PeakGenerator : {} over {} batches".format(theirs[0][:16], theirs[1])
+    )
+    print("our peak_generator      : {} over {} batches".format(ours[0][:16], ours[1]))
+    print("drop-in equivalent      : {}".format(agree))
+    out = os.path.join(args.results, "{}_wrapper.json".format(scale))
+    with open(out, "w") as f:
+        json.dump(
+            {
+                "pass": agree,
+                "scale": scale,
+                "cherimoya_sha256": theirs[0],
+                "wrapper_sha256": ours[0],
+                "n_batches": ours[1],
+            },
+            f,
+            indent=2,
+            sort_keys=True,
+        )
+    print("wrote {}".format(out))
+    return 0 if agree else 1
+
+
 def cmd_report(args):
     args = resolve(args)
     records = load_results(args)
@@ -854,6 +1054,11 @@ def main(argv=None):
     for name, fn, helptext in (
         ("report", cmd_report, "Render timings from existing results."),
         ("gate", cmd_gate, "Check every arm of a rung agrees bit for bit."),
+        (
+            "wrapper",
+            cmd_wrapper,
+            "Check peak_generator matches cherimoya's PeakGenerator.",
+        ),
     ):
         p = sub.add_parser(name, help=helptext)
         add_common_args(p)
